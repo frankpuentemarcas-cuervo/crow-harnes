@@ -18,6 +18,7 @@ export function App(): React.JSX.Element {
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
   const [sessions, setSessions] = useState<Record<string, SessionInfo[]>>({})
   const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetrics>>({})
+  const [hostMetricErrors, setHostMetricErrors] = useState<Record<string, boolean>>({})
   const [hookSettings, setHookSettings] = useState<Record<string, boolean>>({})
   const [clockNow, setClockNow] = useState(Date.now())
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
@@ -131,10 +132,15 @@ export function App(): React.JSX.Element {
     let live = true
     const refresh = async (): Promise<void> => {
       const values = await Promise.all(connected.map(async (host) => {
-        try { return [host.id, await window.crow.hostMetrics(host.id)] as const }
-        catch { return null }
+        try { return { id: host.id, sample: await window.crow.hostMetrics(host.id), outdated: false } }
+        catch (reason) { return { id: host.id, sample: null, outdated: String(reason).includes('crowd de Linux está desactualizado') } }
       }))
-      if (live) setHostMetrics((current) => ({ ...current, ...Object.fromEntries(values.filter((value) => value !== null)) }))
+      if (live) {
+        const samples: Record<string, HostMetrics> = {}
+        for (const value of values) if (value.sample) samples[value.id] = value.sample
+        setHostMetrics((current) => ({ ...current, ...samples }))
+        setHostMetricErrors((current) => ({ ...current, ...Object.fromEntries(values.map((value) => [value.id, value.outdated])) }))
+      }
     }
     void refresh()
     const timer = setInterval(() => void refresh(), 10_000)
@@ -291,6 +297,7 @@ export function App(): React.JSX.Element {
       <header className="topbar">
         <div className="breadcrumb"><span>{selectedHost?.name || 'Sin host'}</span><ChevronRight size={14} /><strong>{selectedProject?.name || 'Seleccioná un proyecto'}</strong><span className={`connection-pill ${status}`}>{status === 'connected' ? 'Conectado' : status === 'connecting' ? 'Reconectando' : status === 'auth-required' ? 'Frase requerida' : 'Desconectado'}</span></div>
         <div className="host-metrics" aria-label="Recursos de los servidores">{state.hosts.map((host) => {
+          if (statuses[host.id] === 'connected' && hostMetricErrors[host.id]) return <div key={host.id} className="host-metric" title={`El servicio crowd de ${host.name} está desactualizado. Actualizalo y reinicialo en Linux para ver métricas y eliminar terminales.`}><span className="host-metric-name">{host.name}</span><span className="metric-outdated">Actualizar crowd Linux</span></div>
           const sample = statuses[host.id] === 'connected' ? hostMetrics[host.id] : undefined
           return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria, disco raíz y terminales suspendidas. La RAM suspendida es consumo estimado, no memoria liberada.`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span><span className="sleeping-metric" role="status" aria-atomic="true">Suspendidas {sample?.sleepingSessions ?? '—'} · RAM ≈{sample ? memory(sample.sleepingMemory || 0) : '—'}</span></div>
         })}</div>

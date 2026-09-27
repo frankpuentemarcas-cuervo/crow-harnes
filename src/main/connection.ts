@@ -6,6 +6,7 @@ import type { ConnectionStatus, Host, Notice, RemoteEvent, TerminalFrame } from 
 import { Store } from './store'
 import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './encrypted-ssh'
 import { PassphraseVault } from './passphrase-vault'
+import { remoteApiError } from './remote-errors'
 
 const execFileAsync = promisify(execFile)
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -194,7 +195,7 @@ export class Connection {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30000)
     })
-    if (!response.ok) throw new Error((await response.text()).trim() || `Error ${response.status}`)
+    if (!response.ok) throw remoteApiError(response.status, await response.text(), method, path)
     return response.json() as Promise<T>
   }
 

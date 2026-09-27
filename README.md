@@ -52,6 +52,17 @@ Para que el servicio siga activo tras cerrar la sesión SSH, habilitá *linger* 
 
 Cuando cambie el código de `remote/`, también hay que volver a compilar y reiniciar `crowd` en cada host. Hacelo cuando no haya agentes trabajando: reiniciar el servicio puede terminar los procesos que contiene.
 
+**Importante:** instalar o actualizar el `.exe` de Windows **no actualiza** `crowd` en Linux. Si eliminar una terminal devuelve `404 page not found` y CPU/RAM/DISCO siguen en `—`, probablemente estás ejecutando un `crowd` anterior. En el servidor, actualizá primero el código fuente de este repositorio y luego, desde su carpeta `remote/`, ejecutá:
+
+```sh
+go build -o "$HOME/.local/bin/crowd.new" ./cmd/crowd
+mv "$HOME/.local/bin/crowd.new" "$HOME/.local/bin/crowd"
+systemctl --user restart crowd.service
+systemctl --user status crowd.service --no-pager
+```
+
+Reiniciá el servicio **solo cuando no haya agentes trabajando**: los procesos que mantiene el daemon pueden interrumpirse. Después reconectá el host desde Crow Harness. La nueva app mostrará «Actualizar crowd Linux» en la cabecera si detecta el `404` de las rutas nuevas.
+
 ### 2. Cliente Windows
 
 Necesitás Node.js y OpenSSH (`ssh.exe`). Verificá primero que `ssh usuario@servidor` funciona y que la clave del host está en `known_hosts`. Con una llave SSH cifrada, la nueva versión del código muestra un diálogo para su frase; la guarda cifrada mediante DPAPI y la invalida al reiniciar Windows. Las llaves sin cifrar y los hosts que usan `ssh-agent` siguen usando OpenSSH. Una llave cifrada con `ProxyJump`/`ProxyCommand` todavía requiere `ssh-agent`.
