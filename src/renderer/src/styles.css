@@ -164,7 +164,9 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .terminal-pane, .editor-pane, .browser-pane { height: 100%; width: 100%; min-height: 0; display: flex; flex-direction: column; }
 .pane-meta { height: 31px; min-height: 31px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid #282d35; padding: 0 12px; color: #9da7b5; font-size: 10px; }
 .pane-meta .session-state { width: 6px; height: 6px; }
-.pane-meta-right { margin-left: auto; color: #8e99a6; }
+.pane-meta-right { margin-left: auto; color: #8e99a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-clipboard-button { flex: none; border: 1px solid #3a4350; border-radius: 4px; padding: 3px 7px; background: #222831; color: #d7e0eb; font-size: 10px; }
+.terminal-clipboard-button:focus-visible { outline: 2px solid #a9c3e9; outline-offset: 2px; }
 .meta-separator { color: #606a76; }
 .terminal-surface { flex: 1; min-height: 0; padding: 11px 12px; overflow: hidden; }
 .terminal-surface .xterm { height: 100%; }

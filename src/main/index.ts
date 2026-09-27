@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, Notification } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { Connection } from './connection'
@@ -78,6 +78,11 @@ function registerIPC(): void {
     })
   }
 
+  handle('crow:clipboard-read', () => clipboard.readText())
+  handle('crow:clipboard-write', (text: string) => {
+    if (typeof text !== 'string') throw new Error('Texto de portapapeles inválido.')
+    clipboard.writeText(text)
+  })
   handle('crow:get-state', () => store.snapshot())
   handle('crow:update-state', () => updateState)
   handle('crow:check-updates', async () => {

@@ -17,6 +17,7 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Proyectos | Carpetas absolutas del host, sin exigir Git. |
 | Agentes | Shell, Claude Code, Codex y Antigravity CLI (`agy`), con modo normal o bypass explícito. |
 | Sesiones | El servicio remoto posee los PTY; cerrar la app o perder SSH no mata los agentes. La salida tiene secuencias y log durable. El código actual permite eliminar una terminal y terminar sus procesos remotos, por separado de cerrar su vista. Tras 30 minutos sin entrada/salida y con trabajo completado, suspende sesiones aptas con SIGSTOP y permite reanudar el mismo proceso con SIGCONT. |
+| Portapapeles | Las terminales de Windows permiten copiar texto seleccionado y pegar desde el portapapeles mediante botones o atajos. `Ctrl+C` copia cuando hay selección y, sin selección, sigue enviando la interrupción al proceso remoto. |
 | Archivos | Explorador, Monaco, previsualización de imágenes/PDF y escritura con detección de conflicto por hash. |
 | Navegador | Chromium ejecutado **en el host**; el cliente muestra capturas JPEG e intercambia entrada básica. |
 | Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; la app reproduce un tono propio al recibir una alerta reciente. En Notificaciones se puede usar **Probar sonido** para distinguir un problema de audio de uno de hooks/eventos. |
@@ -73,6 +74,8 @@ npm run dev
 ```
 
 En Crow Harness, agregá el destino SSH, conectá el host y registrá una carpeta existente, por ejemplo `/home/usuario/proyecto`. Las carpetas se introducen como rutas **del servidor**, no de Windows.
+
+En una terminal de Windows, seleccioná texto y usá **Copiar**, `Ctrl+C` o `Ctrl+Shift+C`. Para pegar un comando o mensaje, usá **Pegar**, `Ctrl+V`, `Ctrl+Shift+V` o `Shift+Insert`. Pegar no agrega Enter, pero **los saltos de línea que ya estén en el texto pueden ejecutar comandos** según la shell o agente. Sin selección, `Ctrl+C` conserva su función de interrumpir el proceso remoto.
 
 ### Continuar desde el celular en la red local
 

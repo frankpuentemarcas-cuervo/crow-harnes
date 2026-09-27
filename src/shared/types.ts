@@ -113,6 +113,8 @@ export interface SavedState {
 }
 
 export interface CrowAPI {
+  clipboardReadText(): Promise<string>
+  clipboardWriteText(text: string): Promise<void>
   hostMetrics(hostId: string): Promise<HostMetrics>
   mobileAddresses(): Promise<string[]>
   mobileStatus(): Promise<MobileStatus>

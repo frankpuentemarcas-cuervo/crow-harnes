@@ -7,6 +7,8 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  clipboardReadText: () => ipcRenderer.invoke('crow:clipboard-read'),
+  clipboardWriteText: (text: string) => ipcRenderer.invoke('crow:clipboard-write', text),
   hostMetrics: (hostId: string) => ipcRenderer.invoke('crow:host-metrics', hostId),
   mobileAddresses: () => ipcRenderer.invoke('crow:mobile-addresses'),
   mobileStatus: () => ipcRenderer.invoke('crow:mobile-status'),
