@@ -1,6 +1,6 @@
 {
   "name": "crow-harness",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "A focused Windows workspace for persistent remote coding agents",
   "repository": {
@@ -13,7 +13,7 @@
     "preview": "electron-vite preview",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "package:win": "electron-vite build && electron-builder --win nsis --x64"
+    "package:win": "electron-vite build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
