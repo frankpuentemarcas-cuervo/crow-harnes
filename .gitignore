@@ -1,0 +1,11 @@
+node_modules/
+out/
+dist/
+*.log
+remote/crowd
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.ppk

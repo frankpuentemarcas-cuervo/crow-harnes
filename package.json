@@ -1,0 +1,73 @@
+{
+  "name": "crow-harness",
+  "version": "0.1.2",
+  "private": true,
+  "description": "A focused Windows workspace for persistent remote coding agents",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frankpuentemarcas-cuervo/crow-harnes.git"
+  },
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "preview": "electron-vite preview",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "package:win": "electron-vite build && electron-builder --win nsis --x64",
+    "release:win": "electron-vite build && electron-builder --win nsis --x64 --publish always"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron-updater": "^6.8.9",
+    "lucide-react": "^1.48.0",
+    "monaco-editor": "^0.55.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "ssh2": "^1.17.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ssh2": "^1.15.6",
+    "@types/ws": "^8.18.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  },
+  "build": {
+    "appId": "dev.crow.harness",
+    "productName": "Crow Harness",
+    "publish": {
+      "provider": "github",
+      "owner": "frankpuentemarcas-cuervo",
+      "repo": "crow-harnes",
+      "releaseType": "release"
+    },
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/cpu-features/**",
+      "!**/ssh2/lib/protocol/crypto/build/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "artifactName": "Crow-Harness-Setup-${version}-${arch}.${ext}",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Crow Harness"
+    }
+  }
+}

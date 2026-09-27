@@ -1,0 +1,13 @@
+[Unit]
+Description=Crow Harness remote runtime
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'exec "$HOME/.local/bin/crowd"'
+Restart=on-failure
+RestartSec=3
+Environment=CROW_PORT=47321
+
+[Install]
+WantedBy=default.target
