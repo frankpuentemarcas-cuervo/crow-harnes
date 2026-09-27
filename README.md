@@ -16,7 +16,7 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Telemetría | En el código actual, la cabecera muestra CPU, RAM y uso del disco raíz por host conectado; requiere actualizar también el servicio Linux. |
 | Proyectos | Carpetas absolutas del host, sin exigir Git. |
 | Agentes | Shell, Claude Code, Codex y Antigravity CLI (`agy`), con modo normal o bypass explícito. |
-| Sesiones | El servicio remoto posee los PTY; cerrar la app o perder SSH no mata los agentes. La salida tiene secuencias y log durable. |
+| Sesiones | El servicio remoto posee los PTY; cerrar la app o perder SSH no mata los agentes. La salida tiene secuencias y log durable. El código actual permite eliminar una terminal y terminar sus procesos remotos, por separado de cerrar su vista. |
 | Archivos | Explorador, Monaco, previsualización de imágenes/PDF y escritura con detección de conflicto por hash. |
 | Navegador | Chromium ejecutado **en el host**; el cliente muestra capturas JPEG e intercambia entrada básica. |
 | Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; el código actual agrega un sonido al recibir un fin de turno reciente. |
@@ -76,6 +76,8 @@ El runtime remoto conserva el proceso, su sesión y la salida. Cada bloque de te
 - El puerto del runtime no se publica: se accede por SSH y requiere token. El usuario SSH mantiene sus permisos normales sobre los archivos del host.
 - El navegador remoto es una primera vista interactiva basada en capturas; aún no ofrece vídeo fluido, cargas/descargas, popups ni DevTools. Cada proyecto usa un perfil Chromium remoto.
 - La alerta de fin de **turno** está integrada para Claude Code y Codex. Antigravity avisa al salir el proceso; falta una señal estable de fin de turno para su CLI.
+- Eliminar una terminal intenta terminar su grupo de procesos y los descendientes que conservan `CROW_SESSION_ID`, borra el log remoto y quita la sesión y las notificaciones locales. Un proceso que se desacople y además limpie esa variable podría escapar: no se puede garantizar limpieza de procesos arbitrarios sin aislamiento por cgroup.
+- Cerrar una pestaña solo desconecta la vista; todavía no hay suspensión automática por inactividad, temporizador de caché, configuración de hooks de estado ni acceso móvil por LAN.
 - Los logs de terminal aún no tienen rotación; evitá sesiones indefinidas con salida masiva hasta agregar cuotas.
 - La interfaz sigue la estructura de Orca, pero falta cotejarla con capturas de referencia para afirmar paridad visual exacta.
 

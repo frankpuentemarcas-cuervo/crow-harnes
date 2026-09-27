@@ -21,18 +21,18 @@ import (
 )
 
 type App struct {
-	mu       sync.RWMutex
-	saveMu   sync.Mutex
-	fileMu   sync.Mutex
+	mu        sync.RWMutex
+	saveMu    sync.Mutex
+	fileMu    sync.Mutex
 	metricsMu sync.Mutex
 	lastCPU   cpuSample
-	dir      string
-	port     string
-	token    string
-	hookPath string
-	sessions map[string]*session
-	events   []Event
-	browsers map[string]*browser
+	dir       string
+	port      string
+	token     string
+	hookPath  string
+	sessions  map[string]*session
+	events    []Event
+	browsers  map[string]*browser
 }
 
 func randomID() (string, error) {
@@ -91,6 +91,7 @@ func Run() error {
 	mux.HandleFunc("GET /api/host/metrics", a.handleMetrics)
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
+	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
@@ -159,6 +160,23 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusCreated, info)
+}
+
+func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeID(id) {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+	if err := a.deleteSession(id); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "session not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 var upgrader = websocket.Upgrader{ReadBufferSize: 16 * 1024, WriteBufferSize: 16 * 1024}

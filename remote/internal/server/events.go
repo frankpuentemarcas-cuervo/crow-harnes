@@ -76,7 +76,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		a.mu.RLock()
 		items := make([]Event, 0)
 		for _, event := range a.events {
-			if event.Seq > after {
+			if event.Seq > after && a.sessions[event.SessionID] != nil {
 				items = append(items, event)
 			}
 		}
@@ -91,8 +91,16 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if !requestJSON(w, r, &body) {
 		return
 	}
-	if a.session(body.SessionID) == nil || body.Kind != "turn-complete" {
+	s := a.session(body.SessionID)
+	if s == nil || body.Kind != "turn-complete" {
 		http.Error(w, "invalid event", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	deleting := s.deleting
+	s.mu.Unlock()
+	if deleting {
+		http.Error(w, "session is being deleted", http.StatusConflict)
 		return
 	}
 	a.addEvent(body.SessionID, body.Kind)

@@ -82,6 +82,19 @@ export class Store {
     return this.snapshot()
   }
 
+  removeSession(hostId: string, sessionId: string): SavedState {
+    const projects = new Set(this.state.projects.filter((project) => project.hostId === hostId).map((project) => project.id))
+    this.state.tabs = this.state.tabs.filter((tab) => !(projects.has(tab.projectId) && tab.sessionId === sessionId))
+    this.state.notices = this.state.notices.filter((notice) => !(notice.hostId === hostId && notice.sessionId === sessionId))
+    for (const [projectId, activeId] of Object.entries(this.state.activeTabs)) {
+      if (projects.has(projectId) && !this.state.tabs.some((tab) => tab.id === activeId)) {
+        this.state.activeTabs[projectId] = this.state.tabs.find((tab) => tab.projectId === projectId)?.id || ''
+      }
+    }
+    this.write()
+    return this.snapshot()
+  }
+
   eventCursor(hostId: string): number {
     return this.state.eventCursors[hostId] || 0
   }

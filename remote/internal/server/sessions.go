@@ -17,11 +17,14 @@ import (
 )
 
 type session struct {
-	mu   sync.Mutex
-	info SessionInfo
-	pty  *os.File
-	log  *os.File
-	subs map[chan Frame]struct{}
+	mu       sync.Mutex
+	info     SessionInfo
+	pty      *os.File
+	log      *os.File
+	cmd      *exec.Cmd
+	done     chan struct{}
+	deleting bool
+	subs     map[chan Frame]struct{}
 }
 
 func (s *session) snapshot() SessionInfo {
@@ -248,7 +251,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	now := time.Now().UTC()
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, subs: make(map[chan Frame]struct{})}
+	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -268,6 +271,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 		}
 	}()
 	go func() {
+		defer close(s.done)
 		err := cmd.Wait()
 		<-readDone
 		code := 0
@@ -284,16 +288,75 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 		s.info.ExitCode = &code
 		s.info.UpdatedAt = time.Now().UTC()
 		info := s.info
-		s.broadcast(Frame{Type: "state", Info: &info})
+		deleting := s.deleting
+		if !deleting {
+			s.broadcast(Frame{Type: "state", Info: &info})
+		}
+		s.pty = nil
+		s.log = nil
+		s.cmd = nil
 		s.mu.Unlock()
 		_ = terminal.Close()
 		_ = logFile.Close()
-		_ = a.saveSessions()
-		if agent != "shell" {
+		if !deleting {
+			_ = a.saveSessions()
+		}
+		if !deleting && agent != "shell" {
 			a.addEvent(id, "process-exited")
 		}
 	}()
 	return s.snapshot(), nil
+}
+
+func (a *App) deleteSession(id string) error {
+	s := a.session(id)
+	if s == nil {
+		return os.ErrNotExist
+	}
+	s.mu.Lock()
+	if s.deleting {
+		s.mu.Unlock()
+		return errors.New("session deletion already in progress")
+	}
+	s.deleting = true
+	pid := 0
+	if s.cmd != nil && s.cmd.Process != nil && s.info.State == "running" {
+		pid = s.cmd.Process.Pid
+	}
+	done := s.done
+	s.mu.Unlock()
+	if err := terminateSessionProcess(pid, id, done); err != nil {
+		s.mu.Lock()
+		s.deleting = false
+		s.mu.Unlock()
+		return err
+	}
+	logPath := filepath.Join(a.dir, "terminal-"+id+".jsonl")
+	if err := os.Remove(logPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.mu.Lock()
+		s.deleting = false
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Lock()
+	for ch := range s.subs {
+		delete(s.subs, ch)
+		close(ch)
+	}
+	s.mu.Unlock()
+	a.mu.Lock()
+	delete(a.sessions, id)
+	a.mu.Unlock()
+	if err := a.saveSessions(); err != nil {
+		a.mu.Lock()
+		a.sessions[id] = s
+		a.mu.Unlock()
+		s.mu.Lock()
+		s.deleting = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (s *session) write(data []byte) error {

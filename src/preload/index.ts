@@ -43,6 +43,7 @@ const api: CrowAPI = {
   markNoticeRead: (id: string) => ipcRenderer.invoke('crow:notice-read', id),
   sessions: (hostId: string) => ipcRenderer.invoke('crow:sessions', hostId),
   startSession: (hostId: string, projectId: string, agent: Agent, mode: Mode) => ipcRenderer.invoke('crow:start-session', hostId, projectId, agent, mode),
+  deleteSession: (hostId: string, sessionId: string) => ipcRenderer.invoke('crow:delete-session', hostId, sessionId),
   attach: async (hostId: string, sessionId: string, from: number, listener: (frame: TerminalFrame) => void) => {
     const id = crypto.randomUUID()
     terminalListeners.set(id, listener)

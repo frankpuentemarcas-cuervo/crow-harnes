@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bell, ChevronDown, ChevronRight, CirclePlus, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, TerminalSquare, X } from 'lucide-react'
+import { Bell, ChevronDown, ChevronRight, CirclePlus, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, TerminalSquare, Trash2, X } from 'lucide-react'
 import type { Agent, ConnectionStatus, Host, HostMetrics, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
@@ -153,6 +153,19 @@ export function App(): React.JSX.Element {
     } catch (reason) { setError(String(reason)) }
   }
 
+  async function deleteSession(hostId: string, session: SessionInfo): Promise<void> {
+    if (!window.confirm(`¿Eliminar definitivamente la terminal ${labelFor(session.agent)} ${session.id.slice(0, 8)}? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`)) return
+    setError('')
+    try {
+      await window.crow.saveWorkspace(tabs, activeTabs, selectedProjectId)
+      const saved = await window.crow.deleteSession(hostId, session.id)
+      setState(saved)
+      setTabs(saved.tabs)
+      setActiveTabs(saved.activeTabs)
+      setSessions((current) => ({ ...current, [hostId]: (current[hostId] || []).filter((item) => item.id !== session.id) }))
+    } catch (reason) { setError(String(reason)) }
+  }
+
   async function saveHost(input: Omit<Host, 'id'> & { id?: string }): Promise<void> {
     try {
       const saved = await window.crow.saveHost(input)
@@ -211,9 +224,12 @@ export function App(): React.JSX.Element {
               {selectedProjectId === project.id ? <FolderOpen size={16} /> : <Folder size={16} />}
               <span>{project.name}</span><ChevronRight size={13} className="project-chevron" />
             </button>
-            {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <button key={session.id} className="session-row" onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
-              <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
-            </button>)}
+            {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <div key={session.id} className="session-entry">
+              <button className="session-row" title="Abrir vista de terminal" onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
+                <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
+              </button>
+              <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
+            </div>)}
           </div>)}
           <button className="sidebar-add-project" onClick={() => { setEditingProject(undefined); setProjectHostId(host.id); setDialog('project') }}><Plus size={13} /> Agregar proyecto</button>
         </div>)}
@@ -261,7 +277,7 @@ export function App(): React.JSX.Element {
             <div className="tab-bar" role="tablist" aria-label="Pestañas del proyecto">
               {projectTabs.map((tab) => <div key={tab.id} className={`tab ${activeTab?.id === tab.id ? 'active' : ''}`} role="tab" aria-selected={activeTab?.id === tab.id}>
                 <button className="tab-select" onClick={() => setActiveTabs((current) => ({ ...current, [selectedProject.id]: tab.id }))}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{tab.kind === 'terminal' ? labelFor(sessionsByProject[selectedProject.id]?.find((session) => session.id === tab.sessionId)?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)}</span></button>
-                <button className="tab-close" aria-label="Cerrar pestaña" onClick={() => closeTab(tab.id)}><X size={13} /></button>
+                <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => closeTab(tab.id)}><X size={13} /></button>
               </div>)}
             </div>
             <div className="pane-body">

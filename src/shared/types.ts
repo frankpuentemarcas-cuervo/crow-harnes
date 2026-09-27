@@ -119,6 +119,7 @@ export interface CrowAPI {
   markNoticeRead(id: string): Promise<SavedState>
   sessions(hostId: string): Promise<SessionInfo[]>
   startSession(hostId: string, projectId: string, agent: Agent, mode: Mode): Promise<SessionInfo>
+  deleteSession(hostId: string, sessionId: string): Promise<SavedState>
   attach(hostId: string, sessionId: string, from: number, listener: (frame: TerminalFrame) => void): Promise<string>
   detach(subscriptionId: string): Promise<void>
   terminalInput(subscriptionId: string, data: string): Promise<void>

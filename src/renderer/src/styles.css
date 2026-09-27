@@ -50,6 +50,11 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .project-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-chevron { opacity: .5; }
 .session-row { height: 28px; gap: 8px; padding: 0 11px 0 52px; font-size: 11px; color: #9ca5b0; border-radius: 5px; }
+.session-entry { display: flex; align-items: center; }
+.session-entry .session-row { min-width: 0; flex: 1; padding-right: 4px; }
+.session-delete { flex: none; width: 25px; height: 25px; margin-right: 5px; border: 0; border-radius: 5px; background: transparent; color: #aab1ba; opacity: 0; cursor: pointer; }
+.session-entry:hover .session-delete, .session-delete:focus-visible { opacity: 1; }
+.session-delete:hover { color: #efb6b2; background: #442b2e; }
 .session-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #76b686; flex: none; }
 .session-state.exited { background: #8b929d; }
 .session-state.interrupted { background: #d99a65; }
