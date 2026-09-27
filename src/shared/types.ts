@@ -18,6 +18,15 @@ export interface Host {
   remotePort: number
 }
 
+export interface HostMetrics {
+  cpuPercent: number | null
+  memoryUsed: number
+  memoryTotal: number
+  diskUsed: number
+  diskTotal: number
+  at: string
+}
+
 export interface Project {
   id: string
   hostId: string
@@ -90,6 +99,7 @@ export interface SavedState {
 }
 
 export interface CrowAPI {
+  hostMetrics(hostId: string): Promise<HostMetrics>
   getUpdateState(): Promise<UpdateState>
   checkForUpdates(): Promise<void>
   installUpdate(): Promise<void>

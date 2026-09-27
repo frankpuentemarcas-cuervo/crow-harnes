@@ -24,6 +24,8 @@ type App struct {
 	mu       sync.RWMutex
 	saveMu   sync.Mutex
 	fileMu   sync.Mutex
+	metricsMu sync.Mutex
+	lastCPU   cpuSample
 	dir      string
 	port     string
 	token    string
@@ -86,6 +88,7 @@ func Run() error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
+	mux.HandleFunc("GET /api/host/metrics", a.handleMetrics)
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)

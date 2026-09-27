@@ -2,7 +2,7 @@
 
 Aplicación de escritorio **Windows** para trabajar con agentes CLI en varios **hosts Linux**. Conserva el flujo esencial de Orca —hosts, proyectos, pestañas de terminal/editor/navegador y alertas— sin sus módulos de orquestación, móvil o integraciones externas.
 
-> Estado: versión 0.1.2 en preparación. La app ya incorpora la base del autoactualizador; el instalador 0.1.1 no tiene esta función y deberá instalarse una vez más para habilitar las actualizaciones desde la app.
+> Última versión publicada: 0.1.2. Los cambios nuevos del código fuente no llegan al instalador hasta publicar otra versión.
 
 ## Instalar en Windows
 
@@ -13,12 +13,13 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Área | Comportamiento |
 |---|---|
 | Hosts | Varios destinos SSH con reconexión automática y estado por host. |
+| Telemetría | En el código actual, la cabecera muestra CPU, RAM y uso del disco raíz por host conectado; requiere actualizar también el servicio Linux. |
 | Proyectos | Carpetas absolutas del host, sin exigir Git. |
 | Agentes | Shell, Claude Code, Codex y Antigravity CLI (`agy`), con modo normal o bypass explícito. |
 | Sesiones | El servicio remoto posee los PTY; cerrar la app o perder SSH no mata los agentes. La salida tiene secuencias y log durable. |
 | Archivos | Explorador, Monaco, previsualización de imágenes/PDF y escritura con detección de conflicto por hash. |
 | Navegador | Chromium ejecutado **en el host**; el cliente muestra capturas JPEG e intercambia entrada básica. |
-| Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; salida del proceso para todos los agentes. |
+| Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; el código actual agrega un sonido al recibir un fin de turno reciente. |
 | Actualizaciones | Busca versiones nuevas al iniciar, descarga en segundo plano y permite reiniciar para instalar. Requiere instalar una versión con el actualizador por primera vez. |
 
 ## Publicar una actualización
@@ -45,6 +46,8 @@ systemctl --user enable --now crowd.service
 ```
 
 Para que el servicio siga activo tras cerrar la sesión SSH, habilitá *linger* para ese usuario si el servidor no lo tiene: `loginctl enable-linger "$USER"` (puede requerir autorización administrativa). El servicio escucha **solo** en `127.0.0.1:47321` y crea un token en `~/.local/share/crow-harness/token` con permisos de usuario.
+
+Cuando cambie el código de `remote/`, también hay que volver a compilar y reiniciar `crowd` en cada host. Hacelo cuando no haya agentes trabajando: reiniciar el servicio puede terminar los procesos que contiene.
 
 ### 2. Cliente Windows
 

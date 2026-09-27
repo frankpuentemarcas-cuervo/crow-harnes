@@ -1,10 +1,10 @@
-import { app, BrowserWindow, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, ipcMain, Notification, shell } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { Connection } from './connection'
 import { PassphraseVault } from './passphrase-vault'
 import { Store } from './store'
-import type { Agent, Host, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
+import type { Agent, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
 let store: Store
@@ -47,6 +47,7 @@ function connection(hostId: string): Connection {
 
 function onNotice(notice: Notice): void {
   send('crow:notice', notice)
+  if (notice.kind === 'turn-complete' && Math.abs(Date.now() - Date.parse(notice.at)) < 30_000) shell.beep()
   if (Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
     const host = store.host(notice.hostId)
     const title = notice.kind === 'turn-complete' ? 'Agente terminó el trabajo' : 'Agente finalizó'
@@ -104,6 +105,7 @@ function registerIPC(): void {
   handle('crow:status', (hostId: string) => connection(hostId).status())
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
+  handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
   handle('crow:start-session', (hostId: string, projectId: string, agent: Agent, mode: Mode) => {
     const project = store.project(projectId)
     if (!project || project.hostId !== hostId) throw new Error('Proyecto desconocido.')

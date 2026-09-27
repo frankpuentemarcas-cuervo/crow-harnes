@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Bell, ChevronDown, ChevronRight, CirclePlus, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, TerminalSquare, X } from 'lucide-react'
-import type { Agent, ConnectionStatus, Host, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
+import type { Agent, ConnectionStatus, Host, HostMetrics, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
@@ -9,12 +9,14 @@ import { FileTree } from './FileTree'
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
 const empty: SavedState = { hosts: [], projects: [], notices: [], eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' }
+const percent = (used: number, total: number): string => total > 0 ? `${Math.round(used / total * 100)}%` : '—'
 
 export function App(): React.JSX.Element {
   const [state, setState] = useState<SavedState>(empty)
   const [loaded, setLoaded] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
   const [sessions, setSessions] = useState<Record<string, SessionInfo[]>>({})
+  const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetrics>>({})
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({})
@@ -100,6 +102,22 @@ export function App(): React.JSX.Element {
     const timer = setInterval(() => void refreshSessions(selectedHost.id), 5000)
     return () => clearInterval(timer)
   }, [selectedHost?.id, status])
+
+  useEffect(() => {
+    const connected = state.hosts.filter((host) => statuses[host.id] === 'connected')
+    if (connected.length === 0) return
+    let live = true
+    const refresh = async (): Promise<void> => {
+      const values = await Promise.all(connected.map(async (host) => {
+        try { return [host.id, await window.crow.hostMetrics(host.id)] as const }
+        catch { return null }
+      }))
+      if (live) setHostMetrics((current) => ({ ...current, ...Object.fromEntries(values.filter((value) => value !== null)) }))
+    }
+    void refresh()
+    const timer = setInterval(() => void refresh(), 10_000)
+    return () => { live = false; clearInterval(timer) }
+  }, [state.hosts, statuses])
 
   function openTab(tab: WorkspaceTab): void {
     const existing = tabs.find((item) => item.projectId === tab.projectId && item.kind === tab.kind && (tab.kind === 'terminal' ? item.sessionId === tab.sessionId : tab.kind === 'editor' ? item.path === tab.path : true))
@@ -206,6 +224,10 @@ export function App(): React.JSX.Element {
     <div className="workspace">
       <header className="topbar">
         <div className="breadcrumb"><span>{selectedHost?.name || 'Sin host'}</span><ChevronRight size={14} /><strong>{selectedProject?.name || 'Seleccioná un proyecto'}</strong><span className={`connection-pill ${status}`}>{status === 'connected' ? 'Conectado' : status === 'connecting' ? 'Reconectando' : status === 'auth-required' ? 'Frase requerida' : 'Desconectado'}</span></div>
+        <div className="host-metrics" aria-label="Recursos de los servidores">{state.hosts.map((host) => {
+          const sample = statuses[host.id] === 'connected' ? hostMetrics[host.id] : undefined
+          return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria y disco raíz`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span></div>
+        })}</div>
         <div className="top-actions">
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>

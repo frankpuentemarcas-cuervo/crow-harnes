@@ -60,6 +60,10 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .topbar { height: 57px; min-height: 57px; background: #171717; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; padding: 0 16px 0 20px; }
 .breadcrumb { display: flex; gap: 9px; align-items: center; font-size: 12px; min-width: 0; color: #9aa2ad; }
 .breadcrumb strong { font-weight: 650; color: #e3e7ec; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-metrics { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; overflow-x: auto; margin: 0 12px; scrollbar-width: thin; }
+.host-metric { flex: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; border: 1px solid #373e48; border-radius: 6px; padding: 4px 7px; color: #9ea9b7; background: #20242b; font-size: 10px; }
+.host-metric-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; color: #d9e0ea; font-weight: 700; }
+.host-metric span:not(.host-metric-name) { font-variant-numeric: tabular-nums; }
 .connection-pill { border: 1px solid #50555d; border-radius: 10px; color: #9aa2ad; font-size: 10px; padding: 3px 8px; white-space: nowrap; margin-left: 4px; }
 .connection-pill.connected { border-color: #4b7356; color: #a5d4ae; background: #26412c42; }
 .connection-pill.connecting { border-color: #88734b; color: #e2c486; background: #54412442; }
