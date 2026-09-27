@@ -13,8 +13,7 @@
     "preview": "electron-vite preview",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "package:win": "electron-vite build && electron-builder --win nsis --x64",
-    "release:win": "electron-vite build && electron-builder --win nsis --x64 --publish always"
+    "package:win": "electron-vite build && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

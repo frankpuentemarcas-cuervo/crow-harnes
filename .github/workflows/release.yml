@@ -35,7 +35,40 @@ jobs:
             throw "Release tag $env:GITHUB_REF_NAME must match package version v$packageVersion"
           }
 
-      - name: Build and publish Windows installer
-        run: npm run release:win
+      - name: Build Windows installer
+        run: npm run package:win
+
+      - name: Publish and verify release assets
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $installer = "dist/Crow-Harness-Setup-$version-x64.exe"
+          $blockmap = "$installer.blockmap"
+          $metadata = 'dist/latest.yml'
+          $files = @($installer, $blockmap, $metadata)
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "Missing release asset: $file" }
+          }
+          if (-not ((Get-Content -LiteralPath $metadata -Raw) -match "(?m)^version: $version\r?`$")) {
+            throw 'latest.yml does not match the release version'
+          }
+
+          gh release view $env:GITHUB_REF_NAME --json id *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @files --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME @files --title $version --generate-notes --verify-tag --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release upload failed' }
+
+          $assets = (gh release view $env:GITHUB_REF_NAME --json assets | ConvertFrom-Json).assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify release assets' }
+          foreach ($file in $files) {
+            $name = Split-Path $file -Leaf
+            $asset = $assets | Where-Object name -eq $name | Select-Object -First 1
+            if (-not $asset -or $asset.state -ne 'uploaded' -or $asset.size -ne (Get-Item -LiteralPath $file).Length) {
+              throw "Release asset missing or wrong size: $name"
+            }
+          }
