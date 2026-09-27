@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { SessionInfo, TerminalFrame } from '../../shared/types'
+import { pairingCodeFromHash } from '../../shared/mobile-pairing'
 import '@xterm/xterm/css/xterm.css'
 import './mobile.css'
 
@@ -135,6 +136,8 @@ function MobileApp(): React.JSX.Element {
   const [sessionId, setSessionId] = useState('')
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null)
   const [error, setError] = useState('')
+  const [checking, setChecking] = useState(true)
+  const [autoPairing, setAutoPairing] = useState(false)
 
   async function refresh(): Promise<void> {
     try {
@@ -145,10 +148,22 @@ function MobileApp(): React.JSX.Element {
     } catch (reason) {
       if (String(reason).includes('Emparejamiento')) setPaired(false)
       else setError(String(reason))
-    }
+    } finally { setChecking(false) }
   }
 
-  useEffect(() => { void refresh(); const timer = setInterval(() => void refresh(), 7000); return () => clearInterval(timer) }, [])
+  useEffect(() => {
+    const code = pairingCodeFromHash(location.hash)
+    if (new URLSearchParams(location.hash.slice(1)).has('pair')) history.replaceState(null, '', location.pathname + location.search)
+    if (code) {
+      setAutoPairing(true)
+      void request<{ ok: boolean }>('/api/pair', 'POST', { code })
+        .then(() => refresh())
+        .catch((reason) => { setError(`No se pudo emparejar con el QR: ${String(reason)}`); setChecking(false) })
+        .finally(() => setAutoPairing(false))
+    } else void refresh()
+    const timer = setInterval(() => void refresh(), 7000)
+    return () => clearInterval(timer)
+  }, [])
   useEffect(() => { setProjectId((current) => state.projects.some((project) => project.hostId === hostId && project.id === current) ? current : state.projects.find((project) => project.hostId === hostId)?.id || '') }, [hostId, state.projects])
   useEffect(() => {
     if (!paired || !hostId) return
@@ -180,7 +195,7 @@ function MobileApp(): React.JSX.Element {
   const selected = sessions.find((session) => session.id === sessionId)
   const currentInfo = sessionInfo?.id === sessionId ? sessionInfo : selected
 
-  if (!paired) return <main className="mobile-pair"><div className="mobile-brand">CROW <span>HARNESS</span></div><h1>Continuá desde el celular</h1><p>Abrí “Acceso móvil” en Crow para obtener el código. Verificá la huella del certificado antes de confiar en esta conexión.</p><form onSubmit={(event) => void pair(event)}><label>Código de emparejamiento<input autoFocus required autoCapitalize="characters" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} /></label><button type="submit">Conectar</button></form>{error && <p className="mobile-error" role="alert">{error}</p>}</main>
+  if (!paired) return <main className="mobile-pair"><div className="mobile-brand">CROW <span>HARNESS</span></div><h1>Continuá desde el celular</h1><p>{checking || autoPairing ? 'Conectando con Crow…' : 'Escaneá el QR que muestra Acceso móvil en Crow. Verificá la huella del certificado antes de aceptar la excepción HTTPS.'}</p>{!checking && !autoPairing && <details className="mobile-manual"><summary>No puedo escanear el QR</summary><form onSubmit={(event) => void pair(event)}><label>Código de emparejamiento<input required autoCapitalize="characters" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} /></label><button type="submit">Conectar</button></form></details>}{error && <p className="mobile-error" role="alert">{error}</p>}</main>
 
   return <div className="mobile-app">
     <header className="mobile-header"><div className="mobile-brand">CROW <span>HARNESS</span></div><small>La app de Windows debe seguir abierta</small></header>

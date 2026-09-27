@@ -76,9 +76,9 @@ En Crow Harness, agregá el destino SSH, conectá el host y registrá una carpet
 
 ### Continuar desde el celular en la red local
 
-En la app **instalada** de Windows, tocá el ícono de celular de la cabecera, elegí la IPv4 de tu red privada y activá el acceso. En el celular conectado a esa misma red, abrí la dirección HTTPS indicada, comprobá que la huella SHA-256 del certificado coincida con la que muestra Crow y recién entonces aceptá la excepción del navegador. Ingresá el código de un solo uso; elegí host, proyecto y terminal. Una terminal suspendida se puede reanudar sin perder el proceso.
+En la app **instalada** de Windows, tocá el ícono de celular de la cabecera: si hay una sola IPv4 privada, el acceso se activa y aparece el QR automáticamente; si hay varias, elegí la correcta y presioná **Activar acceso**. Con el celular en la misma red, **escaneá el QR**: abrirá Crow y completará el emparejamiento de un solo uso sin escribir la dirección ni el código. Luego elegí host, proyecto y terminal. Si no podés usar la cámara, la opción «No puedo escanear el QR» conserva el acceso manual. Una terminal suspendida se puede reanudar sin perder el proceso.
 
-El acceso se detiene al cerrar Crow o al presionar **Detener acceso**. Detener y volver a activar invalida el emparejamiento anterior. El certificado es autofirmado, por lo que el navegador mostrará una advertencia; no ignores una huella distinta. Windows Firewall puede pedirte permitir el puerto efímero **solo en redes privadas**. No redirijas ese puerto en el router ni uses una red pública. El modo de desarrollo (`npm run dev`) no expone el gateway móvil.
+El acceso se detiene al cerrar Crow o al presionar **Detener acceso**. Detener y volver a activar invalida el emparejamiento anterior. **El QR no elimina la advertencia HTTPS**: el certificado sigue siendo autofirmado. Comprobá que la huella SHA-256 que muestra el navegador coincida con la de Crow antes de aceptar la excepción; no ignores una huella distinta. No compartas capturas del QR: contiene una invitación temporal de un solo uso. Windows Firewall puede pedirte permitir el puerto efímero **solo en redes privadas**. No redirijas ese puerto en el router ni uses una red pública. El modo de desarrollo (`npm run dev`) no expone el gateway móvil.
 
 ## Cómo se mantiene el trabajo ante un corte
 

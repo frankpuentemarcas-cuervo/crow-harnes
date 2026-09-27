@@ -11,6 +11,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .mobile-pair h1 { margin: 20px 0 0; font-size: 25px; }
 .mobile-pair p { margin: 0; color: #aeb6c2; line-height: 1.55; font-size: 14px; }
 .mobile-pair form { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
+.mobile-pair .mobile-manual { margin-top: 12px; color: #b9c1ce; font-size: 13px; }
+.mobile-pair .mobile-manual summary { cursor: pointer; }
 .mobile-pair label, .mobile-selectors label { display: flex; flex-direction: column; gap: 6px; color: #b9c1ce; font-size: 12px; }
 .mobile-pair input, .mobile-selectors select, .mobile-compose textarea { width: 100%; border: 1px solid #454d59; border-radius: 8px; background: #1e2228; color: #fafafa; padding: 12px; min-height: 44px; }
 .mobile-pair input { text-transform: uppercase; letter-spacing: .08em; }
