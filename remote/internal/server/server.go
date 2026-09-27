@@ -21,18 +21,19 @@ import (
 )
 
 type App struct {
-	mu        sync.RWMutex
-	saveMu    sync.Mutex
-	fileMu    sync.Mutex
-	metricsMu sync.Mutex
-	lastCPU   cpuSample
-	dir       string
-	port      string
-	token     string
-	hookPath  string
-	sessions  map[string]*session
-	events    []Event
-	browsers  map[string]*browser
+	mu           sync.RWMutex
+	saveMu       sync.Mutex
+	fileMu       sync.Mutex
+	metricsMu    sync.Mutex
+	lastCPU      cpuSample
+	dir          string
+	port         string
+	token        string
+	hookPath     string
+	hooksEnabled bool
+	sessions     map[string]*session
+	events       []Event
+	browsers     map[string]*browser
 }
 
 func randomID() (string, error) {
@@ -77,7 +78,7 @@ func Run() error {
 	if a.token == "" {
 		return errors.New("empty token")
 	}
-	if err := a.installHook(); err != nil {
+	if err := a.loadHookSettings(); err != nil {
 		return err
 	}
 	if err := a.loadSessions(); err != nil {
@@ -96,6 +97,8 @@ func Run() error {
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
+	mux.HandleFunc("GET /api/hooks", a.handleHookSettings)
+	mux.HandleFunc("PUT /api/hooks", a.handleHookSettings)
 	mux.HandleFunc("GET /api/files/tree", a.handleTree)
 	mux.HandleFunc("GET /api/files/content", a.handleFile)
 	mux.HandleFunc("PUT /api/files/content", a.handleFile)

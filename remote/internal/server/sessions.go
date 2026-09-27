@@ -121,6 +121,11 @@ func (a *App) loadSessions() error {
 			cleanupOrphanedSession(info.ID)
 			info.State = "interrupted"
 		}
+		if !a.hooksEnabled {
+			info.HooksActive = false
+			info.AgentState = "unknown"
+			info.CacheExpiresAt = nil
+		}
 		a.sessions[info.ID] = &session{info: info, subs: make(map[chan Frame]struct{})}
 	}
 	return nil
@@ -192,14 +197,23 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 		}
 		return "bash", []string{"-l"}, nil
 	case "claude":
-		settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hook}}}}}})
-		args := []string{"--settings", string(settings)}
+		args := []string{}
+		if hook != "" {
+			settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+				"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
+				"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
+			}})
+			args = append(args, "--settings", string(settings))
+		}
 		if mode == "bypass" {
 			args = append(args, "--dangerously-skip-permissions")
 		}
 		return "claude", args, nil
 	case "codex":
-		args := []string{"-c", fmt.Sprintf("notify=[%q]", hook)}
+		args := []string{}
+		if hook != "" {
+			args = append(args, "-c", fmt.Sprintf("notify=[%q,%q]", hook, "turn-complete"))
+		}
 		if mode == "bypass" {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
@@ -215,6 +229,28 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 	}
 }
 
+func claudeCacheTTL(agent string) int {
+	if agent != "claude" || os.Getenv("DISABLE_PROMPT_CACHING") == "1" || os.Getenv("ANTHROPIC_BASE_URL") != "" {
+		return 0
+	}
+	if os.Getenv("FORCE_PROMPT_CACHING_5M") == "1" {
+		return 300
+	}
+	switch os.Getenv("CLAUDE_CODE_PROMPT_CACHE_TTL") {
+	case "5m":
+		return 300
+	case "1h":
+		return 3600
+	}
+	if os.Getenv("ENABLE_PROMPT_CACHING_1H") == "1" {
+		return 3600
+	}
+	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" || os.Getenv("CLAUDE_CODE_USE_VERTEX") == "1" {
+		return 300
+	}
+	return 3600 // Claude Code subscription main conversations use 1h; shown as an estimate.
+}
+
 func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -228,7 +264,10 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	if err != nil || !stat.IsDir() {
 		return SessionInfo{}, errors.New("project folder does not exist")
 	}
-	bin, args, err := agentCommand(agent, mode, a.hookPath)
+	a.mu.RLock()
+	hook := a.hookPath
+	a.mu.RUnlock()
+	bin, args, err := agentCommand(agent, mode, hook)
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -254,11 +293,14 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	now := time.Now().UTC()
-	initialAgentState := "working"
+	initialAgentState := "waiting"
 	if agent == "shell" {
 		initialAgentState = "unknown"
 	}
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	if (hook == "" || agent == "agy") && agent != "shell" {
+		initialAgentState = "unknown"
+	}
+	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", CacheTTLSeconds: claudeCacheTTL(agent), StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -382,8 +424,9 @@ func (s *session) write(data []byte) error {
 	_, err := s.pty.Write(data)
 	if err == nil {
 		s.lastActivity = time.Now().UTC()
-		if s.info.Agent != "shell" && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
+		if s.info.HooksActive && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
 			s.info.AgentState = "working"
+			s.info.CacheExpiresAt = nil
 			info := s.info
 			s.broadcast(Frame{Type: "state", Info: &info})
 		}
@@ -391,18 +434,24 @@ func (s *session) write(data []byte) error {
 	return err
 }
 
-func (a *App) markTurnComplete(id string) {
+func (a *App) markAgentState(id, state string) {
 	s := a.session(id)
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.deleting || s.info.State != "running" {
+	if s.deleting || s.info.State != "running" || !s.info.HooksActive {
 		return
 	}
-	s.info.AgentState = "waiting"
+	s.info.AgentState = state
 	s.lastActivity = time.Now().UTC()
+	if state == "completed" && s.info.CacheTTLSeconds > 0 {
+		expires := s.lastActivity.Add(time.Duration(s.info.CacheTTLSeconds) * time.Second)
+		s.info.CacheExpiresAt = &expires
+	} else if state == "working" {
+		s.info.CacheExpiresAt = nil
+	}
 	info := s.info
 	s.broadcast(Frame{Type: "state", Info: &info})
 }
@@ -416,7 +465,7 @@ func (s *session) idleCandidate(now time.Time) bool {
 	if s.info.Agent == "shell" {
 		return true
 	}
-	return (s.info.Agent == "claude" || s.info.Agent == "codex") && s.info.AgentState == "waiting"
+	return s.info.HooksActive && (s.info.Agent == "claude" || s.info.Agent == "codex") && (s.info.AgentState == "waiting" || s.info.AgentState == "completed")
 }
 
 func (a *App) suspendIdleSessions(now time.Time) {

@@ -20,6 +20,8 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Archivos | Explorador, Monaco, previsualización de imágenes/PDF y escritura con detección de conflicto por hash. |
 | Navegador | Chromium ejecutado **en el host**; el cliente muestra capturas JPEG e intercambia entrada básica. |
 | Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; el código actual agrega un sonido al recibir un fin de turno reciente. |
+| Hooks de estado | En **Editar host** se pueden desactivar los hooks administrados por Crow. Desactivarlos borra su script remoto y evita que se reinstale al reiniciar el servicio; no modifica los hooks de Orca ni de otros programas. Las sesiones nuevas reflejan esperando, trabajando y completado cuando el agente ofrece la señal. |
+| Temporizador de caché | La cabecera muestra una cuenta regresiva **estimada** para Claude después de completar un turno, usando 5 minutos o 1 hora según el entorno detectado. No realiza llamadas al proveedor. Se omite para Codex/Antigravity cuando no se conoce un TTL verificable. |
 | Actualizaciones | Busca versiones nuevas al iniciar, descarga en segundo plano y permite reiniciar para instalar. Requiere instalar una versión con el actualizador por primera vez. |
 
 ## Publicar una actualización
@@ -78,7 +80,8 @@ El runtime remoto conserva el proceso, su sesión y la salida. Cada bloque de te
 - La alerta de fin de **turno** está integrada para Claude Code y Codex. Antigravity avisa al salir el proceso; falta una señal estable de fin de turno para su CLI.
 - Eliminar una terminal intenta terminar su grupo de procesos y los descendientes que conservan `CROW_SESSION_ID`, borra el log remoto y quita la sesión y las notificaciones locales. Un proceso que se desacople y además limpie esa variable podría escapar: no se puede garantizar limpieza de procesos arbitrarios sin aislamiento por cgroup.
 - Cerrar una pestaña solo desconecta la vista. La suspensión **ahorra CPU, no RAM**: la cabecera indica por host cuántas terminales están suspendidas y su memoria aproximada (PSS cuando Linux la ofrece, RSS como alternativa). La shell solo se suspende si está al prompt sin otros procesos de su sesión; Claude/Codex solo después de su señal de fin de turno. Antigravity no se suspende automáticamente hasta contar con una señal fiable de trabajo terminado.
-- El contador se actualiza cada 10 segundos y la suspensión se evalúa cada minuto. Falta probar SIGSTOP/SIGCONT contra un host Linux real; todavía no hay temporizador de caché, configuración de hooks de estado ni acceso móvil por LAN.
+- El contador se actualiza cada 10 segundos y la suspensión se evalúa cada minuto. Falta probar SIGSTOP/SIGCONT y los hooks contra un host Linux real. Al desactivar hooks, las sesiones ya abiertas pueden seguir teniendo comandos de hook cargados en su CLI; iniciá una nueva terminal para que el ajuste sea completamente efectivo. El temporizador no garantiza que la caché exista: el proveedor puede invalidarla, y ajustes que Crow no pueda detectar pueden cambiar el TTL.
+- Todavía no hay acceso móvil por LAN.
 - Los logs de terminal aún no tienen rotación; evitá sesiones indefinidas con salida masiva hasta agregar cuotas.
 - La interfaz sigue la estructura de Orca, pero falta cotejarla con capturas de referencia para afirmar paridad visual exacta.
 

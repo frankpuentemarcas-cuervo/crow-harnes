@@ -42,7 +42,10 @@ export interface SessionInfo {
   mode: Mode
   root: string
   state: 'running' | 'sleeping' | 'exited' | 'interrupted'
-  agentState?: 'working' | 'waiting' | 'unknown'
+  agentState?: 'working' | 'waiting' | 'completed' | 'unknown'
+  hooksActive?: boolean
+  cacheTtlSeconds?: number
+  cacheExpiresAt?: string
   startedAt: string
   updatedAt: string
   seq: number
@@ -103,6 +106,8 @@ export interface SavedState {
 
 export interface CrowAPI {
   hostMetrics(hostId: string): Promise<HostMetrics>
+  hookSettings(hostId: string): Promise<{ enabled: boolean }>
+  setHookSettings(hostId: string, enabled: boolean): Promise<{ enabled: boolean }>
   getUpdateState(): Promise<UpdateState>
   checkForUpdates(): Promise<void>
   installUpdate(): Promise<void>

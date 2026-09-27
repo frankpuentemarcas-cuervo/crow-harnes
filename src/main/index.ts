@@ -106,6 +106,8 @@ function registerIPC(): void {
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
+  handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
+  handle('crow:set-hook-settings', (hostId: string, enabled: boolean) => connection(hostId).api<{ enabled: boolean }>('PUT', '/api/hooks', { enabled }))
   handle('crow:start-session', (hostId: string, projectId: string, agent: Agent, mode: Mode) => {
     const project = store.project(projectId)
     if (!project || project.hostId !== hostId) throw new Error('Proyecto desconocido.')

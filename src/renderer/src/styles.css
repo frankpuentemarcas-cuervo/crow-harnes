@@ -72,6 +72,10 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .host-metric span:not(.host-metric-name) { font-variant-numeric: tabular-nums; }
 .sleeping-metric { border-left: 1px solid #3e4650; padding-left: 6px; color: #a9c3e9; }
 .terminal-wake { border: 1px solid #4b6483; border-radius: 4px; color: #d8e8ff; background: #293f5a; padding: 2px 7px; margin-left: 8px; font-size: 10px; }
+.cache-timer { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; border: 1px solid #6b613c; border-radius: 5px; padding: 4px 6px; font-size: 10px; color: #e7d397; font-variant-numeric: tabular-nums; }
+.hook-toggle { display: flex !important; align-items: flex-start; gap: 10px; }
+.hook-toggle input { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.hook-toggle small { display: block; margin-top: 4px; color: #9da7b3; font-size: 10px; line-height: 1.4; }
 .connection-pill { border: 1px solid #50555d; border-radius: 10px; color: #9aa2ad; font-size: 10px; padding: 3px 8px; white-space: nowrap; margin-left: 4px; }
 .connection-pill.connected { border-color: #4b7356; color: #a5d4ae; background: #26412c42; }
 .connection-pill.connecting { border-color: #88734b; color: #e2c486; background: #54412442; }

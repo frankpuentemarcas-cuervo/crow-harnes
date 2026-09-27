@@ -8,6 +8,8 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 
 const api: CrowAPI = {
   hostMetrics: (hostId: string) => ipcRenderer.invoke('crow:host-metrics', hostId),
+  hookSettings: (hostId: string) => ipcRenderer.invoke('crow:hook-settings', hostId),
+  setHookSettings: (hostId: string, enabled: boolean) => ipcRenderer.invoke('crow:set-hook-settings', hostId, enabled),
   getUpdateState: () => ipcRenderer.invoke('crow:update-state'),
   checkForUpdates: () => ipcRenderer.invoke('crow:check-updates'),
   installUpdate: () => ipcRenderer.invoke('crow:install-update'),

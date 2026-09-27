@@ -27,7 +27,7 @@ func TestIdleCandidateRequiresCompletedWorkAndThirtyMinutes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &session{info: SessionInfo{Agent: tt.agent, AgentState: tt.agentState, State: tt.state}, lastActivity: now.Add(-tt.idle), cmd: &exec.Cmd{Process: &os.Process{Pid: 123}}}
+			s := &session{info: SessionInfo{Agent: tt.agent, AgentState: tt.agentState, State: tt.state, HooksActive: true}, lastActivity: now.Add(-tt.idle), cmd: &exec.Cmd{Process: &os.Process{Pid: 123}}}
 			if got := s.idleCandidate(now); got != tt.want {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
@@ -35,15 +35,18 @@ func TestIdleCandidateRequiresCompletedWorkAndThirtyMinutes(t *testing.T) {
 	}
 }
 
-func TestTurnCompleteMarksAgentWaiting(t *testing.T) {
+func TestTurnCompleteMarksAgentCompleted(t *testing.T) {
 	id := "test"
-	s := &session{info: SessionInfo{ID: id, State: "running", Agent: "claude", AgentState: "working"}, subs: make(map[chan Frame]struct{})}
+	s := &session{info: SessionInfo{ID: id, State: "running", Agent: "claude", AgentState: "working", HooksActive: true, CacheTTLSeconds: 300}, subs: make(map[chan Frame]struct{})}
 	a := &App{sessions: map[string]*session{id: s}}
-	a.markTurnComplete(id)
-	if got := s.snapshot().AgentState; got != "waiting" {
+	a.markAgentState(id, "completed")
+	if got := s.snapshot().AgentState; got != "completed" {
 		t.Fatalf("got %q", got)
 	}
 	if s.lastActivity.IsZero() {
 		t.Fatal("completion did not reset inactivity timer")
+	}
+	if s.snapshot().CacheExpiresAt == nil {
+		t.Fatal("completion did not start cache estimate")
 	}
 }
