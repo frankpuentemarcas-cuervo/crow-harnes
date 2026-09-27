@@ -5,6 +5,7 @@ import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
+import { isFreshNotice, playCompletionSound } from './completion-sound'
 
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
@@ -102,6 +103,7 @@ export function App(): React.JSX.Element {
     })
     const offNotice = window.crow.onNotice((notice) => {
       setState((current) => ({ ...current, notices: [notice, ...current.notices].slice(0, 100) }))
+      if (isFreshNotice(notice.at)) void playCompletionSound().catch((reason) => console.warn('Crow: no se pudo reproducir la alerta', reason))
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
@@ -307,7 +309,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
-            {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotice(notice.id); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
+            {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound().catch((reason) => setError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotice(notice.id); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
         </div>
       </header>

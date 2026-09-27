@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Notification } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { Connection } from './connection'
@@ -49,11 +49,10 @@ function connection(hostId: string): Connection {
 
 function onNotice(notice: Notice): void {
   send('crow:notice', notice)
-  if (notice.kind === 'turn-complete' && Math.abs(Date.now() - Date.parse(notice.at)) < 30_000) shell.beep()
   if (Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
     const host = store.host(notice.hostId)
     const title = notice.kind === 'turn-complete' ? 'Agente terminó el trabajo' : 'Agente finalizó'
-    const item = new Notification({ title, body: `${host?.name || 'Host'} · sesión ${notice.sessionId.slice(0, 8)}` })
+    const item = new Notification({ title, body: `${host?.name || 'Host'} · sesión ${notice.sessionId.slice(0, 8)}`, silent: true })
     item.on('click', () => { window?.show(); window?.focus() })
     item.show()
   }
