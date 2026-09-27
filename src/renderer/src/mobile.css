@@ -1,0 +1,41 @@
+:root { font-family: Inter, "Segoe UI", sans-serif; color: #f5f5f5; background: #0a0a0a; color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body, #mobile-root { margin: 0; width: 100%; height: 100%; min-height: 100dvh; }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #a9c3e9; outline-offset: 2px; }
+.mobile-pair { max-width: 440px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; justify-content: center; padding: 28px; gap: 12px; }
+.mobile-brand { letter-spacing: .12em; font-weight: 800; font-size: 14px; white-space: nowrap; }
+.mobile-brand span { color: #aab2be; font-weight: 500; }
+.mobile-pair h1 { margin: 20px 0 0; font-size: 25px; }
+.mobile-pair p { margin: 0; color: #aeb6c2; line-height: 1.55; font-size: 14px; }
+.mobile-pair form { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
+.mobile-pair label, .mobile-selectors label { display: flex; flex-direction: column; gap: 6px; color: #b9c1ce; font-size: 12px; }
+.mobile-pair input, .mobile-selectors select, .mobile-compose textarea { width: 100%; border: 1px solid #454d59; border-radius: 8px; background: #1e2228; color: #fafafa; padding: 12px; min-height: 44px; }
+.mobile-pair input { text-transform: uppercase; letter-spacing: .08em; }
+.mobile-pair button, .mobile-compose button, .mobile-active-title button { min-height: 44px; border: 1px solid #e5e5e5; border-radius: 8px; padding: 0 16px; background: #e5e5e5; color: #171717; font-weight: 700; }
+.mobile-app { display: flex; flex-direction: column; height: 100dvh; min-height: 0; padding-bottom: env(safe-area-inset-bottom); }
+.mobile-header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: #171717; border-bottom: 1px solid #32373e; }
+.mobile-header small { color: #aeb6c2; font-size: 10px; text-align: right; }
+.mobile-selectors { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 12px; background: #171717; }
+.mobile-selectors select { min-width: 0; padding: 8px; }
+.mobile-sessions { display: flex; gap: 8px; overflow-x: auto; flex: none; padding: 8px 12px; border-bottom: 1px solid #32373e; scrollbar-width: thin; }
+.mobile-sessions button { min-width: 108px; min-height: 44px; flex: none; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; border: 1px solid #3c434d; border-radius: 7px; padding: 6px 10px; background: #20242b; color: #edf1f5; font-size: 11px; }
+.mobile-sessions button.selected { border-color: #91add1; background: #293d56; }
+.mobile-sessions small { color: #aab8c8; font-size: 10px; }
+.mobile-active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.mobile-active-title { display: flex; align-items: center; justify-content: space-between; flex: none; padding: 6px 12px; font-size: 12px; color: #bdc9d7; }
+.mobile-active-title button { min-height: 32px; font-size: 11px; }
+.mobile-terminal-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.mobile-terminal-status { color: #9da7b3; font-size: 10px; padding: 2px 12px 5px; }
+.mobile-terminal { flex: 1; min-height: 0; background: #0a0a0a; padding: 6px; overflow: hidden; }
+.mobile-quickkeys { display: flex; gap: 8px; flex: none; overflow-x: auto; padding: 8px 12px; background: #171717; }
+.mobile-quickkeys button { flex: none; min-height: 44px; min-width: 44px; border: 1px solid #4c5561; border-radius: 6px; padding: 0 10px; color: #e4eaf2; background: #2a313a; }
+.mobile-compose { display: flex; gap: 8px; align-items: stretch; flex: none; padding: 10px 12px; background: #171717; }
+.mobile-compose textarea { flex: 1; min-width: 0; resize: none; min-height: 54px; max-height: 120px; }
+.mobile-compose button { align-self: stretch; }
+.mobile-error { color: #f6c9c5; background: #653638; border-radius: 6px; margin: 8px 12px; padding: 8px 10px; font-size: 12px; }
+.mobile-empty { color: #9da7b3; font-size: 12px; white-space: nowrap; }
+.mobile-center { display: grid; place-items: center; white-space: normal; text-align: center; padding: 20px; flex: 1; }
+@media (max-width: 370px) { .mobile-selectors { grid-template-columns: 1fr; } .mobile-header small { display: none; } }

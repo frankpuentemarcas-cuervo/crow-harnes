@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bell, ChevronDown, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, TerminalSquare, Trash2, X } from 'lucide-react'
-import type { Agent, ConnectionStatus, Host, HostMetrics, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
+import { Bell, ChevronDown, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
+import type { Agent, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
@@ -39,6 +39,12 @@ export function App(): React.JSX.Element {
   const [passphraseError, setPassphraseError] = useState('')
   const [passphraseBusy, setPassphraseBusy] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({ status: 'idle' })
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [mobileStatus, setMobileStatus] = useState<MobileStatus>({ running: false })
+  const [mobileAddresses, setMobileAddresses] = useState<string[]>([])
+  const [mobileAddress, setMobileAddress] = useState('')
+  const [mobileBusy, setMobileBusy] = useState(false)
+  const [mobileError, setMobileError] = useState('')
 
   const selectedProject = state.projects.find((project) => project.id === selectedProjectId)
   const selectedHost = selectedProject && state.hosts.find((host) => host.id === selectedProject.hostId)
@@ -216,6 +222,25 @@ export function App(): React.JSX.Element {
     setState(await window.crow.markNoticeRead(id))
   }
 
+  async function openMobile(): Promise<void> {
+    setMobileOpen(true)
+    setMobileError('')
+    try {
+      const [addresses, current] = await Promise.all([window.crow.mobileAddresses(), window.crow.mobileStatus()])
+      setMobileAddresses(addresses)
+      setMobileStatus(current)
+      setMobileAddress((value) => addresses.includes(value) ? value : addresses[0] || '')
+    } catch (reason) { setMobileError(String(reason)) }
+  }
+
+  async function toggleMobile(): Promise<void> {
+    setMobileBusy(true)
+    setMobileError('')
+    try { setMobileStatus(mobileStatus.running ? await window.crow.mobileStop() : await window.crow.mobileStart(mobileAddress)) }
+    catch (reason) { setMobileError(String(reason)) }
+    finally { setMobileBusy(false) }
+  }
+
   async function unlockHost(): Promise<void> {
     if (!passphraseHostId || !passphrase) return
     setPassphraseBusy(true)
@@ -271,6 +296,7 @@ export function App(): React.JSX.Element {
         })}</div>
         <div className="top-actions">
           {cacheTimer && <span className="cache-timer" title={`Caché Claude estimada · sesión ${cacheTimer.id.slice(0, 8)}. No consulta al proveedor ni garantiza una caché activa.`}><Clock3 size={13} /> Caché ≈{Math.floor(cacheSeconds / 60)}:{String(cacheSeconds % 60).padStart(2, '0')}</span>}
+          <button className="icon-button" title="Acceso móvil en red local" aria-label="Acceso móvil en red local" onClick={() => void openMobile()}><Smartphone size={16} /></button>
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
@@ -320,6 +346,14 @@ export function App(): React.JSX.Element {
     </div>
     {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { setState(await window.crow.removeHost(editingHost.id)); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId('') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
+    {mobileOpen && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileOpen(false) }}><div className="dialog-card mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-title">
+      <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
+      <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>
+      {!mobileStatus.running ? <><label>Dirección de este equipo<select value={mobileAddress} onChange={(event) => setMobileAddress(event.target.value)}>{mobileAddresses.map((address) => <option key={address} value={address}>{address}</option>)}</select></label>{mobileAddresses.length === 0 && <p>No se detectó una IPv4 privada. Conectá este equipo a una red local.</p>}</> : <div className="mobile-credentials"><div><strong>Dirección</strong><code>{mobileStatus.url}</code></div>{mobileStatus.pairingCode && <div><strong>Código de un solo uso</strong><code>{mobileStatus.pairingCode}</code></div>}<div><strong>Huella SHA-256 del certificado</strong><code>{mobileStatus.fingerprint}</code></div>{mobileStatus.paired && <p>Celular emparejado. Para revocar el acceso, detené y reactivá el servidor móvil.</p>}</div>}
+      <p className="mobile-security-note">El certificado es autofirmado: el navegador avisará que no es de confianza. Compará su huella SHA-256 con la que aparece acá ANTES de aceptar la excepción. Usá solo una red privada confiable; no abras este puerto a Internet.</p>
+      {mobileError && <div className="inline-error" role="alert">{mobileError}</div>}
+      <div className="dialog-actions"><span /><button className="secondary-button" onClick={() => setMobileOpen(false)}>Cerrar</button><button className={mobileStatus.running ? 'danger-button' : 'primary-button'} disabled={mobileBusy || (!mobileStatus.running && !mobileAddress)} onClick={() => void toggleMobile()}>{mobileBusy ? 'Aplicando…' : mobileStatus.running ? 'Detener acceso' : 'Activar acceso'}</button></div>
+    </div></div>}
     {passphraseHostId && <div className="dialog-backdrop"><form className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="passphrase-title" onSubmit={(event) => { event.preventDefault(); void unlockHost() }}>
       <div className="dialog-heading"><h2 id="passphrase-title">Desbloquear llave SSH</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={() => { setPassphraseHostId(''); setPassphrase(''); setPassphraseError('') }}><X size={18} /></button></div>
       <p>Ingresá la frase de la llave para conectar con {state.hosts.find((host) => host.id === passphraseHostId)?.name || 'el host'}. Se recordará en este equipo hasta reiniciar Windows.</p>

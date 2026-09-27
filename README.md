@@ -1,6 +1,6 @@
 # Crow Harness
 
-Aplicación de escritorio **Windows** para trabajar con agentes CLI en varios **hosts Linux**. Conserva el flujo esencial de Orca —hosts, proyectos, pestañas de terminal/editor/navegador y alertas— sin sus módulos de orquestación, móvil o integraciones externas.
+Aplicación de escritorio **Windows** para trabajar con agentes CLI en varios **hosts Linux**. Conserva el flujo esencial de Orca —hosts, proyectos, pestañas de terminal/editor/navegador y alertas— sin sus módulos de orquestación ni integraciones externas.
 
 > Última versión publicada: 0.1.2. Los cambios nuevos del código fuente no llegan al instalador hasta publicar otra versión.
 
@@ -22,6 +22,7 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno; el código actual agrega un sonido al recibir un fin de turno reciente. |
 | Hooks de estado | En **Editar host** se pueden desactivar los hooks administrados por Crow. Desactivarlos borra su script remoto y evita que se reinstale al reiniciar el servicio; no modifica los hooks de Orca ni de otros programas. Las sesiones nuevas reflejan esperando, trabajando y completado cuando el agente ofrece la señal. |
 | Temporizador de caché | La cabecera muestra una cuenta regresiva **estimada** para Claude después de completar un turno, usando 5 minutos o 1 hora según el entorno detectado. No realiza llamadas al proveedor. Se omite para Codex/Antigravity cuando no se conoce un TTL verificable. |
+| Acceso móvil LAN | El código actual agrega un gateway HTTPS opcional en Windows: empareja un celular con código de un solo uso y retransmite la **misma PTY remota** por WebSocket a una terminal xterm.js. No abre el token ni el puerto del servicio Linux a la LAN. Solo funciona en la app empaquetada y requiere mantenerla abierta. |
 | Actualizaciones | Busca versiones nuevas al iniciar, descarga en segundo plano y permite reiniciar para instalar. Requiere instalar una versión con el actualizador por primera vez. |
 
 ## Publicar una actualización
@@ -62,6 +63,12 @@ npm run dev
 
 En Crow Harness, agregá el destino SSH, conectá el host y registrá una carpeta existente, por ejemplo `/home/usuario/proyecto`. Las carpetas se introducen como rutas **del servidor**, no de Windows.
 
+### Continuar desde el celular en la red local
+
+En la app **instalada** de Windows, tocá el ícono de celular de la cabecera, elegí la IPv4 de tu red privada y activá el acceso. En el celular conectado a esa misma red, abrí la dirección HTTPS indicada, comprobá que la huella SHA-256 del certificado coincida con la que muestra Crow y recién entonces aceptá la excepción del navegador. Ingresá el código de un solo uso; elegí host, proyecto y terminal. Una terminal suspendida se puede reanudar sin perder el proceso.
+
+El acceso se detiene al cerrar Crow o al presionar **Detener acceso**. Detener y volver a activar invalida el emparejamiento anterior. El certificado es autofirmado, por lo que el navegador mostrará una advertencia; no ignores una huella distinta. Windows Firewall puede pedirte permitir el puerto efímero **solo en redes privadas**. No redirijas ese puerto en el router ni uses una red pública. El modo de desarrollo (`npm run dev`) no expone el gateway móvil.
+
 ## Cómo se mantiene el trabajo ante un corte
 
 ```text
@@ -81,7 +88,7 @@ El runtime remoto conserva el proceso, su sesión y la salida. Cada bloque de te
 - Eliminar una terminal intenta terminar su grupo de procesos y los descendientes que conservan `CROW_SESSION_ID`, borra el log remoto y quita la sesión y las notificaciones locales. Un proceso que se desacople y además limpie esa variable podría escapar: no se puede garantizar limpieza de procesos arbitrarios sin aislamiento por cgroup.
 - Cerrar una pestaña solo desconecta la vista. La suspensión **ahorra CPU, no RAM**: la cabecera indica por host cuántas terminales están suspendidas y su memoria aproximada (PSS cuando Linux la ofrece, RSS como alternativa). La shell solo se suspende si está al prompt sin otros procesos de su sesión; Claude/Codex solo después de su señal de fin de turno. Antigravity no se suspende automáticamente hasta contar con una señal fiable de trabajo terminado.
 - El contador se actualiza cada 10 segundos y la suspensión se evalúa cada minuto. Falta probar SIGSTOP/SIGCONT y los hooks contra un host Linux real. Al desactivar hooks, las sesiones ya abiertas pueden seguir teniendo comandos de hook cargados en su CLI; iniciá una nueva terminal para que el ajuste sea completamente efectivo. El temporizador no garantiza que la caché exista: el proveedor puede invalidarla, y ajustes que Crow no pueda detectar pueden cambiar el TTL.
-- Todavía no hay acceso móvil por LAN.
+- El acceso móvil depende de que Windows y su túnel SSH sigan activos. No hay acceso fuera de la red local ni servicio en segundo plano cuando se cierra la app. El navegador móvil aún no incluye edición de archivos ni la vista remota de Chromium; el objetivo actual es continuar la conversación con el agente en su PTY exacta. La implementación móvil requiere una prueba de extremo a extremo en teléfonos reales antes de considerarse validada.
 - Los logs de terminal aún no tienen rotación; evitá sesiones indefinidas con salida masiva hasta agregar cuotas.
 - La interfaz sigue la estructura de Orca, pero falta cotejarla con capturas de referencia para afirmar paridad visual exacta.
 
@@ -91,5 +98,6 @@ El runtime remoto conserva el proceso, su sesión y la salida. Cada bloque de te
 2. Abrir cada agente, cerrar Windows, reconectar y comprobar que sigue **el mismo PID**.
 3. Cortar SSH durante una tarea, recuperar toda la salida sin duplicados y recibir una sola alerta.
 4. Probar edición concurrente del mismo archivo y navegación de una web servida en `localhost` **del host**.
+5. Instalar la próxima versión empaquetada, emparejar un teléfono de prueba en LAN y verificar respuesta, reconexión, huella TLS y revocación del acceso móvil.
 
 El cliente se empaquetó para Windows x64. Todavía no se ejecutó una prueba de instalación ni una prueba de extremo a extremo con un host Linux.

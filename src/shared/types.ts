@@ -29,6 +29,14 @@ export interface HostMetrics {
   at: string
 }
 
+export interface MobileStatus {
+  running: boolean
+  url?: string
+  pairingCode?: string
+  fingerprint?: string
+  paired?: boolean
+}
+
 export interface Project {
   id: string
   hostId: string
@@ -106,6 +114,10 @@ export interface SavedState {
 
 export interface CrowAPI {
   hostMetrics(hostId: string): Promise<HostMetrics>
+  mobileAddresses(): Promise<string[]>
+  mobileStatus(): Promise<MobileStatus>
+  mobileStart(address: string): Promise<MobileStatus>
+  mobileStop(): Promise<MobileStatus>
   hookSettings(hostId: string): Promise<{ enabled: boolean }>
   setHookSettings(hostId: string, enabled: boolean): Promise<{ enabled: boolean }>
   getUpdateState(): Promise<UpdateState>

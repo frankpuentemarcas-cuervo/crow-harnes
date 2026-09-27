@@ -3,12 +3,14 @@ import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { Connection } from './connection'
 import { PassphraseVault } from './passphrase-vault'
+import { MobileGateway, mobileAddresses } from './mobile-gateway'
 import { Store } from './store'
 import type { Agent, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
 let store: Store
 let vault: PassphraseVault
+let mobile: MobileGateway
 const connections = new Map<string, Connection>()
 let updateState: UpdateState = { status: 'idle' }
 
@@ -106,6 +108,10 @@ function registerIPC(): void {
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
+  handle('crow:mobile-addresses', () => mobileAddresses())
+  handle('crow:mobile-status', () => mobile.status())
+  handle('crow:mobile-start', (address: string) => mobile.start(address))
+  handle('crow:mobile-stop', () => mobile.stop())
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
   handle('crow:set-hook-settings', (hostId: string, enabled: boolean) => connection(hostId).api<{ enabled: boolean }>('PUT', '/api/hooks', { enabled }))
   handle('crow:start-session', (hostId: string, projectId: string, agent: Agent, mode: Mode) => {
@@ -187,6 +193,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   store = new Store()
   vault = new PassphraseVault()
+  mobile = new MobileGateway({ snapshot: () => store.snapshot(), connection })
   registerIPC()
   createWindow()
   configureUpdater()
@@ -194,4 +201,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { void mobile?.stop(); for (const item of connections.values()) item.stop() })

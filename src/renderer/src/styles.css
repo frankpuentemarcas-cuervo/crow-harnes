@@ -76,6 +76,13 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .hook-toggle { display: flex !important; align-items: flex-start; gap: 10px; }
 .hook-toggle input { width: 15px; height: 15px; flex: none; margin-top: 2px; }
 .hook-toggle small { display: block; margin-top: 4px; color: #9da7b3; font-size: 10px; line-height: 1.4; }
+.mobile-dialog { max-height: min(90vh, 720px); overflow-y: auto; }
+.mobile-credentials { display: grid; gap: 10px; padding: 11px; border: 1px solid #424b59; border-radius: 7px; background: #171b21; }
+.mobile-credentials div { display: grid; gap: 4px; }
+.mobile-credentials strong { color: #a7b1bf; font-size: 10px; }
+.mobile-credentials code { color: #e2e9f2; font-size: 11px; overflow-wrap: anywhere; user-select: all; }
+.mobile-credentials p { margin: 0; }
+.mobile-security-note { color: #e4c58a !important; }
 .connection-pill { border: 1px solid #50555d; border-radius: 10px; color: #9aa2ad; font-size: 10px; padding: 3px 8px; white-space: nowrap; margin-left: 4px; }
 .connection-pill.connected { border-color: #4b7356; color: #a5d4ae; background: #26412c42; }
 .connection-pill.connecting { border-color: #88734b; color: #e2c486; background: #54412442; }
