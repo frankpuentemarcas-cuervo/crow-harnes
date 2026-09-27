@@ -2,7 +2,7 @@
 
 Aplicación de escritorio **Windows** para trabajar con agentes CLI en varios **hosts Linux**. Conserva el flujo esencial de Orca —hosts, proyectos, pestañas de terminal/editor/navegador y alertas— sin sus módulos de orquestación ni integraciones externas.
 
-> Última versión publicada: 0.1.2. Los cambios nuevos del código fuente no llegan al instalador hasta publicar otra versión.
+> Consultá la última versión publicada en [GitHub Releases](https://github.com/frankpuentemarcas-cuervo/crow-harnes/releases). Los cambios nuevos del código fuente no llegan al instalador hasta publicar otra versión.
 
 ## Instalar en Windows
 
