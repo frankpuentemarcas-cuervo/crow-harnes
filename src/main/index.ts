@@ -116,6 +116,10 @@ function registerIPC(): void {
     await connection(hostId).api('DELETE', `/api/sessions/${sessionId}`)
     return store.removeSession(hostId, sessionId)
   })
+  handle('crow:wake-session', (hostId: string, sessionId: string) => {
+    if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
+    return connection(hostId).api<SessionInfo>('POST', `/api/sessions/${sessionId}/wake`)
+  })
   handle('crow:attach', async (hostId: string, sessionId: string, from: number, id: string) => {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('Suscripción inválida.')
     await connection(hostId).attach(id, sessionId, from, (frame) => send('crow:terminal-frame', { id, frame }))

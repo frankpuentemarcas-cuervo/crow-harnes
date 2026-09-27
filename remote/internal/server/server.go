@@ -92,6 +92,7 @@ func Run() error {
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
+	mux.HandleFunc("POST /api/sessions/{id}/wake", a.handleWakeSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
@@ -108,6 +109,13 @@ func Run() error {
 		return err
 	}
 	log.Printf("crowd listening on 127.0.0.1:%s", port)
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			a.suspendIdleSessions(now.UTC())
+		}
+	}()
 	return server.Serve(listener)
 }
 
@@ -179,6 +187,24 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (a *App) handleWakeSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeID(id) {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+	info, err := a.wakeSession(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "session not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusConflict)
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, info)
+}
+
 var upgrader = websocket.Upgrader{ReadBufferSize: 16 * 1024, WriteBufferSize: 16 * 1024}
 
 func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +252,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "input":
 				data, err := decodeInput(msg.Data)
 				if err == nil {
+					_, _ = a.wakeSession(id)
 					_ = s.write(data)
 				}
 			case "resize":

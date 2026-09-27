@@ -16,6 +16,13 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
   const lastSeq = useRef(0)
   const [info, setInfo] = useState<SessionInfo | null>(null)
   const [retry, setRetry] = useState(0)
+  const [wakeError, setWakeError] = useState('')
+
+  async function wake(): Promise<void> {
+    setWakeError('')
+    try { setInfo(await window.crow.wakeSession(hostId, sessionId)) }
+    catch (reason) { setWakeError(String(reason)) }
+  }
 
   useEffect(() => {
     if (!container.current) return
@@ -84,5 +91,5 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
     }
   }, [hostId, sessionId, status, retry])
 
-  return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : 'En ejecución'}</span></div><div className="terminal-surface" ref={container} /></div>
+  return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}</span>{info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}</div>{wakeError && <div className="inline-error" role="alert">{wakeError}</div>}<div className="terminal-surface" ref={container} /></div>
 }

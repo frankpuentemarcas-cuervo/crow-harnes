@@ -58,6 +58,7 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .session-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #76b686; flex: none; }
 .session-state.exited { background: #8b929d; }
 .session-state.interrupted { background: #d99a65; }
+.session-state.sleeping { background: #8eb7e7; }
 .session-tail { margin-left: auto; color: #777f8a; font-family: Consolas, monospace; font-size: 10px; }
 .sidebar-add-project { height: 29px; gap: 5px; padding-left: 38px; font-size: 11px; color: #8d97a4; border-radius: 5px; }
 .sidebar-footer { height: 33px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 7px; padding: 0 14px; color: #8b929b; font-size: 10px; }
@@ -69,6 +70,8 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .host-metric { flex: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; border: 1px solid #373e48; border-radius: 6px; padding: 4px 7px; color: #9ea9b7; background: #20242b; font-size: 10px; }
 .host-metric-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; color: #d9e0ea; font-weight: 700; }
 .host-metric span:not(.host-metric-name) { font-variant-numeric: tabular-nums; }
+.sleeping-metric { border-left: 1px solid #3e4650; padding-left: 6px; color: #a9c3e9; }
+.terminal-wake { border: 1px solid #4b6483; border-radius: 4px; color: #d8e8ff; background: #293f5a; padding: 2px 7px; margin-left: 8px; font-size: 10px; }
 .connection-pill { border: 1px solid #50555d; border-radius: 10px; color: #9aa2ad; font-size: 10px; padding: 3px 8px; white-space: nowrap; margin-left: 4px; }
 .connection-pill.connected { border-color: #4b7356; color: #a5d4ae; background: #26412c42; }
 .connection-pill.connecting { border-color: #88734b; color: #e2c486; background: #54412442; }

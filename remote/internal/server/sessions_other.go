@@ -10,3 +10,11 @@ func terminateSessionProcess(pid int, _ string, _ <-chan struct{}) error {
 	}
 	return errors.New("session deletion requires Linux")
 }
+
+func suspendSessionProcess(_ int, _ string) error {
+	return errors.New("session suspension requires Linux")
+}
+func resumeSessionProcess(_ int, _ string) error         { return errors.New("session resume requires Linux") }
+func cleanupOrphanedSession(_ string)                    {}
+func shellHasNoWork(_ int, _ string) bool                { return false }
+func sleepingProcessMemory(_ map[string]struct{}) uint64 { return 0 }

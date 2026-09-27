@@ -17,14 +17,15 @@ import (
 )
 
 type session struct {
-	mu       sync.Mutex
-	info     SessionInfo
-	pty      *os.File
-	log      *os.File
-	cmd      *exec.Cmd
-	done     chan struct{}
-	deleting bool
-	subs     map[chan Frame]struct{}
+	mu           sync.Mutex
+	info         SessionInfo
+	pty          *os.File
+	log          *os.File
+	cmd          *exec.Cmd
+	done         chan struct{}
+	deleting     bool
+	lastActivity time.Time
+	subs         map[chan Frame]struct{}
 }
 
 func (s *session) snapshot() SessionInfo {
@@ -66,6 +67,7 @@ func (s *session) output(data []byte) {
 	defer s.mu.Unlock()
 	s.info.Seq++
 	s.info.UpdatedAt = time.Now().UTC()
+	s.lastActivity = s.info.UpdatedAt
 	frame := Frame{Type: "output", Seq: s.info.Seq, Data: base64.StdEncoding.EncodeToString(data)}
 	if s.log != nil {
 		encoded, _ := json.Marshal(frame)
@@ -115,7 +117,8 @@ func (a *App) loadSessions() error {
 		if last > info.Seq {
 			info.Seq = last
 		}
-		if info.State == "running" {
+		if info.State == "running" || info.State == "sleeping" {
+			cleanupOrphanedSession(info.ID)
 			info.State = "interrupted"
 		}
 		a.sessions[info.ID] = &session{info: info, subs: make(map[chan Frame]struct{})}
@@ -251,7 +254,11 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	now := time.Now().UTC()
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), subs: make(map[chan Frame]struct{})}
+	initialAgentState := "working"
+	if agent == "shell" {
+		initialAgentState = "unknown"
+	}
+	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -320,8 +327,15 @@ func (a *App) deleteSession(id string) error {
 	}
 	s.deleting = true
 	pid := 0
-	if s.cmd != nil && s.cmd.Process != nil && s.info.State == "running" {
+	if s.cmd != nil && s.cmd.Process != nil && (s.info.State == "running" || s.info.State == "sleeping") {
 		pid = s.cmd.Process.Pid
+	}
+	if s.info.State == "sleeping" && pid != 0 {
+		if err := resumeSessionProcess(pid, id); err != nil {
+			s.deleting = false
+			s.mu.Unlock()
+			return err
+		}
 	}
 	done := s.done
 	s.mu.Unlock()
@@ -366,7 +380,105 @@ func (s *session) write(data []byte) error {
 		return errors.New("session is not running")
 	}
 	_, err := s.pty.Write(data)
+	if err == nil {
+		s.lastActivity = time.Now().UTC()
+		if s.info.Agent != "shell" && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
+			s.info.AgentState = "working"
+			info := s.info
+			s.broadcast(Frame{Type: "state", Info: &info})
+		}
+	}
 	return err
+}
+
+func (a *App) markTurnComplete(id string) {
+	s := a.session(id)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleting || s.info.State != "running" {
+		return
+	}
+	s.info.AgentState = "waiting"
+	s.lastActivity = time.Now().UTC()
+	info := s.info
+	s.broadcast(Frame{Type: "state", Info: &info})
+}
+
+const idleThreshold = 30 * time.Minute
+
+func (s *session) idleCandidate(now time.Time) bool {
+	if s.deleting || s.info.State != "running" || s.cmd == nil || s.cmd.Process == nil || s.lastActivity.IsZero() || now.Sub(s.lastActivity) < idleThreshold {
+		return false
+	}
+	if s.info.Agent == "shell" {
+		return true
+	}
+	return (s.info.Agent == "claude" || s.info.Agent == "codex") && s.info.AgentState == "waiting"
+}
+
+func (a *App) suspendIdleSessions(now time.Time) {
+	a.mu.RLock()
+	sessions := make([]*session, 0, len(a.sessions))
+	for _, s := range a.sessions {
+		sessions = append(sessions, s)
+	}
+	a.mu.RUnlock()
+	changed := false
+	for _, s := range sessions {
+		s.mu.Lock()
+		if s.idleCandidate(now) {
+			pid := s.cmd.Process.Pid
+			if s.info.Agent != "shell" || shellHasNoWork(pid, s.info.ID) {
+				if err := suspendSessionProcess(pid, s.info.ID); err == nil {
+					s.info.State = "sleeping"
+					s.info.UpdatedAt = now
+					info := s.info
+					s.broadcast(Frame{Type: "state", Info: &info})
+					changed = true
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+	if changed {
+		_ = a.saveSessions()
+	}
+}
+
+func (a *App) wakeSession(id string) (SessionInfo, error) {
+	s := a.session(id)
+	if s == nil {
+		return SessionInfo{}, os.ErrNotExist
+	}
+	s.mu.Lock()
+	if s.deleting {
+		s.mu.Unlock()
+		return SessionInfo{}, errors.New("session is being deleted")
+	}
+	if s.info.State == "sleeping" {
+		if s.cmd == nil || s.cmd.Process == nil {
+			s.mu.Unlock()
+			return SessionInfo{}, errors.New("sleeping process unavailable")
+		}
+		if err := resumeSessionProcess(s.cmd.Process.Pid, id); err != nil {
+			s.mu.Unlock()
+			return SessionInfo{}, err
+		}
+		s.info.State = "running"
+		s.info.UpdatedAt = time.Now().UTC()
+		s.lastActivity = s.info.UpdatedAt
+		info := s.info
+		s.broadcast(Frame{Type: "state", Info: &info})
+		s.mu.Unlock()
+		_ = a.saveSessions()
+		return info, nil
+	}
+	info := s.info
+	s.mu.Unlock()
+	return info, nil
 }
 
 func (s *session) resize(cols, rows uint16) error {

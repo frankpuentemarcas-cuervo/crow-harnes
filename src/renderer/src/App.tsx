@@ -10,6 +10,7 @@ type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
 const empty: SavedState = { hosts: [], projects: [], notices: [], eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' }
 const percent = (used: number, total: number): string => total > 0 ? `${Math.round(used / total * 100)}%` : '—'
+const memory = (bytes: number): string => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.round(bytes / 1024 ** 2)} MiB`
 
 export function App(): React.JSX.Element {
   const [state, setState] = useState<SavedState>(empty)
@@ -225,7 +226,7 @@ export function App(): React.JSX.Element {
               <span>{project.name}</span><ChevronRight size={13} className="project-chevron" />
             </button>
             {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <div key={session.id} className="session-entry">
-              <button className="session-row" title="Abrir vista de terminal" onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
+              <button className="session-row" title={session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
                 <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
               <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
@@ -242,7 +243,7 @@ export function App(): React.JSX.Element {
         <div className="breadcrumb"><span>{selectedHost?.name || 'Sin host'}</span><ChevronRight size={14} /><strong>{selectedProject?.name || 'Seleccioná un proyecto'}</strong><span className={`connection-pill ${status}`}>{status === 'connected' ? 'Conectado' : status === 'connecting' ? 'Reconectando' : status === 'auth-required' ? 'Frase requerida' : 'Desconectado'}</span></div>
         <div className="host-metrics" aria-label="Recursos de los servidores">{state.hosts.map((host) => {
           const sample = statuses[host.id] === 'connected' ? hostMetrics[host.id] : undefined
-          return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria y disco raíz`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span></div>
+          return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria, disco raíz y terminales suspendidas. La RAM suspendida es consumo estimado, no memoria liberada.`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span><span className="sleeping-metric" role="status" aria-atomic="true">Suspendidas {sample?.sleepingSessions ?? '—'} · RAM ≈{sample ? memory(sample.sleepingMemory || 0) : '—'}</span></div>
         })}</div>
         <div className="top-actions">
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>

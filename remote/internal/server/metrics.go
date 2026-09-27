@@ -11,12 +11,14 @@ import (
 )
 
 type HostMetrics struct {
-	CPUPercent  *float64  `json:"cpuPercent"`
-	MemoryUsed  uint64    `json:"memoryUsed"`
-	MemoryTotal uint64    `json:"memoryTotal"`
-	DiskUsed    uint64    `json:"diskUsed"`
-	DiskTotal   uint64    `json:"diskTotal"`
-	At          time.Time `json:"at"`
+	CPUPercent       *float64  `json:"cpuPercent"`
+	MemoryUsed       uint64    `json:"memoryUsed"`
+	MemoryTotal      uint64    `json:"memoryTotal"`
+	DiskUsed         uint64    `json:"diskUsed"`
+	DiskTotal        uint64    `json:"diskTotal"`
+	SleepingSessions int       `json:"sleepingSessions"`
+	SleepingMemory   uint64    `json:"sleepingMemory"`
+	At               time.Time `json:"at"`
 }
 
 type cpuSample struct {
@@ -113,5 +115,15 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		value := float64(busy) * 100 / float64(current.total-previous.total)
 		cpuPercent = &value
 	}
-	jsonResponse(w, http.StatusOK, HostMetrics{CPUPercent: cpuPercent, MemoryUsed: total - available, MemoryTotal: total, DiskUsed: diskUsed, DiskTotal: diskTotal, At: time.Now().UTC()})
+	sleeping := make(map[string]struct{})
+	a.mu.RLock()
+	for id, s := range a.sessions {
+		s.mu.Lock()
+		if s.info.State == "sleeping" {
+			sleeping[id] = struct{}{}
+		}
+		s.mu.Unlock()
+	}
+	a.mu.RUnlock()
+	jsonResponse(w, http.StatusOK, HostMetrics{CPUPercent: cpuPercent, MemoryUsed: total - available, MemoryTotal: total, DiskUsed: diskUsed, DiskTotal: diskTotal, SleepingSessions: len(sleeping), SleepingMemory: sleepingProcessMemory(sleeping), At: time.Now().UTC()})
 }

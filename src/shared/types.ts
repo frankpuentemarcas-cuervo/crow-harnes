@@ -24,6 +24,8 @@ export interface HostMetrics {
   memoryTotal: number
   diskUsed: number
   diskTotal: number
+  sleepingSessions: number
+  sleepingMemory: number
   at: string
 }
 
@@ -39,7 +41,8 @@ export interface SessionInfo {
   agent: Agent
   mode: Mode
   root: string
-  state: 'running' | 'exited' | 'interrupted'
+  state: 'running' | 'sleeping' | 'exited' | 'interrupted'
+  agentState?: 'working' | 'waiting' | 'unknown'
   startedAt: string
   updatedAt: string
   seq: number
@@ -120,6 +123,7 @@ export interface CrowAPI {
   sessions(hostId: string): Promise<SessionInfo[]>
   startSession(hostId: string, projectId: string, agent: Agent, mode: Mode): Promise<SessionInfo>
   deleteSession(hostId: string, sessionId: string): Promise<SavedState>
+  wakeSession(hostId: string, sessionId: string): Promise<SessionInfo>
   attach(hostId: string, sessionId: string, from: number, listener: (frame: TerminalFrame) => void): Promise<string>
   detach(subscriptionId: string): Promise<void>
   terminalInput(subscriptionId: string, data: string): Promise<void>

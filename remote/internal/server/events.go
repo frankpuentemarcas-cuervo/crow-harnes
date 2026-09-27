@@ -103,6 +103,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session is being deleted", http.StatusConflict)
 		return
 	}
+	a.markTurnComplete(body.SessionID)
 	a.addEvent(body.SessionID, body.Kind)
 	jsonResponse(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
