@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Agent, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
+import type { Agent, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
 
 const terminalListeners = new Map<string, (frame: TerminalFrame) => void>()
 ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: TerminalFrame }) => {
@@ -7,6 +7,9 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  getAlertSound: () => ipcRenderer.invoke('crow:get-alert-sound'),
+  saveAlertSound: (sound: AlertSound) => ipcRenderer.invoke('crow:save-alert-sound', sound),
+  clearAlertSound: () => ipcRenderer.invoke('crow:clear-alert-sound'),
   clipboardReadText: () => ipcRenderer.invoke('crow:clipboard-read'),
   clipboardWriteText: (text: string) => ipcRenderer.invoke('crow:clipboard-write', text),
   hostMetrics: (hostId: string) => ipcRenderer.invoke('crow:host-metrics', hostId),

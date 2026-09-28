@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { Bell, ChevronDown, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
 import type { Agent, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
@@ -6,7 +6,7 @@ import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
-import { isFreshNotice, playCompletionSound } from './completion-sound'
+import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
 type Dialog = 'host' | 'project' | null
@@ -14,6 +14,20 @@ const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Co
 const empty: SavedState = { hosts: [], projects: [], notices: [], eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' }
 const percent = (used: number, total: number): string => total > 0 ? `${Math.round(used / total * 100)}%` : '—'
 const memory = (bytes: number): string => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.round(bytes / 1024 ** 2)} MiB`
+const MAX_SOUND_BYTES = 5 * 1024 * 1024
+
+function readSoundBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'))
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== 'string' || !result.includes(',')) reject(new Error('El archivo no es válido.'))
+      else resolve(result.slice(result.indexOf(',') + 1))
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 export function App(): React.JSX.Element {
   const [state, setState] = useState<SavedState>(empty)
@@ -35,6 +49,12 @@ export function App(): React.JSX.Element {
   const [projectHostId, setProjectHostId] = useState('')
   const [error, setError] = useState('')
   const [noticeOpen, setNoticeOpen] = useState(false)
+  const [soundName, setSoundName] = useState('')
+  const [soundBusy, setSoundBusy] = useState(false)
+  const [soundError, setSoundError] = useState('')
+  const customSound = useRef<AudioBuffer | null>(null)
+  const soundGeneration = useRef(0)
+  const soundInput = useRef<HTMLInputElement>(null)
   const [filePanelOpen, setFilePanelOpen] = useState(true)
   const [fileRefresh, setFileRefresh] = useState(0)
   const [passphraseHostId, setPassphraseHostId] = useState('')
@@ -70,6 +90,17 @@ export function App(): React.JSX.Element {
   const cacheSeconds = cacheTimer ? Math.ceil((Date.parse(cacheTimer.cacheExpiresAt!) - clockNow) / 1000) : 0
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
+
+  useEffect(() => {
+    let live = true
+    const generation = soundGeneration.current
+    void window.crow.getAlertSound().then(async (saved) => {
+      if (!saved) return
+      const decoded = await decodeCompletionSound(saved.dataBase64)
+      if (live && soundGeneration.current === generation) { customSound.current = decoded; setSoundName(saved.name) }
+    }).catch((reason) => { if (live && soundGeneration.current === generation) setSoundError(`No se pudo cargar el sonido guardado: ${String(reason)}`) })
+    return () => { live = false }
+  }, [])
 
   useEffect(() => {
     if (!mobileOpen || !mobileStatus.running || !mobileStatus.url || !mobileStatus.pairingCode) { setMobileQR(''); return }
@@ -122,7 +153,7 @@ export function App(): React.JSX.Element {
     })
     const offNotice = window.crow.onNotice((notice) => {
       setState((current) => ({ ...current, notices: [notice, ...current.notices].slice(0, 100) }))
-      if (isFreshNotice(notice.at)) void playCompletionSound().catch((reason) => console.warn('Crow: no se pudo reproducir la alerta', reason))
+      if (isFreshNotice(notice.at)) void playCompletionSound(customSound.current).catch((reason) => console.warn('Crow: no se pudo reproducir la alerta', reason))
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
@@ -288,6 +319,45 @@ export function App(): React.JSX.Element {
     } finally { setPassphraseBusy(false) }
   }
 
+  async function chooseAlertSound(file?: File): Promise<void> {
+    if (!file) return
+    setSoundError('')
+    if (!/\.(mp3|wav|ogg)$/i.test(file.name) || file.size === 0 || file.size > MAX_SOUND_BYTES) {
+      setSoundError('Elegí un MP3, WAV u OGG de hasta 5 MB.')
+      return
+    }
+    soundGeneration.current += 1
+    setSoundBusy(true)
+    try {
+      const dataBase64 = await readSoundBase64(file)
+      const decoded = await decodeCompletionSound(dataBase64)
+      await window.crow.saveAlertSound({ name: file.name, dataBase64 })
+      customSound.current = decoded
+      setSoundName(file.name)
+      void playCompletionSound(decoded).catch((reason) => setSoundError(`Se guardó, pero no se pudo reproducir: ${String(reason)}`))
+    } catch (reason) {
+      setSoundError(`No se pudo configurar el sonido: ${String(reason)}`)
+      if (!customSound.current) {
+        try {
+          const saved = await window.crow.getAlertSound()
+          if (saved) { customSound.current = await decodeCompletionSound(saved.dataBase64); setSoundName(saved.name) }
+        } catch { /* El tono predeterminado sigue disponible. */ }
+      }
+    } finally { setSoundBusy(false) }
+  }
+
+  async function restoreDefaultSound(): Promise<void> {
+    soundGeneration.current += 1
+    setSoundBusy(true)
+    setSoundError('')
+    try {
+      await window.crow.clearAlertSound()
+      customSound.current = null
+      setSoundName('')
+    } catch (reason) { setSoundError(`No se pudo restaurar el sonido: ${String(reason)}`) }
+    finally { setSoundBusy(false) }
+  }
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Code2 size={18} /></span><span>CROW<span className="brand-soft"> HARNESS</span></span><button className="icon-button sidebar-action" title="Configuración" aria-label="Configuración" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Settings2 size={16} /></button></div>
@@ -333,7 +403,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
-            {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound().catch((reason) => setError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotice(notice.id); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
+            {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotice(notice.id); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
         </div>
       </header>

@@ -112,7 +112,15 @@ export interface SavedState {
   selectedProjectId: string
 }
 
+export interface AlertSound {
+  name: string
+  dataBase64: string
+}
+
 export interface CrowAPI {
+  getAlertSound(): Promise<AlertSound | null>
+  saveAlertSound(sound: AlertSound): Promise<void>
+  clearAlertSound(): Promise<void>
   clipboardReadText(): Promise<string>
   clipboardWriteText(text: string): Promise<void>
   hostMetrics(hostId: string): Promise<HostMetrics>

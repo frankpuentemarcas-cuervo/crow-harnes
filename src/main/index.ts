@@ -5,10 +5,12 @@ import { Connection } from './connection'
 import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
 import { Store } from './store'
-import type { Agent, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
+import { AlertSoundStore } from './alert-sound-store'
+import type { Agent, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
 let store: Store
+let alertSoundStore: AlertSoundStore
 let vault: PassphraseVault
 let mobile: MobileGateway
 const connections = new Map<string, Connection>()
@@ -79,6 +81,9 @@ function registerIPC(): void {
   }
 
   handle('crow:clipboard-read', () => clipboard.readText())
+  handle('crow:get-alert-sound', () => alertSoundStore.load())
+  handle('crow:save-alert-sound', (sound: AlertSound) => alertSoundStore.save(sound))
+  handle('crow:clear-alert-sound', () => alertSoundStore.clear())
   handle('crow:clipboard-write', (text: string) => {
     if (typeof text !== 'string') throw new Error('Texto de portapapeles inválido.')
     clipboard.writeText(text)
@@ -196,6 +201,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   store = new Store()
+  alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   vault = new PassphraseVault()
   mobile = new MobileGateway({ snapshot: () => store.snapshot(), connection })
   registerIPC()
