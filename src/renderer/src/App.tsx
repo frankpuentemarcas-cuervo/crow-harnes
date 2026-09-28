@@ -41,6 +41,7 @@ export function App(): React.JSX.Element {
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({})
+  const [visitedTerminalTabs, setVisitedTerminalTabs] = useState<string[]>([])
   const [agent, setAgent] = useState<Agent>('claude')
   const [mode, setMode] = useState<Mode>('normal')
   const [dialog, setDialog] = useState<Dialog>(null)
@@ -90,6 +91,11 @@ export function App(): React.JSX.Element {
   const cacheSeconds = cacheTimer ? Math.ceil((Date.parse(cacheTimer.cacheExpiresAt!) - clockNow) / 1000) : 0
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
+
+  useEffect(() => {
+    if (activeTab?.kind !== 'terminal') return
+    setVisitedTerminalTabs((current) => current.includes(activeTab.id) ? current : [...current, activeTab.id])
+  }, [activeTab?.id, activeTab?.kind])
 
   useEffect(() => {
     let live = true
@@ -437,7 +443,12 @@ export function App(): React.JSX.Element {
             </div>
             <div className="pane-body">
               {!activeTab && <div className="blank-state"><div className="blank-icon"><TerminalSquare size={30} /></div><h2>Tu espacio está listo</h2><p>Abrí una terminal con un agente, explorá archivos o iniciá el navegador del servidor.</p><button className="secondary-button" disabled={status !== 'connected'} onClick={() => void startSession()}><CirclePlus size={16} /> Nueva terminal</button></div>}
-              {activeTab?.kind === 'terminal' && activeTab.sessionId && <TerminalPane key={activeTab.id} hostId={selectedHost.id} sessionId={activeTab.sessionId} status={status} />}
+              {tabs.filter((tab) => tab.kind === 'terminal' && tab.sessionId && visitedTerminalTabs.includes(tab.id)).map((tab) => {
+                const project = state.projects.find((item) => item.id === tab.projectId)
+                if (!project) return null
+                const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
+                return <div key={tab.id} className="terminal-tab-slot" hidden={!active}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
+              })}
               {activeTab?.kind === 'editor' && activeTab.path && <EditorPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} path={activeTab.path} status={status} />}
               {activeTab?.kind === 'browser' && <BrowserPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} initialURL={activeTab.url || 'http://localhost:3000'} status={status} onURL={(url) => setTabs((current) => current.some((tab) => tab.id === activeTab.id && tab.url !== url) ? current.map((tab) => tab.id === activeTab.id ? { ...tab, url } : tab) : current)} />}
             </div>

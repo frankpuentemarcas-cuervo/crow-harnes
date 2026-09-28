@@ -9,12 +9,15 @@ function bytes(encoded: string): Uint8Array {
   return Uint8Array.from(raw, (character) => character.charCodeAt(0))
 }
 
-export function TerminalPane({ hostId, sessionId, status }: { hostId: string; sessionId: string; status: ConnectionStatus }): React.JSX.Element {
+export function TerminalPane({ hostId, sessionId, status, active }: { hostId: string; sessionId: string; status: ConnectionStatus; active: boolean }): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
+  const activeRef = useRef(active)
+  activeRef.current = active
   const fit = useRef<FitAddon | null>(null)
   const subscription = useRef<string>('')
   const lastSeq = useRef(0)
+  const lastRemoteSize = useRef('')
   const [info, setInfo] = useState<SessionInfo | null>(null)
   const [retry, setRetry] = useState(0)
   const [wakeError, setWakeError] = useState('')
@@ -47,6 +50,14 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
     catch (reason) { setWakeError(String(reason)) }
   }
 
+  async function resizeRemote(id: string, cols: number, rows: number): Promise<void> {
+    const size = `${cols}x${rows}`
+    if (cols < 1 || rows < 1 || lastRemoteSize.current === size) return
+    lastRemoteSize.current = size
+    try { await window.crow.terminalResize(id, cols, rows) }
+    catch { if (lastRemoteSize.current === size) lastRemoteSize.current = '' }
+  }
+
   useEffect(() => {
     if (!container.current) return
     const instance = new Terminal({
@@ -63,7 +74,7 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
     instance.open(container.current)
     terminal.current = instance
     fit.current = addon
-    addon.fit()
+    if (activeRef.current) addon.fit()
     instance.attachCustomKeyEventHandler((event) => {
       const action = terminalClipboardAction(event, instance.hasSelection())
       if (!action) return true
@@ -75,8 +86,10 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
     })
     const selection = instance.onSelectionChange(() => setHasSelection(instance.hasSelection()))
     const input = instance.onData((data) => { if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined) })
-    const resized = instance.onResize(({ cols, rows }) => { if (subscription.current) void window.crow.terminalResize(subscription.current, cols, rows).catch(() => undefined) })
-    const observer = new ResizeObserver(() => { addon.fit() })
+    const resized = instance.onResize(({ cols, rows }) => { if (subscription.current) void resizeRemote(subscription.current, cols, rows) })
+    const observer = new ResizeObserver(() => {
+      if (activeRef.current && container.current?.clientWidth && container.current?.clientHeight) addon.fit()
+    })
     observer.observe(container.current)
     return () => {
       observer.disconnect()
@@ -90,7 +103,7 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
   }, [sessionId])
 
   useEffect(() => {
-    if (status !== 'connected' || !terminal.current) return
+    if (!active || status !== 'connected' || !terminal.current) return
     let cancelled = false
     let attached = ''
     const attach = async (): Promise<void> => {
@@ -111,7 +124,7 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
         if (cancelled) { await window.crow.detach(attached).catch(() => undefined); return }
         subscription.current = attached
         fit.current?.fit()
-        if (terminal.current) await window.crow.terminalResize(attached, terminal.current.cols, terminal.current.rows)
+        if (terminal.current) await resizeRemote(attached, terminal.current.cols, terminal.current.rows)
         terminal.current?.focus()
       } catch {
         if (!cancelled) setTimeout(() => setRetry((current) => current + 1), 1500)
@@ -123,7 +136,17 @@ export function TerminalPane({ hostId, sessionId, status }: { hostId: string; se
       if (attached) void window.crow.detach(attached).catch(() => undefined)
       if (subscription.current === attached) subscription.current = ''
     }
-  }, [hostId, sessionId, status, retry])
+  }, [hostId, sessionId, status, retry, active])
+
+  useEffect(() => {
+    if (!active) return
+    const frame = requestAnimationFrame(() => {
+      if (!container.current?.clientWidth || !container.current?.clientHeight) return
+      fit.current?.fit()
+      if (terminal.current) terminal.current.refresh(0, terminal.current.rows - 1)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active])
 
   return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}</span><button className="terminal-clipboard-button" disabled={!hasSelection} title="Copiar selección (Ctrl+C o Ctrl+Shift+C)" onClick={() => void copySelection()}>Copiar</button><button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>{info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}</div>{wakeError && <div className="inline-error" role="alert">{wakeError}</div>}{clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}<div className="terminal-surface" ref={container} /></div>
 }

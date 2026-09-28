@@ -169,6 +169,8 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .statusbar span:first-child { display: inline-flex; align-items: center; gap: 7px; }
 .statusbar .status-dot { width: 6px; height: 6px; }
 .terminal-pane, .editor-pane, .browser-pane { height: 100%; width: 100%; min-height: 0; display: flex; flex-direction: column; }
+.terminal-tab-slot { height: 100%; width: 100%; }
+.terminal-tab-slot[hidden] { display: none; }
 .pane-meta { height: 31px; min-height: 31px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid #282d35; padding: 0 12px; color: #9da7b5; font-size: 10px; }
 .pane-meta .session-state { width: 6px; height: 6px; }
 .pane-meta-right { margin-left: auto; color: #8e99a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
