@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ConnectionStatus, SessionInfo } from '../../shared/types'
 import { terminalClipboardAction } from './terminal-clipboard'
+import { decodeOsc52Selection } from './terminal-osc52'
 
 function bytes(encoded: string): Uint8Array {
   const raw = atob(encoded)
@@ -18,18 +19,26 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
   const subscription = useRef<string>('')
   const lastSeq = useRef(0)
   const lastRemoteSize = useRef('')
+  const remoteSelection = useRef('')
   const [info, setInfo] = useState<SessionInfo | null>(null)
   const [retry, setRetry] = useState(0)
   const [wakeError, setWakeError] = useState('')
   const [clipboardError, setClipboardError] = useState('')
   const [hasSelection, setHasSelection] = useState(false)
+  const [hasRemoteSelection, setHasRemoteSelection] = useState(false)
+
+  function clearRemoteSelection(): void {
+    remoteSelection.current = ''
+    setHasRemoteSelection(false)
+  }
 
   async function copySelection(): Promise<void> {
-    const selected = terminal.current?.getSelection()
+    const selected = terminal.current?.getSelection() || remoteSelection.current
     if (!selected) return
     try {
       await window.crow.clipboardWriteText(selected)
       terminal.current?.clearSelection()
+      clearRemoteSelection()
       setHasSelection(false)
       setClipboardError('')
     } catch (reason) { setClipboardError(`No se pudo copiar: ${String(reason)}`) }
@@ -84,8 +93,19 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
       else void pasteClipboard()
       return false
     })
+    const osc52 = instance.parser.registerOscHandler(52, (data) => {
+      const selected = decodeOsc52Selection(data)
+      if (selected) {
+        remoteSelection.current = selected
+        setHasRemoteSelection(true)
+      }
+      return true
+    })
     const selection = instance.onSelectionChange(() => setHasSelection(instance.hasSelection()))
-    const input = instance.onData((data) => { if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined) })
+    const input = instance.onData((data) => {
+      if (remoteSelection.current) clearRemoteSelection()
+      if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined)
+    })
     const resized = instance.onResize(({ cols, rows }) => { if (subscription.current) void resizeRemote(subscription.current, cols, rows) })
     const observer = new ResizeObserver(() => {
       if (activeRef.current && container.current?.clientWidth && container.current?.clientHeight) addon.fit()
@@ -94,6 +114,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     return () => {
       observer.disconnect()
       selection.dispose()
+      osc52.dispose()
       input.dispose()
       resized.dispose()
       instance.dispose()
@@ -148,5 +169,5 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     return () => cancelAnimationFrame(frame)
   }, [active])
 
-  return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}</span><button className="terminal-clipboard-button" disabled={!hasSelection} title="Copiar selección (Ctrl+C o Ctrl+Shift+C)" onClick={() => void copySelection()}>Copiar</button><button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>{info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}</div>{wakeError && <div className="inline-error" role="alert">{wakeError}</div>}{clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}<div className="terminal-surface" ref={container} /></div>
+  return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}</span><button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title={hasRemoteSelection && !hasSelection ? 'Copiar texto ofrecido por el agente (Ctrl+Shift+C)' : 'Copiar selección (Ctrl+C o Ctrl+Shift+C)'} onClick={() => void copySelection()}>Copiar</button><button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>{info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}</div>{wakeError && <div className="inline-error" role="alert">{wakeError}</div>}{clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}<div className="terminal-surface" ref={container} /></div>
 }
