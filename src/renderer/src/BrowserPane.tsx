@@ -11,11 +11,13 @@ export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostI
   const surface = useRef<HTMLDivElement>(null)
   const started = useRef(false)
   const refreshing = useRef(false)
+  const navigating = useRef(false)
 
   async function navigate(raw: string): Promise<void> {
     if (status !== 'connected') return
     const url = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`
     setBusy(true)
+    navigating.current = true
     setError('')
     try {
       const result = await window.crow.browserOpen(hostId, root, url)
@@ -24,7 +26,7 @@ export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostI
       started.current = true
       await refresh()
     } catch (reason) { setError(String(reason)) }
-    finally { setBusy(false) }
+    finally { navigating.current = false; setBusy(false) }
   }
 
   async function refresh(): Promise<void> {
@@ -46,7 +48,7 @@ export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostI
     if (status !== 'connected') return
     let stopped = false
     if (!started.current) void navigate(initialURL)
-    const timer = setInterval(() => { if (!stopped) void refresh() }, 1200)
+    const timer = setInterval(() => { if (!stopped && !navigating.current) void refresh() }, 1200)
     return () => { stopped = true; clearInterval(timer) }
   }, [hostId, root, status])
 

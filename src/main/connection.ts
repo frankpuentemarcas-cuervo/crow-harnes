@@ -13,6 +13,7 @@ import { Store } from './store'
 import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './encrypted-ssh'
 import { PassphraseVault } from './passphrase-vault'
 import { remoteApiError } from './remote-errors'
+import { isTransportFailure } from './transport-failure'
 
 const execFileAsync = promisify(execFile)
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -88,10 +89,12 @@ export class Connection {
   }
 
   private closeTransport(): void {
-    this.tunnel?.kill()
+    const tunnel = this.tunnel
     this.tunnel = undefined
-    this.encryptedTunnel?.close()
+    tunnel?.kill()
+    const encryptedTunnel = this.encryptedTunnel
     this.encryptedTunnel = undefined
+    encryptedTunnel?.close()
   }
 
   private setStatus(status: ConnectionStatus): void {
@@ -118,7 +121,11 @@ export class Connection {
         this.pendingPassphrase = undefined
         if (!passphrase) throw new PassphraseRequiredError()
         try {
-          this.encryptedTunnel = await EncryptedSshTunnel.open(this.host, passphrase, () => this.lost())
+          let opened: EncryptedSshTunnel | undefined
+          opened = await EncryptedSshTunnel.open(this.host, passphrase, () => {
+            if (this.encryptedTunnel === opened) this.lost()
+          })
+          this.encryptedTunnel = opened
         } catch (error) {
           if (error instanceof PassphraseRequiredError) {
             this.vault.forget(this.host.id)
@@ -134,8 +141,8 @@ export class Connection {
         const args = [...this.sshOptions(), '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-N', '-L', `127.0.0.1:${this.localPort}:127.0.0.1:${this.host.remotePort}`, this.host.target]
         const tunnel = spawn('ssh', args, { windowsHide: true, stdio: 'ignore' })
         this.tunnel = tunnel
-        tunnel.once('exit', () => this.lost())
-        tunnel.once('error', () => this.lost())
+        tunnel.once('exit', () => { if (this.tunnel === tunnel) this.lost() })
+        tunnel.once('error', () => { if (this.tunnel === tunnel) this.lost() })
       }
       if (!this.desired) throw new Error('Conexión cancelada.')
       this.token = stdout.trim()
@@ -172,7 +179,7 @@ export class Connection {
   }
 
   private lost(): void {
-    if (this.currentStatus === 'disconnected' && !this.desired) return
+    if (this.currentStatus === 'disconnected') return
     this.closeTransport()
     if (this.pollTimer) clearInterval(this.pollTimer)
     for (const stream of this.streams.values()) stream.close()
@@ -194,24 +201,55 @@ export class Connection {
   private baseURL(path: string): string { return `http://127.0.0.1:${this.localPort}${path}` }
   private headers(): Record<string, string> { return { Authorization: `Bearer ${this.token}` } }
 
+  private async recoverTransport(error: unknown): Promise<void> {
+    if (!isTransportFailure(error) || this.currentStatus !== 'connected' || !this.desired) return
+    const port = this.localPort
+    try {
+      const response = await fetch(this.baseURL('/api/health'), {
+        headers: this.headers(), signal: AbortSignal.timeout(2500)
+      })
+      if (!response.ok && this.localPort === port) this.lost()
+    } catch {
+      if (this.localPort === port) this.lost()
+    }
+  }
+
   async api<T>(method: string, path: string, body?: unknown): Promise<T> {
     if (this.currentStatus !== 'connected') throw new Error('Host desconectado.')
-    const response = await fetch(this.baseURL(path), {
-      method,
-      headers: { ...this.headers(), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30000)
-    })
-    if (!response.ok) throw remoteApiError(response.status, await response.text(), method, path)
-    return response.json() as Promise<T>
+    try {
+      const response = await fetch(this.baseURL(path), {
+        method,
+        headers: { ...this.headers(), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(30000)
+      })
+      if (!response.ok) {
+        const detail = await response.text()
+        if (response.status === 401) this.lost()
+        throw remoteApiError(response.status, detail, method, path)
+      }
+      return response.json() as Promise<T>
+    } catch (error) {
+      await this.recoverTransport(error)
+      throw error
+    }
   }
 
   async binary(path: string): Promise<{ data: string; type: string; url: string }> {
     if (this.currentStatus !== 'connected') throw new Error('Host desconectado.')
-    const response = await fetch(this.baseURL(path), { headers: this.headers(), signal: AbortSignal.timeout(30000) })
-    if (!response.ok) throw new Error((await response.text()).trim() || `Error ${response.status}`)
-    const bytes = Buffer.from(await response.arrayBuffer())
-    return { data: bytes.toString('base64'), type: response.headers.get('content-type') || 'application/octet-stream', url: response.headers.get('x-browser-url') || '' }
+    try {
+      const response = await fetch(this.baseURL(path), { headers: this.headers(), signal: AbortSignal.timeout(30000) })
+      if (!response.ok) {
+        const detail = await response.text()
+        if (response.status === 401) this.lost()
+        throw new Error(detail.trim() || `Error ${response.status}`)
+      }
+      const bytes = Buffer.from(await response.arrayBuffer())
+      return { data: bytes.toString('base64'), type: response.headers.get('content-type') || 'application/octet-stream', url: response.headers.get('x-browser-url') || '' }
+    } catch (error) {
+      await this.recoverTransport(error)
+      throw error
+    }
   }
 
   async uploadLocalFile(root: string, directory: string, localPath: string): Promise<string> {
@@ -262,7 +300,7 @@ export class Connection {
   async attach(id: string, sessionId: string, from: number, emit: (frame: TerminalFrame) => void): Promise<void> {
     if (this.currentStatus !== 'connected') throw new Error('Host desconectado.')
     const url = `ws://127.0.0.1:${this.localPort}/api/sessions/${encodeURIComponent(sessionId)}/stream?from=${Math.max(0, from)}`
-    const socket = new WebSocket(url, { headers: this.headers() })
+    const socket = new WebSocket(url, { headers: this.headers(), handshakeTimeout: 10000 })
     this.streams.set(id, socket)
     socket.on('message', (raw) => {
       try { emit(JSON.parse(raw.toString()) as TerminalFrame) } catch { /* Ignore malformed frames. */ }
@@ -294,8 +332,8 @@ export class Connection {
         const notice = this.store.recordEvent(this.host.id, event)
         if (notice) this.onNotice(notice)
       }
-    } catch {
-      this.closeTransport()
+    } catch (error) {
+      await this.recoverTransport(error)
     } finally {
       this.polling = false
     }
