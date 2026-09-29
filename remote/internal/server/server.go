@@ -103,6 +103,8 @@ func Run() error {
 	mux.HandleFunc("GET /api/files/content", a.handleFile)
 	mux.HandleFunc("PUT /api/files/content", a.handleFile)
 	mux.HandleFunc("GET /api/files/raw", a.handleRawFile)
+	mux.HandleFunc("POST /api/files/upload", a.handleUploadFile)
+	mux.HandleFunc("GET /api/files/download", a.handleDownloadFile)
 	mux.HandleFunc("POST /api/browser/open", a.handleBrowserOpen)
 	mux.HandleFunc("GET /api/browser/frame", a.handleBrowserFrame)
 	mux.HandleFunc("POST /api/browser/input", a.handleBrowserInput)

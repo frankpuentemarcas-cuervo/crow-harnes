@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { Bell, ChevronDown, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
+import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
 import type { Agent, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
@@ -57,7 +57,6 @@ export function App(): React.JSX.Element {
   const soundGeneration = useRef(0)
   const soundInput = useRef<HTMLInputElement>(null)
   const [filePanelOpen, setFilePanelOpen] = useState(true)
-  const [fileRefresh, setFileRefresh] = useState(0)
   const [passphraseHostId, setPassphraseHostId] = useState('')
   const [passphrase, setPassphrase] = useState('')
   const [passphraseVisible, setPassphraseVisible] = useState(false)
@@ -453,7 +452,7 @@ export function App(): React.JSX.Element {
               {activeTab?.kind === 'browser' && <BrowserPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} initialURL={activeTab.url || 'http://localhost:3000'} status={status} onURL={(url) => setTabs((current) => current.some((tab) => tab.id === activeTab.id && tab.url !== url) ? current.map((tab) => tab.id === activeTab.id ? { ...tab, url } : tab) : current)} />}
             </div>
           </main>
-          {filePanelOpen && <aside className="files-pane"><div className="files-header"><span>EXPLORADOR</span><button className="icon-button" aria-label="Actualizar archivos" title="Actualizar archivos" onClick={() => setFileRefresh((value) => value + 1)}><RefreshCw size={14} /></button></div><div className="files-project"><ChevronDown size={14} /><FolderOpen size={15} /> {selectedProject.name}</div><FileTree key={`${selectedProject.id}:${fileRefresh}`} hostId={selectedHost.id} root={selectedProject.root} status={status} refreshKey={fileRefresh} onOpen={(path) => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'editor', path })} /></aside>}
+          {filePanelOpen && <aside className="files-pane"><FileTree key={selectedProject.id} hostId={selectedHost.id} root={selectedProject.root} projectName={selectedProject.name} status={status} onOpen={(path) => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'editor', path })} /></aside>}
         </div>
       </> : <div className="welcome"><div className="welcome-symbol"><Code2 size={36} /></div><h1>Un espacio para tus agentes</h1><p>Conectá un host Linux y agregá una carpeta de proyecto para empezar.</p><button className="primary-button" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Plus size={16} /> Agregar host</button></div>}
       <footer className="statusbar"><span><span className={`status-dot ${status}`} /> {selectedHost?.name || 'Sin conexión'}</span><span>{selectedProject?.root || 'Crow Harness v0.1'}</span></footer>

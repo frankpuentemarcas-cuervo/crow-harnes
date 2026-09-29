@@ -3,7 +3,9 @@ const newerRuntimeRoutes = [
   /^GET \/api\/hooks$/,
   /^PUT \/api\/hooks$/,
   /^DELETE \/api\/sessions\/[0-9a-f]{32}$/,
-  /^POST \/api\/sessions\/[0-9a-f]{32}\/wake$/
+  /^POST \/api\/sessions\/[0-9a-f]{32}\/wake$/,
+  /^POST \/api\/files\/upload$/,
+  /^GET \/api\/files\/download$/
 ]
 
 export function remoteApiError(status: number, body: string, method: string, path: string): Error {

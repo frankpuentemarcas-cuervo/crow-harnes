@@ -1,5 +1,11 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { rename, rm, stat } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import WebSocket from 'ws'
 import type { ConnectionStatus, Host, Notice, RemoteEvent, TerminalFrame } from '../shared/types'
@@ -10,6 +16,7 @@ import { remoteApiError } from './remote-errors'
 
 const execFileAsync = promisify(execFile)
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -205,6 +212,51 @@ export class Connection {
     if (!response.ok) throw new Error((await response.text()).trim() || `Error ${response.status}`)
     const bytes = Buffer.from(await response.arrayBuffer())
     return { data: bytes.toString('base64'), type: response.headers.get('content-type') || 'application/octet-stream', url: response.headers.get('x-browser-url') || '' }
+  }
+
+  async uploadLocalFile(root: string, directory: string, localPath: string): Promise<string> {
+    if (this.currentStatus !== 'connected') throw new Error('Host desconectado.')
+    if (!isAbsolute(localPath)) throw new Error('Ruta local inválida.')
+    const info = await stat(localPath)
+    if (!info.isFile()) throw new Error('Solo se pueden subir archivos, no carpetas.')
+    if (info.size > MAX_UPLOAD_BYTES) throw new Error('El archivo supera el límite de 512 MiB.')
+    const name = basename(localPath)
+    const query = new URLSearchParams({ root, directory, name })
+    const source = createReadStream(localPath)
+    try {
+      const response = await fetch(this.baseURL(`/api/files/upload?${query}`), {
+        method: 'POST',
+        headers: { ...this.headers(), 'Content-Type': 'application/octet-stream', 'Content-Length': String(info.size) },
+        body: Readable.toWeb(source) as BodyInit,
+        duplex: 'half',
+        signal: AbortSignal.timeout(30 * 60 * 1000)
+      } as RequestInit & { duplex: 'half' })
+      if (!response.ok) {
+        if (response.status === 409) throw new Error('Ya existe un archivo con ese nombre en la carpeta remota.')
+        if (response.status === 413) throw new Error('El archivo supera el límite de 512 MiB.')
+        throw remoteApiError(response.status, await response.text(), 'POST', '/api/files/upload')
+      }
+      return name
+    } finally {
+      source.destroy()
+    }
+  }
+
+  async downloadFile(root: string, path: string, destination: string): Promise<void> {
+    if (this.currentStatus !== 'connected') throw new Error('Host desconectado.')
+    const query = new URLSearchParams({ root, path })
+    const response = await fetch(this.baseURL(`/api/files/download?${query}`), {
+      headers: this.headers(), signal: AbortSignal.timeout(30 * 60 * 1000)
+    })
+    if (!response.ok) throw remoteApiError(response.status, await response.text(), 'GET', '/api/files/download')
+    if (!response.body) throw new Error('El servidor no entregó el archivo.')
+    const temporary = join(dirname(destination), `.crow-download-${randomUUID()}.part`)
+    try {
+      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(temporary, { flags: 'wx' }))
+      await rename(temporary, destination)
+    } finally {
+      await rm(temporary, { force: true })
+    }
   }
 
   async attach(id: string, sessionId: string, from: number, emit: (frame: TerminalFrame) => void): Promise<void> {

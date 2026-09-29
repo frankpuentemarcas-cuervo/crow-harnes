@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxUploadBytes = 512 * 1024 * 1024
+
 type fileEntry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -183,4 +185,107 @@ func (a *App) handleRawFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, path)
+}
+
+func (a *App) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		http.Error(w, "invalid file name", http.StatusBadRequest)
+		return
+	}
+	if r.ContentLength > maxUploadBytes {
+		http.Error(w, "file exceeds 512 MiB limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	root := r.URL.Query().Get("root")
+	if root == "" {
+		http.Error(w, "invalid project path", http.StatusBadRequest)
+		return
+	}
+	project, err := os.OpenRoot(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer project.Close()
+	directory := r.URL.Query().Get("directory")
+	if directory == "" {
+		directory = "."
+	}
+	parent, err := project.OpenRoot(directory)
+	if err != nil {
+		http.Error(w, "destination is not a directory", http.StatusBadRequest)
+		return
+	}
+	defer parent.Close()
+
+	id, err := randomID()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpName := ".crow-upload-" + id
+	tmp, err := parent.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer parent.Remove(tmpName)
+	defer tmp.Close()
+	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	_, err = io.Copy(tmp, body)
+	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			http.Error(w, "file exceeds 512 MiB limit", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "upload interrupted", http.StatusBadRequest)
+		}
+		return
+	}
+	if err = tmp.Sync(); err == nil {
+		err = tmp.Close()
+	}
+	if err == nil {
+		// Root.Link keeps the destination inside the project and never replaces an existing file.
+		err = parent.Link(tmpName, name)
+	}
+	if errors.Is(err, os.ErrExist) {
+		http.Error(w, "file already exists", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]string{"name": name})
+}
+
+func (a *App) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	root := r.URL.Query().Get("root")
+	if root == "" {
+		http.Error(w, "invalid project path", http.StatusBadRequest)
+		return
+	}
+	project, err := os.OpenRoot(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer project.Close()
+	file, err := project.Open(r.URL.Query().Get("path"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil || !stat.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": stat.Name()}))
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
 }

@@ -1,12 +1,12 @@
-import { app, BrowserWindow, clipboard, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import { join } from 'node:path'
+import { basename, join, posix } from 'node:path'
 import { Connection } from './connection'
 import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
 import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
-import type { Agent, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, UpdateState, WorkspaceTab } from '../shared/types'
+import type { Agent, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
 let store: Store
@@ -70,6 +70,20 @@ function byStream(id: string): Connection {
   const found = [...connections.values()].find((item) => item.ownsStream(id))
   if (!found) throw new Error('La terminal está desconectada.')
   return found
+}
+
+async function uploadLocalFiles(hostId: string, root: string, directory: string, paths: string[]): Promise<FileUploadResult> {
+  projectRoot(hostId, root)
+  if (!Array.isArray(paths) || paths.length > 100 || paths.some((path) => typeof path !== 'string')) {
+    throw new Error('Selección de archivos inválida (máximo 100 por vez).')
+  }
+  const uploaded: string[] = []
+  const failed: FileUploadResult['failed'] = []
+  for (const path of paths) {
+    try { uploaded.push(await connection(hostId).uploadLocalFile(root, directory, path)) }
+    catch (reason) { failed.push({ name: basename(path), error: reason instanceof Error ? reason.message : String(reason) }) }
+  }
+  return { uploaded, failed, canceled: false }
 }
 
 function registerIPC(): void {
@@ -161,6 +175,25 @@ function registerIPC(): void {
     projectRoot(hostId, root)
     const result = await connection(hostId).binary(`/api/files/raw?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`)
     return `data:${result.type};base64,${result.data}`
+  })
+  handle('crow:pick-upload-files', async (hostId: string, root: string, directory: string) => {
+    projectRoot(hostId, root)
+    if (!window) throw new Error('Ventana no disponible.')
+    const choice = await dialog.showOpenDialog(window, { title: 'Subir archivos al servidor', properties: ['openFile', 'multiSelections'] })
+    if (choice.canceled) return { uploaded: [], failed: [], canceled: true } satisfies FileUploadResult
+    return uploadLocalFiles(hostId, root, directory, choice.filePaths)
+  })
+  handle('crow:upload-dropped-file', (hostId: string, root: string, directory: string, path: string) => {
+    projectRoot(hostId, root)
+    return connection(hostId).uploadLocalFile(root, directory, path)
+  })
+  handle('crow:download-file', async (hostId: string, root: string, path: string) => {
+    projectRoot(hostId, root)
+    if (!window || !path || path.endsWith('/')) throw new Error('Archivo inválido.')
+    const choice = await dialog.showSaveDialog(window, { title: 'Descargar archivo del servidor', defaultPath: posix.basename(path) })
+    if (choice.canceled || !choice.filePath) return false
+    await connection(hostId).downloadFile(root, path, choice.filePath)
+    return true
   })
   handle('crow:browser-open', (hostId: string, root: string, url: string) => {
     projectRoot(hostId, root)

@@ -93,6 +93,12 @@ export interface FileContent {
   size: number
 }
 
+export interface FileUploadResult {
+  uploaded: string[]
+  failed: { name: string; error: string }[]
+  canceled: boolean
+}
+
 export interface WorkspaceTab {
   id: string
   projectId: string
@@ -159,6 +165,9 @@ export interface CrowAPI {
   readFile(hostId: string, root: string, path: string): Promise<FileContent>
   saveFile(hostId: string, root: string, path: string, content: string, hash: string): Promise<{ hash: string }>
   previewFile(hostId: string, root: string, path: string): Promise<string>
+  pickUploadFiles(hostId: string, root: string, directory: string): Promise<FileUploadResult>
+  uploadDroppedFile(hostId: string, root: string, directory: string, file: File): Promise<string>
+  downloadFile(hostId: string, root: string, path: string): Promise<boolean>
   browserOpen(hostId: string, root: string, url: string): Promise<{ url: string }>
   browserFrame(hostId: string, root: string): Promise<{ data: string; url: string }>
   browserInput(hostId: string, root: string, kind: string, payload?: Record<string, unknown>): Promise<void>

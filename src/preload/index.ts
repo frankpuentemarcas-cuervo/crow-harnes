@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { Agent, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
 
 const terminalListeners = new Map<string, (frame: TerminalFrame) => void>()
@@ -77,6 +77,13 @@ const api: CrowAPI = {
   readFile: (hostId: string, root: string, path: string) => ipcRenderer.invoke('crow:read-file', hostId, root, path),
   saveFile: (hostId: string, root: string, path: string, content: string, hash: string) => ipcRenderer.invoke('crow:save-file', hostId, root, path, content, hash),
   previewFile: (hostId: string, root: string, path: string) => ipcRenderer.invoke('crow:preview-file', hostId, root, path),
+  pickUploadFiles: (hostId: string, root: string, directory: string) => ipcRenderer.invoke('crow:pick-upload-files', hostId, root, directory),
+  uploadDroppedFile: (hostId: string, root: string, directory: string, file: File) => {
+    const path = webUtils.getPathForFile(file)
+    if (!path) return Promise.reject(new Error('No se pudo leer la ruta del archivo soltado.'))
+    return ipcRenderer.invoke('crow:upload-dropped-file', hostId, root, directory, path)
+  },
+  downloadFile: (hostId: string, root: string, path: string) => ipcRenderer.invoke('crow:download-file', hostId, root, path),
   browserOpen: (hostId: string, root: string, url: string) => ipcRenderer.invoke('crow:browser-open', hostId, root, url),
   browserFrame: (hostId: string, root: string) => ipcRenderer.invoke('crow:browser-frame', hostId, root),
   browserInput: (hostId: string, root: string, kind: string, payload?: Record<string, unknown>) => ipcRenderer.invoke('crow:browser-input', hostId, root, kind, payload)
