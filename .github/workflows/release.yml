@@ -1,4 +1,4 @@
-name: Windows release
+name: Crow release
 
 on:
   push:
@@ -9,7 +9,43 @@ permissions:
   contents: write
 
 jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: remote/go.mod
+          cache-dependency-path: remote/go.sum
+
+      - name: Test remote service
+        working-directory: remote
+        run: go test ./...
+
+      - name: Test one-command installer
+        run: bash remote/install_test.sh
+
+      - name: Package Linux service
+        shell: bash
+        run: |
+          mkdir -p linux-dist
+          for arch in amd64 arm64; do
+            (cd remote && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "../linux-dist/crowd-linux-$arch" ./cmd/crowd)
+            (cd linux-dist && sha256sum "crowd-linux-$arch" > "crowd-linux-$arch.sha256")
+          done
+
+      - name: Store Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: crowd-linux
+          path: linux-dist/*
+          if-no-files-found: error
+
   release:
+    needs: linux
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -38,6 +74,12 @@ jobs:
       - name: Build Windows installer
         run: npm run package:win
 
+      - name: Download Linux assets
+        uses: actions/download-artifact@v4
+        with:
+          name: crowd-linux
+          path: dist
+
       - name: Publish and verify release assets
         shell: pwsh
         env:
@@ -47,9 +89,16 @@ jobs:
           $installer = "dist/Crow-Harness-Setup-$version-x64.exe"
           $blockmap = "$installer.blockmap"
           $metadata = 'dist/latest.yml'
-          $files = @($installer, $blockmap, $metadata)
+          $linux = @('amd64', 'arm64') | ForEach-Object { "dist/crowd-linux-$_" }
+          $checksums = $linux | ForEach-Object { "$_.sha256" }
+          $files = @($installer, $blockmap, $metadata) + $linux + $checksums
           foreach ($file in $files) {
             if (-not (Test-Path -LiteralPath $file)) { throw "Missing release asset: $file" }
+          }
+          foreach ($file in $linux) {
+            $expected = ((Get-Content -LiteralPath "$file.sha256" -Raw).Trim() -split '\s+')[0]
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            if ($expected -ne $actual) { throw "Linux checksum mismatch: $file" }
           }
           if (-not ((Get-Content -LiteralPath $metadata -Raw) -match "(?m)^version: $version\r?`$")) {
             throw 'latest.yml does not match the release version'

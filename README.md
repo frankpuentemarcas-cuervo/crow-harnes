@@ -28,43 +28,25 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 
 ## Publicar una actualización
 
-Las versiones Windows se publican en GitHub Releases desde GitHub Actions al subir un tag `vX.Y.Z` que coincida con la versión en `package.json`. El workflow compila el instalador NSIS y publica el `.exe`, `latest.yml` y el mapa de bloques; no requiere guardar un token personal, usa `GITHUB_TOKEN` del workflow.
+Las versiones se publican en GitHub Releases desde GitHub Actions al subir un tag `vX.Y.Z` que coincida con la versión en `package.json`. El workflow compila el instalador NSIS y los binarios `crowd` de Linux x86-64/ARM64; publica el `.exe`, `latest.yml`, el mapa de bloques, los binarios Linux y sus sumas SHA-256. No requiere guardar un token personal: usa `GITHUB_TOKEN` del workflow.
 
 Para habilitar autoactualizaciones en instalaciones existentes, primero hay que distribuir e instalar Crow Harness **0.1.2** manualmente: las versiones anteriores no tienen cliente de actualizaciones. A partir de 0.1.2, las versiones nuevas se detectan y descargan automáticamente; la app muestra el botón **Reiniciar y actualizar** cuando termina la descarga.
 
-## Puesta en marcha para desarrollo
+## Puesta en marcha
 
-### 1. Host Linux
+### 1. Host Linux — un comando
 
-Requiere Go 1.26, `curl` y Chromium/Chrome para el navegador. Instalá y autenticá cada agente CLI **en el host**; las credenciales del cliente Windows no se transfieren.
-El servicio inicia con un shell de login para heredar el `PATH`; comprobá que `claude`, `codex` y `agy` sean visibles para ese usuario en ese entorno.
-
-```sh
-cd remote
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/crowd" ./cmd/crowd
-mkdir -p "$HOME/.config/systemd/user"
-cp crowd.service "$HOME/.config/systemd/user/crowd.service"
-systemctl --user daemon-reload
-systemctl --user enable --now crowd.service
-```
-
-Para que el servicio siga activo tras cerrar la sesión SSH, habilitá *linger* para ese usuario si el servidor no lo tiene: `loginctl enable-linger "$USER"` (puede requerir autorización administrativa). El servicio escucha **solo** en `127.0.0.1:47321` y crea un token en `~/.local/share/crow-harness/token` con permisos de usuario.
-
-Cuando cambie el código de `remote/`, también hay que volver a compilar y reiniciar `crowd` en cada host. Hacelo cuando no haya agentes trabajando: reiniciar el servicio puede terminar los procesos que contiene.
-
-Para subir o descargar archivos con la nueva versión de Windows también necesitás actualizar `crowd` en cada host Linux. La carga acepta archivos individuales de hasta 512 MiB (máximo 100 por selección); no sube carpetas completas y avisa si un nombre ya existe en el destino. **Copiar ruta** copia la ruta del host Linux, no una ruta de Windows.
-
-**Importante:** instalar o actualizar el `.exe` de Windows **no actualiza** `crowd` en Linux. Si eliminar una terminal devuelve `404 page not found` y CPU/RAM/DISCO siguen en `—`, probablemente estás ejecutando un `crowd` anterior. En el servidor, actualizá primero el código fuente de este repositorio y luego, desde su carpeta `remote/`, ejecutá:
+Conectate por SSH **como el usuario que usará Crow**, sin `sudo`, y ejecutá:
 
 ```sh
-go build -o "$HOME/.local/bin/crowd.new" ./cmd/crowd
-mv "$HOME/.local/bin/crowd.new" "$HOME/.local/bin/crowd"
-systemctl --user restart crowd.service
-systemctl --user status crowd.service --no-pager
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/frankpuentemarcas-cuervo/crow-harnes/main/remote/install.sh | bash'
 ```
 
-Reiniciá el servicio **solo cuando no haya agentes trabajando**: los procesos que mantiene el daemon pueden interrumpirse. Después reconectá el host desde Crow Harness. La nueva app mostrará «Actualizar crowd Linux» en la cabecera si detecta el `404` de las rutas nuevas.
+Ese mismo comando sirve para instalar o actualizar en cada host Linux x86-64 o ARM64. Descarga el binario publicado en la última versión, verifica su SHA-256, configura `crowd.service` como servicio de usuario y comprueba que responda en `127.0.0.1:47321`. **No requiere Go ni clonar el repositorio.** Podés [revisar el script](remote/install.sh) antes de ejecutarlo. La suma SHA-256 detecta descargas alteradas o incompletas; la confianza en el publicador sigue dependiendo de GitHub y de este repositorio.
+
+Si hace falta mantener el servicio tras cerrar SSH, el instalador intentará habilitar *linger*; puede pedir la contraseña de `sudo` **solo para ese paso**. Si no tiene permiso, mostrará una advertencia. Si ya hay terminales remotas vivas —o no puede verificar su estado— instalará el binario nuevo **sin reiniciar el proceso actual**; repetí el mismo comando cuando esas sesiones terminen para activar la actualización. Reiniciar `crowd` durante una sesión podría matar al agente.
+
+El instalador configura Crow, no instala ni autentica `claude`, `codex`, `agy` o Chromium/Chrome; esos programas deben estar disponibles en el host para usar sus funciones. El servicio inicia con un shell de login para heredar el `PATH`. Instalar o actualizar el `.exe` de Windows **no actualiza** automáticamente los hosts Linux. Para subir o descargar archivos, cada host debe ejecutar la versión correspondiente de `crowd` (archivos individuales de hasta 512 MiB y hasta 100 por selección).
 
 ### 2. Cliente Windows
 
