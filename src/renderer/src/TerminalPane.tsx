@@ -39,6 +39,11 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     setHasSelection(false)
   }
 
+  function clearCopyCandidates(): void {
+    if (pendingSelection.current.hasText()) clearPendingSelection()
+    if (remoteSelection.current) clearRemoteSelection()
+  }
+
   async function copySelection(): Promise<void> {
     const selected = pendingSelection.current.read(terminal.current?.getSelection() || '') || remoteSelection.current
     if (!selected) return
@@ -55,7 +60,10 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     if (!subscription.current) { setClipboardError('La terminal todavía no está conectada.'); return }
     try {
       const text = await window.crow.clipboardReadText()
-      if (text && subscription.current) terminal.current?.paste(text)
+      if (text && subscription.current) {
+        clearCopyCandidates()
+        terminal.current?.paste(text)
+      }
       setClipboardError('')
     } catch (reason) { setClipboardError(`No se pudo pegar: ${String(reason)}`) }
   }
@@ -111,9 +119,10 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     const selection = instance.onSelectionChange(() => {
       setHasSelection(pendingSelection.current.capture(instance.getSelection()))
     })
+    const key = instance.onKey(({ domEvent }) => {
+      if (terminalClipboardAction(domEvent, instance.hasSelection() || pendingSelection.current.hasText()) !== 'copy') clearCopyCandidates()
+    })
     const input = instance.onData((data) => {
-      if (pendingSelection.current.hasText()) clearPendingSelection()
-      if (remoteSelection.current) clearRemoteSelection()
       if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined)
     })
     const resized = instance.onResize(({ cols, rows }) => { if (subscription.current) void resizeRemote(subscription.current, cols, rows) })
@@ -124,6 +133,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     return () => {
       observer.disconnect()
       selection.dispose()
+      key.dispose()
       osc52.dispose()
       input.dispose()
       resized.dispose()
@@ -180,5 +190,19 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     return () => cancelAnimationFrame(frame)
   }, [active])
 
-  return <div className="terminal-pane"><div className="pane-meta"><span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'} <span className="meta-separator">·</span> {sessionId.slice(0, 8)} <span className="pane-meta-right">{status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}</span><button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title={hasRemoteSelection && !hasSelection ? 'Copiar texto ofrecido por el agente (Ctrl+Shift+C)' : 'Copiar selección (Ctrl+C o Ctrl+Shift+C)'} onClick={() => void copySelection()}>Copiar</button><button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>{info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}</div>{wakeError && <div className="inline-error" role="alert">{wakeError}</div>}{clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}<div className="terminal-surface" ref={container} onPointerDownCapture={() => { if (pendingSelection.current.hasText()) clearPendingSelection() }} /></div>
+  return <div className="terminal-pane">
+    <div className="pane-meta">
+      <span className={`session-state ${info?.state || 'running'}`} /> {info?.agent || 'Terminal'}
+      <span className="meta-separator">·</span> {sessionId.slice(0, 8)}
+      <span className="pane-meta-right">
+        {status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}
+      </span>
+      <button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title={hasRemoteSelection && !hasSelection ? 'Copiar texto ofrecido por el agente (Ctrl+Shift+C)' : 'Copiar selección (Ctrl+C o Ctrl+Shift+C)'} onClick={() => void copySelection()}>Copiar</button>
+      <button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>
+      {info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}
+    </div>
+    {wakeError && <div className="inline-error" role="alert">{wakeError}</div>}
+    {clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}
+    <div className="terminal-surface" ref={container} onPointerDownCapture={clearCopyCandidates} onPasteCapture={clearCopyCandidates} onCompositionStartCapture={clearCopyCandidates} />
+  </div>
 }
