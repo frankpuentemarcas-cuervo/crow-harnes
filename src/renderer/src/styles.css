@@ -47,10 +47,15 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .project-row { height: 31px; gap: 8px; padding: 0 9px 0 25px; border-radius: 5px; font-size: 12px; }
 .project-row:hover, .session-row:hover, .sidebar-add-project:hover { background: var(--hover); color: #eff1f5; }
 .project-row.selected { color: #fafafa; background: #353535; }
+.project-row.working:not(.selected) { color: #b8e6d3; }
 .project-row > .project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-alert { display: inline-flex; align-items: center; gap: 3px; flex: none; color: #e5bd75; font-size: 10px; font-weight: 700; }
 .project-chevron { opacity: .5; }
+.project-chevron.expanded { transform: rotate(90deg); }
+.project-working-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 3px rgb(52 211 153 / .12); }
 .session-row { height: 28px; gap: 8px; padding: 0 11px 0 52px; font-size: 11px; color: #9ca5b0; border-radius: 5px; }
+.session-row.agent-working { color: #a7f3d0; background: rgb(16 185 129 / .07); }
+.session-row.agent-working:hover { background: rgb(16 185 129 / .14); color: #d1fae5; }
 .session-entry { display: flex; align-items: center; }
 .session-entry .session-row { min-width: 0; flex: 1; padding-right: 4px; }
 .session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -65,6 +70,7 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .session-state.exited { background: #8b929d; }
 .session-state.interrupted { background: #d99a65; }
 .session-state.sleeping { background: #8eb7e7; }
+.session-state.agent-working { background: #34d399; box-shadow: 0 0 0 3px rgb(52 211 153 / .14); }
 .session-tail { margin-left: auto; color: #777f8a; font-family: Consolas, monospace; font-size: 10px; }
 .sidebar-add-project { height: 29px; gap: 5px; padding-left: 38px; font-size: 11px; color: #8d97a4; border-radius: 5px; }
 .sidebar-footer { height: 33px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 7px; padding: 0 14px; color: #8b929b; font-size: 10px; }

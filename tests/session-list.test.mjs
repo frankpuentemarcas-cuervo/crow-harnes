@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { sessionNameKey, sortSessionsByStart } from '../src/shared/session-list.ts'
+import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../src/shared/session-list.ts'
 
 const session = (id, startedAt, updatedAt = startedAt) => ({ id, startedAt, updatedAt })
 
@@ -15,4 +15,13 @@ test('session list order stays by creation time even when activity changes', () 
 test('terminal names are keyed by host and session to avoid collisions across servers', () => {
   assert.equal(sessionNameKey('host-a', 'session-1'), 'host-a:session-1')
   assert.notEqual(sessionNameKey('host-a', 'session-1'), sessionNameKey('host-b', 'session-1'))
+})
+
+test('project remains expanded only while a running agent reports active work', () => {
+  assert.equal(hasWorkingAgent([{ state: 'running', agentState: 'working' }]), true)
+  assert.equal(hasWorkingAgent([{ state: 'running', agentState: 'waiting' }]), false)
+  assert.equal(hasWorkingAgent([{ state: 'running', agentState: 'completed' }]), false)
+  assert.equal(hasWorkingAgent([{ state: 'sleeping', agentState: 'working' }]), false)
+  assert.equal(hasWorkingAgent([{ state: 'exited', agentState: 'working' }]), false)
+  assert.equal(hasWorkingAgent([]), false)
 })

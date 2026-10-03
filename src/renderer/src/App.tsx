@@ -8,7 +8,7 @@ import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
 import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
 import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
-import { sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
+import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
 type Dialog = 'host' | 'project' | null
@@ -90,6 +90,11 @@ export function App(): React.JSX.Element {
     for (const project of state.projects) counts[project.id] = unreadSessionCountForProject(state.notices, project.hostId, sessionsByProject[project.id] || [])
     return counts
   }, [state.projects, state.notices, sessionsByProject])
+  const workingAgentCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const project of state.projects) counts[project.id] = (sessionsByProject[project.id] || []).filter((session) => session.state === 'running' && session.agentState === 'working').length
+    return counts
+  }, [state.projects, sessionsByProject])
 
   const cacheTimer = (sessionsByProject[selectedProjectId] || [])
     .filter((session) => session.agent === 'claude' && !!session.cacheExpiresAt && Date.parse(session.cacheExpiresAt) > clockNow)
@@ -188,11 +193,13 @@ export function App(): React.JSX.Element {
   }, [tabs, activeTabs, selectedProjectId, loaded])
 
   useEffect(() => {
-    if (!selectedHost || status !== 'connected') return
-    void refreshSessions(selectedHost.id)
-    const timer = setInterval(() => void refreshSessions(selectedHost.id), 5000)
+    const connectedHostIds = state.hosts.filter((host) => statuses[host.id] === 'connected').map((host) => host.id)
+    if (connectedHostIds.length === 0) return
+    const refreshConnectedHosts = (): void => { for (const hostId of connectedHostIds) void refreshSessions(hostId) }
+    refreshConnectedHosts()
+    const timer = setInterval(refreshConnectedHosts, 5000)
     return () => clearInterval(timer)
-  }, [selectedHost?.id, status])
+  }, [state.hosts, statuses])
 
   useEffect(() => {
     const connected = state.hosts.filter((host) => statuses[host.id] === 'connected')
@@ -417,22 +424,30 @@ export function App(): React.JSX.Element {
             <button className="icon-button ghost-action" title="Conectar" aria-label={`Conectar ${host.name}`} onClick={() => void connect(host.id)}><RefreshCw size={13} /></button>
             <button className="icon-button ghost-action" title="Editar host" aria-label={`Editar ${host.name}`} onClick={() => { setEditingHost(host); setDialog('host') }}><MoreHorizontal size={15} /></button>
           </div>
-          {state.projects.filter((project) => project.hostId === host.id).map((project) => <div key={project.id}>
-            <button className={`project-row ${selectedProjectId === project.id ? 'selected' : ''}`} aria-label={`${project.name}${unreadSessionCounts[project.id] ? `, ${unreadSessionCounts[project.id]} terminales con alertas sin leer` : ''}`} onClick={() => setSelectedProjectId(project.id)}>
-              {selectedProjectId === project.id ? <FolderOpen size={16} /> : <Folder size={16} />}
+          {state.projects.filter((project) => project.hostId === host.id).map((project) => {
+            const workingAgents = workingAgentCounts[project.id] || 0
+            const projectExpanded = selectedProjectId === project.id || hasWorkingAgent(sessionsByProject[project.id] || [])
+            return <div key={project.id}>
+            <button className={`project-row ${selectedProjectId === project.id ? 'selected' : ''} ${workingAgents > 0 ? 'working' : ''}`} aria-label={`${project.name}${workingAgents ? `, ${workingAgents} ${workingAgents === 1 ? 'agente trabajando' : 'agentes trabajando'}` : ''}${unreadSessionCounts[project.id] ? `, ${unreadSessionCounts[project.id]} terminales con alertas sin leer` : ''}`} onClick={() => setSelectedProjectId(project.id)}>
+              {projectExpanded ? <FolderOpen size={16} /> : <Folder size={16} />}
               <span className="project-name">{project.name}</span>
+              {workingAgents > 0 && <span className="project-working-dot" title={`${workingAgents} ${workingAgents === 1 ? 'agente trabajando' : 'agentes trabajando'}`} aria-hidden="true" />}
               {unreadSessionCounts[project.id] > 0 && <span className="project-alert" title="Terminales con alertas sin leer"><Bell size={12} aria-hidden="true" /><span>{unreadSessionCounts[project.id]}</span></span>}
-              <ChevronRight size={13} className="project-chevron" />
+              <ChevronRight size={13} className={`project-chevron ${projectExpanded ? 'expanded' : ''}`} />
             </button>
-            {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <div key={session.id} className="session-entry">
-              <button className="session-row" title={session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
-                <span className={`session-state ${session.state}`} /><span className="session-name">{sessionDisplayName(host.id, session.id, session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
+            {projectExpanded && (sessionsByProject[project.id] || []).map((session) => {
+              const agentWorking = session.state === 'running' && session.agentState === 'working'
+              return <div key={session.id} className={`session-entry ${agentWorking ? 'agent-working' : ''}`}>
+              <button className={`session-row ${agentWorking ? 'agent-working' : ''}`} title={agentWorking ? 'Agente trabajando; abrir terminal' : session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
+                <span className={`session-state ${session.state} ${agentWorking ? 'agent-working' : ''}`} /><span className="session-name">{sessionDisplayName(host.id, session.id, session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
               <button className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
               <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
-            </div>)}
-          </div>)}
+            </div>
+            })}
+          </div>
+          })}
           <button className="sidebar-add-project" onClick={() => { setEditingProject(undefined); setProjectHostId(host.id); setDialog('project') }}><Plus size={13} /> Agregar proyecto</button>
         </div>)}
       </div>
