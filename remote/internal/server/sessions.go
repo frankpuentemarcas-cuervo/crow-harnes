@@ -17,15 +17,17 @@ import (
 )
 
 type session struct {
-	mu           sync.Mutex
-	info         SessionInfo
-	pty          *os.File
-	log          *os.File
-	cmd          *exec.Cmd
-	done         chan struct{}
-	deleting     bool
-	lastActivity time.Time
-	subs         map[chan Frame]struct{}
+	mu              sync.Mutex
+	info            SessionInfo
+	rootAgentState  string
+	activeSubagents map[string]struct{}
+	pty             *os.File
+	log             *os.File
+	cmd             *exec.Cmd
+	done            chan struct{}
+	deleting        bool
+	lastActivity    time.Time
+	subs            map[chan Frame]struct{}
 }
 
 func (s *session) snapshot() SessionInfo {
@@ -126,7 +128,7 @@ func (a *App) loadSessions() error {
 			info.AgentState = "unknown"
 			info.CacheExpiresAt = nil
 		}
-		a.sessions[info.ID] = &session{info: info, subs: make(map[chan Frame]struct{})}
+		a.sessions[info.ID] = &session{info: info, rootAgentState: info.AgentState, activeSubagents: make(map[string]struct{}), subs: make(map[chan Frame]struct{})}
 	}
 	return nil
 }
@@ -202,6 +204,8 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 			settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{
 				"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
 				"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
+				"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},
+				"SubagentStop":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-stop"}}}},
 			}})
 			args = append(args, "--settings", string(settings))
 		}
@@ -213,6 +217,10 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 		args := []string{}
 		if hook != "" {
 			args = append(args, "-c", fmt.Sprintf("notify=[%q,%q]", hook, "turn-complete"))
+			args = append(args,
+				"-c", codexCommandHookConfig("SubagentStart", shellQuote(hook)+" subagent-start"),
+				"-c", codexCommandHookConfig("SubagentStop", shellQuote(hook)+" subagent-stop"),
+			)
 		}
 		if mode == "bypass" {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
@@ -227,6 +235,10 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 	default:
 		return "", nil, errors.New("unsupported agent")
 	}
+}
+
+func codexCommandHookConfig(event, command string) string {
+	return fmt.Sprintf("hooks.%s=[{hooks=[{type=\"command\",command=%q}]}]", event, command)
 }
 
 func claudeCacheTTL(agent string) int {
@@ -300,7 +312,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	if (hook == "" || agent == "agy") && agent != "shell" {
 		initialAgentState = "unknown"
 	}
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", CacheTTLSeconds: claudeCacheTTL(agent), StartedAt: now, UpdatedAt: now}, pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", CacheTTLSeconds: claudeCacheTTL(agent), StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -425,7 +437,8 @@ func (s *session) write(data []byte) error {
 	if err == nil {
 		s.lastActivity = time.Now().UTC()
 		if s.info.HooksActive && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
-			s.info.AgentState = "working"
+			s.rootAgentState = "working"
+			s.updateAgentStateLocked()
 			s.info.CacheExpiresAt = nil
 			info := s.info
 			s.broadcast(Frame{Type: "state", Info: &info})
@@ -444,16 +457,65 @@ func (a *App) markAgentState(id, state string) {
 	if s.deleting || s.info.State != "running" || !s.info.HooksActive {
 		return
 	}
-	s.info.AgentState = state
+	s.rootAgentState = state
+	s.updateAgentStateLocked()
 	s.lastActivity = time.Now().UTC()
-	if state == "completed" && s.info.CacheTTLSeconds > 0 {
+	if state == "completed" && len(s.activeSubagents) == 0 && s.info.CacheTTLSeconds > 0 {
 		expires := s.lastActivity.Add(time.Duration(s.info.CacheTTLSeconds) * time.Second)
 		s.info.CacheExpiresAt = &expires
-	} else if state == "working" {
+	} else {
 		s.info.CacheExpiresAt = nil
 	}
 	info := s.info
 	s.broadcast(Frame{Type: "state", Info: &info})
+}
+
+func (a *App) markSubagentState(id, agentID string, active bool) {
+	if strings.TrimSpace(agentID) == "" {
+		return
+	}
+	s := a.session(id)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleting || s.info.State != "running" || !s.info.HooksActive {
+		return
+	}
+	if s.activeSubagents == nil {
+		s.activeSubagents = make(map[string]struct{})
+	}
+	_, exists := s.activeSubagents[agentID]
+	if active {
+		if exists {
+			return
+		}
+		s.activeSubagents[agentID] = struct{}{}
+	} else {
+		if !exists {
+			return
+		}
+		delete(s.activeSubagents, agentID)
+	}
+	s.lastActivity = time.Now().UTC()
+	if active {
+		s.info.CacheExpiresAt = nil
+	} else if len(s.activeSubagents) == 0 && s.rootAgentState == "completed" && s.info.CacheTTLSeconds > 0 {
+		expires := s.lastActivity.Add(time.Duration(s.info.CacheTTLSeconds) * time.Second)
+		s.info.CacheExpiresAt = &expires
+	}
+	s.updateAgentStateLocked()
+	info := s.info
+	s.broadcast(Frame{Type: "state", Info: &info})
+}
+
+func (s *session) updateAgentStateLocked() {
+	if len(s.activeSubagents) > 0 {
+		s.info.AgentState = "working"
+	} else {
+		s.info.AgentState = s.rootAgentState
+	}
 }
 
 const idleThreshold = 30 * time.Minute

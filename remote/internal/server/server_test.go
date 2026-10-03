@@ -53,6 +53,25 @@ func TestAgentCommandKeepsBypassExplicit(t *testing.T) {
 	}
 }
 
+func TestCodexCommandTracksSubagentLifecycle(t *testing.T) {
+	_, args, err := agentCommand("codex", "normal", "/tmp/crow hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"notify=[\"/tmp/crow hook\",\"turn-complete\"]",
+		"hooks.SubagentStart=",
+		"hooks.SubagentStop=",
+		"'/tmp/crow hook' subagent-start",
+		"'/tmp/crow hook' subagent-stop",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Codex args %q missing %q", joined, want)
+		}
+	}
+}
+
 func TestBrowserURLRequiresHTTP(t *testing.T) {
 	for _, raw := range []string{"file:///etc/passwd", "javascript:alert(1)", "localhost:3000"} {
 		if _, err := browserURL(raw); err == nil {

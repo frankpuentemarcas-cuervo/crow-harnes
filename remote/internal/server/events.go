@@ -109,7 +109,9 @@ func (a *App) setHooksEnabled(enabled bool) error {
 			s.info.HooksActive = false
 			if s.info.Agent != "shell" {
 				s.info.AgentState = "unknown"
+				s.rootAgentState = "unknown"
 			}
+			clear(s.activeSubagents)
 			s.info.CacheExpiresAt = nil
 			info := s.info
 			s.broadcast(Frame{Type: "state", Info: &info})
@@ -185,13 +187,18 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"sessionId"`
 		Kind      string `json:"kind"`
 		Message   string `json:"message"`
+		AgentID   string `json:"agentId"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
 	}
 	s := a.session(body.SessionID)
-	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working") {
+	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "subagent-start" && body.Kind != "subagent-stop") {
 		http.Error(w, "invalid event", http.StatusBadRequest)
+		return
+	}
+	if (body.Kind == "subagent-start" || body.Kind == "subagent-stop") && strings.TrimSpace(body.AgentID) == "" {
+		http.Error(w, "missing subagent id", http.StatusBadRequest)
 		return
 	}
 	s.mu.Lock()
@@ -204,6 +211,10 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Kind == "working" {
 		a.markAgentState(body.SessionID, "working")
+	} else if body.Kind == "subagent-start" {
+		a.markSubagentState(body.SessionID, body.AgentID, true)
+	} else if body.Kind == "subagent-stop" {
+		a.markSubagentState(body.SessionID, body.AgentID, false)
 	} else {
 		a.markAgentState(body.SessionID, "completed")
 		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message))
@@ -216,21 +227,23 @@ const maxHookPayload = 128 * 1024
 // RunHookNotify is invoked by managed agent hooks. Claude writes the hook JSON
 // to stdin; Codex notify passes its JSON payload as a command argument.
 func RunHookNotify(args []string) error {
-	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete") {
-		return errors.New("usage: crowd hook-notify <working|turn-complete> [codex-payload]")
+	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop") {
+		return errors.New("usage: crowd hook-notify <working|turn-complete|subagent-start|subagent-stop> [agent-payload]")
 	}
 	kind := args[0]
 	if os.Getenv("CROW_SESSION_ID") == "" {
 		return nil
 	}
 
-	var message string
-	if kind == "turn-complete" {
+	var message, agentID string
+	if kind == "turn-complete" || kind == "subagent-start" || kind == "subagent-stop" {
 		var payload []byte
-		for _, arg := range args[1:] {
-			if json.Valid([]byte(arg)) {
-				payload = []byte(arg)
-				break
+		if kind == "turn-complete" {
+			for _, arg := range args[1:] {
+				if json.Valid([]byte(arg)) {
+					payload = []byte(arg)
+					break
+				}
 			}
 		}
 		if len(payload) == 0 {
@@ -240,9 +253,13 @@ func RunHookNotify(args []string) error {
 			}
 			payload = read
 		}
-		message = hookAssistantMessage(payload)
-		if runes := []rune(message); len(runes) > 12000 {
-			message = string(runes[:12000])
+		if kind == "turn-complete" {
+			message = hookAssistantMessage(payload)
+			if runes := []rune(message); len(runes) > 12000 {
+				message = string(runes[:12000])
+			}
+		} else {
+			agentID = hookAgentID(payload)
 		}
 	}
 
@@ -259,7 +276,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message})
+	body, err := json.Marshal(map[string]string{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID})
 	if err != nil {
 		return err
 	}
@@ -287,6 +304,18 @@ func RunHookNotify(args []string) error {
 		return fmt.Errorf("local event endpoint returned %s", response.Status)
 	}
 	return nil
+}
+
+func hookAgentID(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	var agentID string
+	if json.Unmarshal(fields["agent_id"], &agentID) != nil {
+		return ""
+	}
+	return agentID
 }
 
 func hookAssistantMessage(payload []byte) string {
