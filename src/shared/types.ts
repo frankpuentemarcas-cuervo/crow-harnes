@@ -72,6 +72,7 @@ export interface RemoteEvent {
   seq: number
   sessionId: string
   kind: 'turn-complete' | 'process-exited'
+  requiresAttention?: boolean
   at: string
 }
 

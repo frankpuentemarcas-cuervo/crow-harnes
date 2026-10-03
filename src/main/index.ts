@@ -51,9 +51,9 @@ function connection(hostId: string): Connection {
 
 function onNotice(notice: Notice): void {
   send('crow:notice', notice)
-  if (Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
+  if (notice.requiresAttention && Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
     const host = store.host(notice.hostId)
-    const title = notice.kind === 'turn-complete' ? 'Agente terminó el trabajo' : 'Agente finalizó'
+    const title = notice.requiresAttention ? 'Agente necesita tu atención' : notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Agente finalizó'
     const session = store.sessionName(notice.hostId, notice.sessionId)
     const item = new Notification({ title, body: `${host?.name || 'Host'} · ${session || `sesión ${notice.sessionId.slice(0, 8)}`}`, silent: true })
     item.on('click', () => { window?.show(); window?.focus() })

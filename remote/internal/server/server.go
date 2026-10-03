@@ -30,6 +30,7 @@ type App struct {
 	port         string
 	token        string
 	hookPath     string
+	binaryPath   string
 	hooksEnabled bool
 	sessions     map[string]*session
 	events       []Event
@@ -53,6 +54,10 @@ func Run() error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
+	binaryPath, err := os.Executable()
+	if err != nil {
+		return err
+	}
 	port := os.Getenv("CROW_PORT")
 	if port == "" {
 		port = "47321"
@@ -74,7 +79,7 @@ func Run() error {
 	} else if err != nil {
 		return err
 	}
-	a := &App{dir: dir, port: port, token: strings.TrimSpace(string(tokenBytes)), sessions: make(map[string]*session), browsers: make(map[string]*browser)}
+	a := &App{dir: dir, port: port, token: strings.TrimSpace(string(tokenBytes)), binaryPath: binaryPath, sessions: make(map[string]*session), browsers: make(map[string]*browser)}
 	if a.token == "" {
 		return errors.New("empty token")
 	}

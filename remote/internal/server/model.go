@@ -26,9 +26,10 @@ type Frame struct {
 }
 
 type Event struct {
-	ID        string    `json:"id"`
-	Seq       uint64    `json:"seq"`
-	SessionID string    `json:"sessionId"`
-	Kind      string    `json:"kind"`
-	At        time.Time `json:"at"`
+	ID                string    `json:"id"`
+	Seq               uint64    `json:"seq"`
+	SessionID         string    `json:"sessionId"`
+	Kind              string    `json:"kind"`
+	RequiresAttention bool      `json:"requiresAttention,omitempty"`
+	At                time.Time `json:"at"`
 }

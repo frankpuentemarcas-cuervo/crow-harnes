@@ -351,7 +351,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 			_ = a.saveSessions()
 		}
 		if !deleting && agent != "shell" {
-			a.addEvent(id, "process-exited")
+			a.addEvent(id, "process-exited", code != 0)
 		}
 	}()
 	return s.snapshot(), nil

@@ -1,7 +1,7 @@
 import type { Notice, Project, SessionInfo, WorkspaceTab } from '../../shared/types'
 
 export function unreadNoticesForSession(notices: Notice[], hostId: string, sessionId: string): Notice[] {
-  return notices.filter((notice) => !notice.read && notice.hostId === hostId && notice.sessionId === sessionId)
+  return notices.filter((notice) => !notice.read && notice.requiresAttention && notice.hostId === hostId && notice.sessionId === sessionId)
 }
 
 export function unreadNoticesForTab(notices: Notice[], projects: Project[], tab: WorkspaceTab): Notice[] {
@@ -11,6 +11,6 @@ export function unreadNoticesForTab(notices: Notice[], projects: Project[], tab:
 }
 
 export function unreadSessionCountForProject(notices: Notice[], hostId: string, sessions: SessionInfo[]): number {
-  const unreadSessionIds = new Set(notices.filter((notice) => !notice.read && notice.hostId === hostId).map((notice) => notice.sessionId))
+  const unreadSessionIds = new Set(notices.filter((notice) => !notice.read && notice.requiresAttention && notice.hostId === hostId).map((notice) => notice.sessionId))
   return sessions.filter((session) => unreadSessionIds.has(session.id)).length
 }

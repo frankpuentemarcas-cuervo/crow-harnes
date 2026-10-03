@@ -2,9 +2,14 @@ package server
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,16 +46,15 @@ func (a *App) loadHookSettings() error {
 
 func (a *App) installHook() error {
 	path := filepath.Join(a.dir, "notify-stop.sh")
-	script := `#!/bin/sh
-[ -n "$CROW_SESSION_ID" ] || exit 0
-case "$1" in working) KIND=working ;; ""|turn-complete) KIND=turn-complete ;; *) exit 0 ;; esac
-TOKEN=$(cat "$HOME/.local/share/crow-harness/token") || exit 0
-curl -fsS --max-time 2 -X POST \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{\"sessionId\":\"$CROW_SESSION_ID\",\"kind\":\"$KIND\"}" \
-  "$CROW_EVENT_URL" >/dev/null 2>&1 || true
-`
+	binaryPath := a.binaryPath
+	if binaryPath == "" {
+		var err error
+		binaryPath, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate crowd hook executable: %w", err)
+		}
+	}
+	script := "#!/bin/sh\n[ -n \"$CROW_SESSION_ID\" ] || exit 0\nexec " + shellQuote(binaryPath) + " hook-notify \"$@\"\n"
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		return err
 	}
@@ -142,7 +146,7 @@ func (a *App) loadEvents() error {
 	return scan.Err()
 }
 
-func (a *App) addEvent(sessionID, kind string) {
+func (a *App) addEvent(sessionID, kind string, attention bool) {
 	id, err := randomID()
 	if err != nil {
 		return
@@ -152,7 +156,7 @@ func (a *App) addEvent(sessionID, kind string) {
 	if len(a.events) > 0 {
 		seq = a.events[len(a.events)-1].Seq + 1
 	}
-	event := Event{ID: id, Seq: seq, SessionID: sessionID, Kind: kind, At: time.Now().UTC()}
+	event := Event{ID: id, Seq: seq, SessionID: sessionID, Kind: kind, RequiresAttention: attention, At: time.Now().UTC()}
 	a.events = append(a.events, event)
 	encoded, _ := json.Marshal(event)
 	f, err := os.OpenFile(filepath.Join(a.dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -180,6 +184,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"sessionId"`
 		Kind      string `json:"kind"`
+		Message   string `json:"message"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
@@ -201,7 +206,99 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		a.markAgentState(body.SessionID, "working")
 	} else {
 		a.markAgentState(body.SessionID, "completed")
-		a.addEvent(body.SessionID, body.Kind)
+		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message))
 	}
 	jsonResponse(w, http.StatusAccepted, map[string]bool{"ok": true})
+}
+
+const maxHookPayload = 128 * 1024
+
+// RunHookNotify is invoked by managed agent hooks. Claude writes the hook JSON
+// to stdin; Codex notify passes its JSON payload as a command argument.
+func RunHookNotify(args []string) error {
+	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete") {
+		return errors.New("usage: crowd hook-notify <working|turn-complete> [codex-payload]")
+	}
+	kind := args[0]
+	if os.Getenv("CROW_SESSION_ID") == "" {
+		return nil
+	}
+
+	var message string
+	if kind == "turn-complete" {
+		var payload []byte
+		for _, arg := range args[1:] {
+			if json.Valid([]byte(arg)) {
+				payload = []byte(arg)
+				break
+			}
+		}
+		if len(payload) == 0 {
+			read, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookPayload))
+			if err != nil {
+				return err
+			}
+			payload = read
+		}
+		message = hookAssistantMessage(payload)
+		if runes := []rune(message); len(runes) > 12000 {
+			message = string(runes[:12000])
+		}
+	}
+
+	baseURL := strings.TrimRight(os.Getenv("CROW_EVENT_URL"), "/")
+	parsedURL, err := url.ParseRequestURI(baseURL)
+	if err != nil || parsedURL.Scheme != "http" || parsedURL.Hostname() != "127.0.0.1" || parsedURL.Port() == "" || parsedURL.User != nil || parsedURL.Path != "/api/events" || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return errors.New("invalid local event URL")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	token, err := os.ReadFile(filepath.Join(home, ".local", "share", "crow-harness", "token"))
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]string{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	request.Header.Set("Content-Type", "application/json")
+	client := &http.Client{
+		Transport: &http.Transport{},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	if response.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("local event endpoint returned %s", response.Status)
+	}
+	return nil
+}
+
+func hookAssistantMessage(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"last_assistant_message", "last-assistant-message", "lastAssistantMessage"} {
+		var message string
+		if json.Unmarshal(fields[key], &message) == nil {
+			return message
+		}
+	}
+	return ""
 }

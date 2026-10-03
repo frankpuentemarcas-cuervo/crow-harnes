@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
 import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from '../src/renderer/src/session-notices.ts'
 
-const notice = (id, hostId, sessionId, read = false) => ({ id, hostId, sessionId, read, kind: 'turn-complete', seq: 1, at: '2026-10-02T00:00:00Z' })
+const notice = (id, hostId, sessionId, read = false, requiresAttention = true) => ({ id, hostId, sessionId, read, requiresAttention, kind: 'turn-complete', seq: 1, at: '2026-10-02T00:00:00Z' })
 
 test('bell belongs only to unread alerts for the same host and terminal', () => {
   const notices = [notice('a', 'host-a', 'session-a'), notice('b', 'host-a', 'session-a'), notice('c', 'host-b', 'session-a'), notice('d', 'host-a', 'session-b'), notice('e', 'host-a', 'session-a', true)]
@@ -11,10 +11,16 @@ test('bell belongs only to unread alerts for the same host and terminal', () => 
 })
 
 test('project indicator counts affected terminals, not repeated alerts', () => {
-  const notices = [notice('a', 'host-a', 'session-a'), notice('b', 'host-a', 'session-a'), notice('c', 'host-a', 'session-b'), notice('d', 'host-b', 'session-a')]
+  const notices = [notice('a', 'host-a', 'session-a'), notice('b', 'host-a', 'session-a'), notice('c', 'host-a', 'session-b'), notice('d', 'host-b', 'session-a'), notice('info', 'host-a', 'session-c', false, false)]
   const sessions = [{ id: 'session-a' }, { id: 'session-b' }, { id: 'session-c' }]
   assert.equal(unreadSessionCountForProject(notices, 'host-a', sessions), 2)
   assert.equal(unreadSessionCountForProject(notices, 'host-b', sessions), 1)
+})
+
+test('informational completions remain in activity history but do not raise attention bells', () => {
+  const notices = [notice('info', 'host-a', 'session-a', false, false)]
+  assert.deepEqual(unreadNoticesForSession(notices, 'host-a', 'session-a'), [])
+  assert.equal(unreadSessionCountForProject(notices, 'host-a', [{ id: 'session-a' }]), 0)
 })
 
 test('selecting a terminal acknowledges all its unread alerts without affecting other terminals', () => {
