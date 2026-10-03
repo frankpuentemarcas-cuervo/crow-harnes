@@ -7,6 +7,7 @@ import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
 import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
+import { unreadNoticesForSession, unreadSessionCountForProject } from './session-notices'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
 type Dialog = 'host' | 'project' | null
@@ -83,6 +84,11 @@ export function App(): React.JSX.Element {
     for (const project of state.projects) map[project.id] = (sessions[project.hostId] || []).filter((session) => session.root === project.root)
     return map
   }, [state.projects, sessions])
+  const unreadSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const project of state.projects) counts[project.id] = unreadSessionCountForProject(state.notices, project.hostId, sessionsByProject[project.id] || [])
+    return counts
+  }, [state.projects, state.notices, sessionsByProject])
 
   const cacheTimer = (sessionsByProject[selectedProjectId] || [])
     .filter((session) => session.agent === 'claude' && !!session.cacheExpiresAt && Date.parse(session.cacheExpiresAt) > clockNow)
@@ -281,8 +287,26 @@ export function App(): React.JSX.Element {
     } catch (reason) { setError(String(reason)) }
   }
 
-  async function markNotice(id: string): Promise<void> {
-    setState(await window.crow.markNoticeRead(id))
+  async function markNotices(ids: string[]): Promise<void> {
+    if (ids.length === 0) return
+    const selected = new Set(ids)
+    setState((current) => ({ ...current, notices: current.notices.map((notice) => selected.has(notice.id) ? { ...notice, read: true } : notice) }))
+    try {
+      for (const id of ids) await window.crow.markNoticeRead(id)
+    } catch (reason) {
+      setError(`No se pudo marcar la alerta como leída: ${String(reason)}`)
+      try {
+        const saved = await window.crow.getState()
+        setState((current) => ({ ...current, notices: saved.notices }))
+      } catch { /* Se conserva el estado visual hasta la próxima carga. */ }
+    }
+  }
+
+  function openNotifiedSession(projectId: string, hostId: string, session: SessionInfo): void {
+    const ids = unreadNoticesForSession(state.notices, hostId, session.id).map((notice) => notice.id)
+    setSelectedProjectId(projectId)
+    openTab({ id: crypto.randomUUID(), projectId, kind: 'terminal', sessionId: session.id })
+    void markNotices(ids)
   }
 
   async function openMobile(): Promise<void> {
@@ -377,14 +401,17 @@ export function App(): React.JSX.Element {
             <button className="icon-button ghost-action" title="Editar host" aria-label={`Editar ${host.name}`} onClick={() => { setEditingHost(host); setDialog('host') }}><MoreHorizontal size={15} /></button>
           </div>
           {state.projects.filter((project) => project.hostId === host.id).map((project) => <div key={project.id}>
-            <button className={`project-row ${selectedProjectId === project.id ? 'selected' : ''}`} onClick={() => setSelectedProjectId(project.id)}>
+            <button className={`project-row ${selectedProjectId === project.id ? 'selected' : ''}`} aria-label={`${project.name}${unreadSessionCounts[project.id] ? `, ${unreadSessionCounts[project.id]} terminales con alertas sin leer` : ''}`} onClick={() => setSelectedProjectId(project.id)}>
               {selectedProjectId === project.id ? <FolderOpen size={16} /> : <Folder size={16} />}
-              <span>{project.name}</span><ChevronRight size={13} className="project-chevron" />
+              <span className="project-name">{project.name}</span>
+              {unreadSessionCounts[project.id] > 0 && <span className="project-alert" title="Terminales con alertas sin leer"><Bell size={12} aria-hidden="true" /><span>{unreadSessionCounts[project.id]}</span></span>}
+              <ChevronRight size={13} className="project-chevron" />
             </button>
             {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <div key={session.id} className="session-entry">
               <button className="session-row" title={session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
                 <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
+              {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)} y marcar alerta como leída`} onClick={() => openNotifiedSession(project.id, host.id, session)}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
               <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>)}
           </div>)}
@@ -408,7 +435,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
-            {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotice(notice.id); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
+             {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.read ? '' : 'unread'}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
         </div>
       </header>
