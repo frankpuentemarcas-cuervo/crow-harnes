@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
+import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
 import type { Agent, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
@@ -8,11 +8,12 @@ import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
 import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
 import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
+import { sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
-const empty: SavedState = { hosts: [], projects: [], notices: [], eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' }
+const empty: SavedState = { hosts: [], projects: [], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' }
 const percent = (used: number, total: number): string => total > 0 ? `${Math.round(used / total * 100)}%` : '—'
 const memory = (bytes: number): string => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.round(bytes / 1024 ** 2)} MiB`
 const MAX_SOUND_BYTES = 5 * 1024 * 1024
@@ -81,7 +82,7 @@ export function App(): React.JSX.Element {
 
   const sessionsByProject = useMemo(() => {
     const map: Record<string, SessionInfo[]> = {}
-    for (const project of state.projects) map[project.id] = (sessions[project.hostId] || []).filter((session) => session.root === project.root)
+    for (const project of state.projects) map[project.id] = sortSessionsByStart((sessions[project.hostId] || []).filter((session) => session.root === project.root))
     return map
   }, [state.projects, sessions])
   const unreadSessionCounts = useMemo(() => {
@@ -94,6 +95,10 @@ export function App(): React.JSX.Element {
     .filter((session) => session.agent === 'claude' && !!session.cacheExpiresAt && Date.parse(session.cacheExpiresAt) > clockNow)
     .sort((a, b) => Date.parse(a.cacheExpiresAt!) - Date.parse(b.cacheExpiresAt!))[0]
   const cacheSeconds = cacheTimer ? Math.ceil((Date.parse(cacheTimer.cacheExpiresAt!) - clockNow) / 1000) : 0
+
+  function sessionDisplayName(hostId: string, sessionId: string, agent: Agent): string {
+    return state.sessionNames[sessionNameKey(hostId, sessionId)]?.trim() || labelFor(agent)
+  }
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
 
@@ -255,7 +260,7 @@ export function App(): React.JSX.Element {
   }
 
   async function deleteSession(hostId: string, session: SessionInfo): Promise<void> {
-    if (!window.confirm(`¿Eliminar definitivamente la terminal ${labelFor(session.agent)} ${session.id.slice(0, 8)}? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`)) return
+    if (!window.confirm(`¿Eliminar definitivamente la terminal ${sessionDisplayName(hostId, session.id, session.agent)} (${session.id.slice(0, 8)})? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`)) return
     setError('')
     try {
       await window.crow.saveWorkspace(tabs, activeTabs, selectedProjectId)
@@ -265,6 +270,15 @@ export function App(): React.JSX.Element {
       setActiveTabs(saved.activeTabs)
       setSessions((current) => ({ ...current, [hostId]: (current[hostId] || []).filter((item) => item.id !== session.id) }))
     } catch (reason) { setError(String(reason)) }
+  }
+
+  async function renameSession(hostId: string, session: SessionInfo): Promise<void> {
+    const key = sessionNameKey(hostId, session.id)
+    const next = window.prompt('Nombre para esta terminal (dejalo vacío para usar el nombre del agente):', state.sessionNames[key] || '')
+    if (next === null) return
+    setError('')
+    try { setState(await window.crow.renameSession(hostId, session.id, next)) }
+    catch (reason) { setError(String(reason)) }
   }
 
   async function saveHost(input: Omit<Host, 'id'> & { id?: string }): Promise<void> {
@@ -412,10 +426,11 @@ export function App(): React.JSX.Element {
             </button>
             {selectedProjectId === project.id && (sessionsByProject[project.id] || []).map((session) => <div key={session.id} className="session-entry">
               <button className="session-row" title={session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
-                <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
+                <span className={`session-state ${session.state}`} /><span className="session-name">{sessionDisplayName(host.id, session.id, session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
-              {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
-              <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
+              {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
+              <button className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
+              <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>)}
           </div>)}
           <button className="sidebar-add-project" onClick={() => { setEditingProject(undefined); setProjectHostId(host.id); setDialog('project') }}><Plus size={13} /> Agregar proyecto</button>
@@ -465,10 +480,14 @@ export function App(): React.JSX.Element {
         <div className="content-row">
           <main className="main-pane">
             <div className="tab-bar" role="tablist" aria-label="Pestañas del proyecto">
-              {projectTabs.map((tab) => <div key={tab.id} className={`tab ${activeTab?.id === tab.id ? 'active' : ''}`} role="tab" aria-selected={activeTab?.id === tab.id}>
-                <button className="tab-select" onClick={() => selectTab(tab)}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{tab.kind === 'terminal' ? labelFor(sessionsByProject[selectedProject.id]?.find((session) => session.id === tab.sessionId)?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)}</span></button>
-                <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => closeTab(tab.id)}><X size={13} /></button>
-              </div>)}
+              {projectTabs.map((tab) => {
+                const session = tab.kind === 'terminal' ? sessionsByProject[selectedProject.id]?.find((item) => item.id === tab.sessionId) : undefined
+                const title = tab.kind === 'terminal' ? sessionDisplayName(selectedProject.hostId, tab.sessionId || '', session?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)
+                return <div key={tab.id} className={`tab ${activeTab?.id === tab.id ? 'active' : ''}`} role="tab" aria-selected={activeTab?.id === tab.id}>
+                  <button className="tab-select" onClick={() => selectTab(tab)}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{title}</span></button>
+                  <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => closeTab(tab.id)}><X size={13} /></button>
+                </div>
+              })}
             </div>
             <div className="pane-body">
               {!activeTab && <div className="blank-state"><div className="blank-icon"><TerminalSquare size={30} /></div><h2>Tu espacio está listo</h2><p>Abrí una terminal con un agente, explorá archivos o iniciá el navegador del servidor.</p><button className="secondary-button" disabled={status !== 'connected'} onClick={() => void startSession()}><CirclePlus size={16} /> Nueva terminal</button></div>}

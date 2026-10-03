@@ -54,7 +54,8 @@ function onNotice(notice: Notice): void {
   if (Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
     const host = store.host(notice.hostId)
     const title = notice.kind === 'turn-complete' ? 'Agente terminó el trabajo' : 'Agente finalizó'
-    const item = new Notification({ title, body: `${host?.name || 'Host'} · sesión ${notice.sessionId.slice(0, 8)}`, silent: true })
+    const session = store.sessionName(notice.hostId, notice.sessionId)
+    const item = new Notification({ title, body: `${host?.name || 'Host'} · ${session || `sesión ${notice.sessionId.slice(0, 8)}`}`, silent: true })
     item.on('click', () => { window?.show(); window?.focus() })
     item.show()
   }
@@ -129,6 +130,7 @@ function registerIPC(): void {
   handle('crow:submit-passphrase', (hostId: string, passphrase: string) => connection(hostId).submitPassphrase(passphrase))
   handle('crow:status', (hostId: string) => connection(hostId).status())
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
+  handle('crow:rename-session', (hostId: string, sessionId: string, name: string) => store.renameSession(hostId, sessionId, name))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
   handle('crow:mobile-addresses', () => mobileAddresses())

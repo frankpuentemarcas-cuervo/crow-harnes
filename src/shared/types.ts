@@ -112,6 +112,7 @@ export interface SavedState {
   hosts: Host[]
   projects: Project[]
   notices: Notice[]
+  sessionNames: Record<string, string>
   eventCursors: Record<string, number>
   tabs: WorkspaceTab[]
   activeTabs: Record<string, string>
@@ -153,6 +154,7 @@ export interface CrowAPI {
   onPassphraseRequired(listener: (hostId: string) => void): () => void
   onNotice(listener: (notice: Notice) => void): () => void
   markNoticeRead(id: string): Promise<SavedState>
+  renameSession(hostId: string, sessionId: string, name: string): Promise<SavedState>
   sessions(hostId: string): Promise<SessionInfo[]>
   startSession(hostId: string, projectId: string, agent: Agent, mode: Mode): Promise<SessionInfo>
   deleteSession(hostId: string, sessionId: string): Promise<SavedState>

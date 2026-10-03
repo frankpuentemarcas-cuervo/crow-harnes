@@ -53,10 +53,13 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .session-row { height: 28px; gap: 8px; padding: 0 11px 0 52px; font-size: 11px; color: #9ca5b0; border-radius: 5px; }
 .session-entry { display: flex; align-items: center; }
 .session-entry .session-row { min-width: 0; flex: 1; padding-right: 4px; }
+.session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-notice { flex: none; width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 5px; background: #4c3c24; color: #f4ce83; }
 .session-notice:hover, .session-notice:focus-visible { background: #66502f; color: #ffe0a3; }
-.session-delete { flex: none; width: 25px; height: 25px; margin-right: 5px; border: 0; border-radius: 5px; background: transparent; color: #aab1ba; opacity: 0; cursor: pointer; }
-.session-entry:hover .session-delete, .session-delete:focus-visible { opacity: 1; }
+.session-rename, .session-delete { flex: none; width: 25px; height: 25px; border: 0; border-radius: 5px; background: transparent; color: #aab1ba; opacity: 0; cursor: pointer; }
+.session-delete { margin-right: 5px; }
+.session-entry:hover .session-rename, .session-entry:hover .session-delete, .session-rename:focus-visible, .session-delete:focus-visible { opacity: 1; }
+.session-rename:hover { color: #d6dde8; background: #343b46; }
 .session-delete:hover { color: #efb6b2; background: #442b2e; }
 .session-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #76b686; flex: none; }
 .session-state.exited { background: #8b929d; }

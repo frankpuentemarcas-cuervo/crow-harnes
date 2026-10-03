@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Host, Notice, Project, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
+import { sessionNameKey } from '../shared/session-list'
 
-const initialState = (): SavedState => ({ hosts: [], projects: [], notices: [], eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' })
+const initialState = (): SavedState => ({ hosts: [], projects: [], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' })
 
 export class Store {
   private path = join(app.getPath('userData'), 'state.json')
@@ -13,6 +14,7 @@ export class Store {
   constructor() {
     try {
       this.state = existsSync(this.path) ? { ...initialState(), ...JSON.parse(readFileSync(this.path, 'utf8')) } : initialState()
+      this.state.sessionNames ||= {}
     } catch {
       this.state = initialState()
     }
@@ -48,6 +50,7 @@ export class Store {
     this.state.projects = this.state.projects.filter((project) => project.hostId !== id)
     this.state.tabs = this.state.tabs.filter((tab) => !removedProjects.has(tab.projectId))
     this.state.notices = this.state.notices.filter((notice) => notice.hostId !== id)
+    for (const key of Object.keys(this.state.sessionNames)) if (key.startsWith(`${id}:`)) delete this.state.sessionNames[key]
     delete this.state.eventCursors[id]
     this.write()
     return this.snapshot()
@@ -86,6 +89,7 @@ export class Store {
     const projects = new Set(this.state.projects.filter((project) => project.hostId === hostId).map((project) => project.id))
     this.state.tabs = this.state.tabs.filter((tab) => !(projects.has(tab.projectId) && tab.sessionId === sessionId))
     this.state.notices = this.state.notices.filter((notice) => !(notice.hostId === hostId && notice.sessionId === sessionId))
+    delete this.state.sessionNames[sessionNameKey(hostId, sessionId)]
     for (const [projectId, activeId] of Object.entries(this.state.activeTabs)) {
       if (projects.has(projectId) && !this.state.tabs.some((tab) => tab.id === activeId)) {
         this.state.activeTabs[projectId] = this.state.tabs.find((tab) => tab.projectId === projectId)?.id || ''
@@ -93,6 +97,21 @@ export class Store {
     }
     this.write()
     return this.snapshot()
+  }
+
+  renameSession(hostId: string, sessionId: string, name: string): SavedState {
+    if (!this.host(hostId) || !/^[0-9a-f]{32}$/.test(sessionId) || typeof name !== 'string') throw new Error('Terminal inválida.')
+    const trimmed = name.trim()
+    if (Array.from(trimmed).length > 48) throw new Error('El nombre de la terminal no puede superar 48 caracteres.')
+    const key = sessionNameKey(hostId, sessionId)
+    if (trimmed) this.state.sessionNames[key] = trimmed
+    else delete this.state.sessionNames[key]
+    this.write()
+    return this.snapshot()
+  }
+
+  sessionName(hostId: string, sessionId: string): string | undefined {
+    return this.state.sessionNames[sessionNameKey(hostId, sessionId)]
   }
 
   eventCursor(hostId: string): number {

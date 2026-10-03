@@ -52,6 +52,7 @@ const api: CrowAPI = {
     return () => { ipcRenderer.off('crow:notice', wrapped) }
   },
   markNoticeRead: (id: string) => ipcRenderer.invoke('crow:notice-read', id),
+  renameSession: (hostId: string, sessionId: string, name: string) => ipcRenderer.invoke('crow:rename-session', hostId, sessionId, name),
   sessions: (hostId: string) => ipcRenderer.invoke('crow:sessions', hostId),
   startSession: (hostId: string, projectId: string, agent: Agent, mode: Mode) => ipcRenderer.invoke('crow:start-session', hostId, projectId, agent, mode),
   deleteSession: (hostId: string, sessionId: string) => ipcRenderer.invoke('crow:delete-session', hostId, sessionId),
