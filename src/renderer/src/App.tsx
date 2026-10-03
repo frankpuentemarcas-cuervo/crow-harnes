@@ -7,7 +7,7 @@ import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
 import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
-import { unreadNoticesForSession, unreadSessionCountForProject } from './session-notices'
+import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
 type Dialog = 'host' | 'project' | null
@@ -214,7 +214,17 @@ export function App(): React.JSX.Element {
     const existing = tabs.find((item) => item.projectId === tab.projectId && item.kind === tab.kind && (tab.kind === 'terminal' ? item.sessionId === tab.sessionId : tab.kind === 'editor' ? item.path === tab.path : true))
     const target = existing || tab
     if (!existing) setTabs((current) => [...current, tab])
-    setActiveTabs((current) => ({ ...current, [tab.projectId]: target.id }))
+    selectTab(target)
+  }
+
+  function acknowledgeTab(tab: WorkspaceTab): void {
+    void markNotices(unreadNoticesForTab(state.notices, state.projects, tab).map((notice) => notice.id))
+  }
+
+  function selectTab(tab: WorkspaceTab): void {
+    setSelectedProjectId(tab.projectId)
+    setActiveTabs((current) => ({ ...current, [tab.projectId]: tab.id }))
+    acknowledgeTab(tab)
   }
 
   function closeTab(id: string): void {
@@ -300,13 +310,6 @@ export function App(): React.JSX.Element {
         setState((current) => ({ ...current, notices: saved.notices }))
       } catch { /* Se conserva el estado visual hasta la próxima carga. */ }
     }
-  }
-
-  function openNotifiedSession(projectId: string, hostId: string, session: SessionInfo): void {
-    const ids = unreadNoticesForSession(state.notices, hostId, session.id).map((notice) => notice.id)
-    setSelectedProjectId(projectId)
-    openTab({ id: crypto.randomUUID(), projectId, kind: 'terminal', sessionId: session.id })
-    void markNotices(ids)
   }
 
   async function openMobile(): Promise<void> {
@@ -411,7 +414,7 @@ export function App(): React.JSX.Element {
               <button className="session-row" title={session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
                 <span className={`session-state ${session.state}`} /><span>{labelFor(session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
-              {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)} y marcar alerta como leída`} onClick={() => openNotifiedSession(project.id, host.id, session)}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
+              {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
               <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${labelFor(session.agent)} ${session.id.slice(0, 5)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>)}
           </div>)}
@@ -463,7 +466,7 @@ export function App(): React.JSX.Element {
           <main className="main-pane">
             <div className="tab-bar" role="tablist" aria-label="Pestañas del proyecto">
               {projectTabs.map((tab) => <div key={tab.id} className={`tab ${activeTab?.id === tab.id ? 'active' : ''}`} role="tab" aria-selected={activeTab?.id === tab.id}>
-                <button className="tab-select" onClick={() => setActiveTabs((current) => ({ ...current, [selectedProject.id]: tab.id }))}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{tab.kind === 'terminal' ? labelFor(sessionsByProject[selectedProject.id]?.find((session) => session.id === tab.sessionId)?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)}</span></button>
+                <button className="tab-select" onClick={() => selectTab(tab)}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{tab.kind === 'terminal' ? labelFor(sessionsByProject[selectedProject.id]?.find((session) => session.id === tab.sessionId)?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)}</span></button>
                 <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => closeTab(tab.id)}><X size={13} /></button>
               </div>)}
             </div>
@@ -473,7 +476,7 @@ export function App(): React.JSX.Element {
                 const project = state.projects.find((item) => item.id === tab.projectId)
                 if (!project) return null
                 const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
-                return <div key={tab.id} className="terminal-tab-slot" hidden={!active}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
+                return <div key={tab.id} className="terminal-tab-slot" hidden={!active} onPointerDownCapture={() => acknowledgeTab(tab)}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
               })}
               {activeTab?.kind === 'editor' && activeTab.path && <EditorPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} path={activeTab.path} status={status} />}
               {activeTab?.kind === 'browser' && <BrowserPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} initialURL={activeTab.url || 'http://localhost:3000'} status={status} onURL={(url) => setTabs((current) => current.some((tab) => tab.id === activeTab.id && tab.url !== url) ? current.map((tab) => tab.id === activeTab.id ? { ...tab, url } : tab) : current)} />}
