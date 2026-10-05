@@ -21,20 +21,21 @@ import (
 )
 
 type App struct {
-	mu           sync.RWMutex
-	saveMu       sync.Mutex
-	fileMu       sync.Mutex
-	metricsMu    sync.Mutex
-	lastCPU      cpuSample
-	dir          string
-	port         string
-	token        string
-	hookPath     string
-	binaryPath   string
-	hooksEnabled bool
-	sessions     map[string]*session
-	events       []Event
-	browsers     map[string]*browser
+	mu            sync.RWMutex
+	saveMu        sync.Mutex
+	fileMu        sync.Mutex
+	metricsMu     sync.Mutex
+	lastCPU       cpuSample
+	dir           string
+	port          string
+	token         string
+	hookPath      string
+	binaryPath    string
+	hooksEnabled  bool
+	sessions      map[string]*session
+	events        []Event
+	eventMessages map[string]eventMessage
+	browsers      map[string]*browser
 }
 
 func randomID() (string, error) {
@@ -124,6 +125,9 @@ func Run() error {
 		defer ticker.Stop()
 		for now := range ticker.C {
 			a.suspendIdleSessions(now.UTC())
+			a.mu.Lock()
+			a.pruneEventMessagesLocked(now)
+			a.mu.Unlock()
 		}
 	}()
 	return server.Serve(listener)

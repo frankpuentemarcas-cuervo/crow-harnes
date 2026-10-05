@@ -414,6 +414,11 @@ func (a *App) deleteSession(id string) error {
 	s.mu.Unlock()
 	a.mu.Lock()
 	delete(a.sessions, id)
+	for _, event := range a.events {
+		if event.SessionID == id {
+			delete(a.eventMessages, event.ID)
+		}
+	}
 	a.mu.Unlock()
 	if err := a.saveSessions(); err != nil {
 		a.mu.Lock()

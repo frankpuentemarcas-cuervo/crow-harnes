@@ -148,7 +148,34 @@ func (a *App) loadEvents() error {
 	return scan.Err()
 }
 
-func (a *App) addEvent(sessionID, kind string, attention bool) {
+const maxEventMessages = 128
+const maxEventMessageRunes = 12000
+const eventMessageTTL = 10 * time.Minute
+
+type eventMessage struct {
+	text      string
+	truncated bool
+	expiresAt time.Time
+}
+
+// Messages exist only in a bounded RAM cache, never events.jsonl.
+func (a *App) pruneEventMessagesLocked(now time.Time) {
+	for id, message := range a.eventMessages {
+		if !now.Before(message.expiresAt) {
+			delete(a.eventMessages, id)
+		}
+	}
+}
+
+func boundedEventMessage(message string) (string, bool) {
+	runes := []rune(message)
+	if len(runes) <= maxEventMessageRunes {
+		return message, false
+	}
+	return string(runes[:maxEventMessageRunes/2]) + string(runes[len(runes)-maxEventMessageRunes/2:]), true
+}
+
+func (a *App) addEvent(sessionID, kind string, attention bool, messages ...eventMessage) {
 	id, err := randomID()
 	if err != nil {
 		return
@@ -160,6 +187,25 @@ func (a *App) addEvent(sessionID, kind string, attention bool) {
 	}
 	event := Event{ID: id, Seq: seq, SessionID: sessionID, Kind: kind, RequiresAttention: attention, At: time.Now().UTC()}
 	a.events = append(a.events, event)
+	if len(messages) > 0 && messages[0].text != "" {
+		a.pruneEventMessagesLocked(time.Now())
+		if a.eventMessages == nil {
+			a.eventMessages = make(map[string]eventMessage)
+		}
+		for len(a.eventMessages) >= maxEventMessages {
+			oldestID := ""
+			var oldest time.Time
+			for id, value := range a.eventMessages {
+				if oldestID == "" || value.expiresAt.Before(oldest) {
+					oldestID, oldest = id, value.expiresAt
+				}
+			}
+			delete(a.eventMessages, oldestID)
+		}
+		message := messages[0]
+		message.expiresAt = event.At.Add(eventMessageTTL)
+		a.eventMessages[id] = message
+	}
 	encoded, _ := json.Marshal(event)
 	f, err := os.OpenFile(filepath.Join(a.dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err == nil {
@@ -173,10 +219,19 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 		a.mu.RLock()
-		items := make([]Event, 0)
+		type eventResponse struct {
+			Event
+			Message          string `json:"message,omitempty"`
+			MessageTruncated bool   `json:"messageTruncated,omitempty"`
+		}
+		items := make([]eventResponse, 0)
 		for _, event := range a.events {
 			if event.Seq > after && a.sessions[event.SessionID] != nil {
-				items = append(items, event)
+				item := eventResponse{Event: event}
+				if message, ok := a.eventMessages[event.ID]; r.URL.Query().Get("includeMessage") == "true" && ok && time.Now().Before(message.expiresAt) {
+					item.Message, item.MessageTruncated = message.text, message.truncated
+				}
+				items = append(items, item)
 			}
 		}
 		a.mu.RUnlock()
@@ -184,10 +239,11 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		SessionID string `json:"sessionId"`
-		Kind      string `json:"kind"`
-		Message   string `json:"message"`
-		AgentID   string `json:"agentId"`
+		SessionID        string `json:"sessionId"`
+		Kind             string `json:"kind"`
+		Message          string `json:"message"`
+		AgentID          string `json:"agentId"`
+		MessageTruncated bool   `json:"messageTruncated"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
@@ -217,7 +273,8 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		a.markSubagentState(body.SessionID, body.AgentID, false)
 	} else {
 		a.markAgentState(body.SessionID, "completed")
-		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message))
+		text, truncated := boundedEventMessage(body.Message)
+		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message), eventMessage{text: text, truncated: truncated || body.MessageTruncated})
 	}
 	jsonResponse(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
@@ -236,6 +293,7 @@ func RunHookNotify(args []string) error {
 	}
 
 	var message, agentID string
+	var messageTruncated bool
 	if kind == "turn-complete" || kind == "subagent-start" || kind == "subagent-stop" {
 		var payload []byte
 		if kind == "turn-complete" {
@@ -255,9 +313,7 @@ func RunHookNotify(args []string) error {
 		}
 		if kind == "turn-complete" {
 			message = hookAssistantMessage(payload)
-			if runes := []rune(message); len(runes) > 12000 {
-				message = string(runes[:12000])
-			}
+			message, messageTruncated = boundedEventMessage(message)
 		} else {
 			agentID = hookAgentID(payload)
 		}
@@ -276,7 +332,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID})
+	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID, "messageTruncated": messageTruncated})
 	if err != nil {
 		return err
 	}
