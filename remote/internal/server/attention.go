@@ -14,6 +14,7 @@ var attentionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:do you want me to|would you like me to|should i)\s+(?:continue|proceed|apply|delete|replace|deploy|run|choose|use|review|push|merge|commit|change|add|update|fix|create|edit|investigate)\b`),
 	regexp.MustCompile(`(?i)\b(?:necesito|requiero)\s+(?:que\s+)?(?:me\s+)?(?:confirmes|indiques|elijas|decidas|apruebes|autorices|proporciones|compartas|respondas)\b`),
 	regexp.MustCompile(`(?i)\b(?:puedes|podr[ií]as|pod[eé]s)\s+(?:confirmar|elegir|decidir|aprobar|autorizar|indicar|compartir|responder|revisar|mirar|ejecutar|validar|cambiar|agregar|subir|desplegar|continuar)\b`),
+	regexp.MustCompile(`(?i)\b(?:(?:me\s+)?autoriz[aá]s\s+(?:a|para|que)|me\s+das\s+permiso\s+para)\b`),
 	regexp.MustCompile(`(?i)\bnecesito (?:tu|el|la)\s+(?:token|contrase[nñ]a|clave|credenciales|confirmaci[oó]n|aprobaci[oó]n|respuesta|decisi[oó]n)\b`),
 	regexp.MustCompile(`(?i)\b(?:estoy esperando|quedo a la espera|necesito tu|me falta tu)\s+(?:de\s+)?(?:tu\s+|su\s+)?(?:respuesta|confirmaci[oó]n|aprobaci[oó]n|decisi[oó]n|indicaci[oó]n|autorizaci[oó]n|opini[oó]n)\b`),
 	regexp.MustCompile(`(?i)\b(?:no puedo|no es posible|estoy bloqueado|qued[oó] bloqueado)\s+(?:continuar|proceder|avanzar)\s+(?:hasta que|sin)\s+(?:me\s+)?(?:confirmes|indiques|elijas|decidas|apruebes|autorices|respondas)\b`),

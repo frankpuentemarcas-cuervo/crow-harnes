@@ -36,6 +36,29 @@ func TestCompletionEventStoresClassificationButNotMessage(t *testing.T) {
 	}
 }
 
+func TestCompletionEventRecognizesSpanishAuthorization(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	a := &App{dir: t.TempDir(), sessions: map[string]*session{
+		sessionID: {info: SessionInfo{ID: sessionID, State: "running", HooksActive: true}, subs: make(map[chan Frame]struct{})},
+	}}
+	body, err := json.Marshal(map[string]string{
+		"sessionId": sessionID,
+		"kind":      "turn-complete",
+		"message":   "¿Me autorizás a resetear las contraseñas de los usuarios de prueba?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	a.handleEvents(response, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(string(body))))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	if len(a.events) != 1 || !a.events[0].RequiresAttention {
+		t.Fatalf("Spanish authorization request was not marked for attention: %#v", a.events)
+	}
+}
+
 func TestSubagentLifecycleKeepsSessionWorkingUntilAllSubagentsStop(t *testing.T) {
 	dir := t.TempDir()
 	const sessionID = "0123456789abcdef0123456789abcdef"
