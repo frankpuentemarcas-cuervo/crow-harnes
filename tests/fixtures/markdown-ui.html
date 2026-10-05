@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crow · Markdown QA aislado</title></head><body>
+<div id="root"></div>
+<script type="module">
+// Real editor/preview/CSS, fictional document and mock IPC; no SSH or user files.
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import * as monaco from 'monaco-editor';
+import { loader } from '@monaco-editor/react';
+import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import { EditorPane } from '/src/renderer/src/EditorPane.tsx';
+import '/src/renderer/src/styles.css';
+self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+loader.config({monaco});
+let content = '# Plan de trabajo\n\nUn documento con **negrita**, *énfasis* y tablas ordenadas.\n\n| Agente | Función | Estado |\n| :--- | :--- | ---: |\n| QA | Pruebas | Listo |\n| Desarrollador | Implementación | Trabajando |\n\n- [x] Leer Markdown\n- [ ] Revisar cambios\n\n> Vista previa sin modificar el original.\n\n```bash\nprintf "hola"\n```\n\n[Manual](https://example.com) · [Plan local](../PLAN.MD)\n\n![Diagrama](https://example.com/tracking.png)\n\n## Tabla ancha\n\n| Uno | Dos | Tres | Cuatro | Cinco | Seis | Siete | Ocho |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| A | B | C | D | E | F | G | H |';
+const status = document.createElement('output');
+status.style.cssText='position:fixed;bottom:2px;right:8px;font-size:10px;background:#171717;color:#aaa;z-index:20';
+status.setAttribute('aria-label','Resultado QA');
+document.body.append(status);
+const edit = document.createElement('button');
+edit.textContent='QA editar borrador';
+edit.style.cssText='position:fixed;bottom:2px;left:8px;z-index:20';
+edit.onclick=() => {const model=monaco.editor.getModels()[0];if(model)model.pushEditOperations([], [{range:new monaco.Range(1,1,1,1),text:'# Borrador QA\n\n'}],()=>null);};
+document.body.append(edit);
+window.crow = {
+  readFile: async () => ({content,hash:'qa-hash'}),
+  saveFile: async (_host,_root,_path,next) => {content=next;status.textContent='QA guardado: '+next.split('\n')[0];return {hash:'qa-next-hash'};}
+};
+createRoot(document.getElementById('root')).render(React.createElement(EditorPane, {
+  hostId:'qa-host',root:'/test',path:'docs/PLAN.MD',status:'connected',
+  onOpenLink: target => {status.textContent='QA enlace: '+target.kind+' '+target.value;}
+}));
+</script></body></html>

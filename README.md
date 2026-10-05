@@ -34,6 +34,12 @@ Para habilitar autoactualizaciones en instalaciones existentes, primero hay que 
 
 ## Puesta en marcha
 
+### Leer archivos Markdown en el escritorio
+
+Abrí un archivo `.md` (también `.MD`, `.markdown` o `.mdown`) desde el explorador: **Vista previa** muestra títulos, tablas, listas, tareas y bloques de código con formato. Las tablas anchas se desplazan dentro del panel sin desordenar el documento.
+
+Usá **Editar** para cambiar el texto original y **Vista previa** para revisar el mismo borrador, incluso antes de guardarlo. **Guardar** conserva la detección de conflictos existente. Guardá antes de abrir enlaces: los enlaces web se abren en el navegador de Crow y los archivos relativos solo dentro del proyecto. Por seguridad, no se ejecuta HTML ni se cargan imágenes automáticamente. Documentos de más de 250.000 caracteres siguen disponibles en **Editar**, sin vista previa.
+
 ### 1. Host Linux — un comando
 
 Conectate por SSH **como el usuario que usará Crow**, sin `sudo`, y ejecutá:

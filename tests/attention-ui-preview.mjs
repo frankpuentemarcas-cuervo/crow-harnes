@@ -19,3 +19,4 @@ const server = await createServer({
 })
 await server.listen()
 console.log('QA aislado: http://127.0.0.1:31516/__attention-test — IPC simulado, sin SSH ni Free LLM')
+console.log('Markdown QA: http://127.0.0.1:31516/tests/fixtures/markdown-ui.html — documento ficticio, editor/visor reales')

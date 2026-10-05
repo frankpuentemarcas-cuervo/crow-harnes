@@ -1,6 +1,6 @@
 {
   "name": "crow-harness",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "description": "A focused Windows workspace for persistent remote coding agents",
   "repository": {
@@ -27,6 +27,8 @@
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "ssh2": "^1.17.0",
     "ws": "^8.22.0"
   },

@@ -529,7 +529,7 @@ export function App(): React.JSX.Element {
                 const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
                 return <div key={tab.id} className="terminal-tab-slot" hidden={!active} onPointerDownCapture={() => acknowledgeTab(tab)}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
               })}
-              {activeTab?.kind === 'editor' && activeTab.path && <EditorPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} path={activeTab.path} status={status} />}
+              {activeTab?.kind === 'editor' && activeTab.path && <EditorPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} path={activeTab.path} status={status} onOpenLink={(target) => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: target.kind === 'url' ? 'browser' : 'editor', ...(target.kind === 'url' ? { url: target.value } : { path: target.value }) })} />}
               {activeTab?.kind === 'browser' && <BrowserPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} initialURL={activeTab.url || 'http://localhost:3000'} status={status} onURL={(url) => setTabs((current) => current.some((tab) => tab.id === activeTab.id && tab.url !== url) ? current.map((tab) => tab.id === activeTab.id ? { ...tab, url } : tab) : current)} />}
             </div>
           </main>
