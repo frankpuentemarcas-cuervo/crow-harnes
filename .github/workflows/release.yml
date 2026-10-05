@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test desktop alert and terminal logic
+        run: npm test
+
       - name: Type-check sources
         run: npm run typecheck
 
