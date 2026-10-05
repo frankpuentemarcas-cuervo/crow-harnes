@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Agent, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
+import type { Agent, AlertAIStatus, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
 
 const terminalListeners = new Map<string, (frame: TerminalFrame) => void>()
 ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: TerminalFrame }) => {
@@ -7,6 +7,15 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  getAlertAISettings: () => ipcRenderer.invoke('crow:get-alert-ai-settings'),
+  saveAlertAISettings: (input) => ipcRenderer.invoke('crow:save-alert-ai-settings', input),
+  testAlertAI: () => ipcRenderer.invoke('crow:test-alert-ai'),
+  getAlertAIStatus: () => ipcRenderer.invoke('crow:alert-ai-status'),
+  onAlertAIStatus: (listener) => {
+    const wrapped = (_event: unknown, status: AlertAIStatus): void => listener(status)
+    ipcRenderer.on('crow:alert-ai-status', wrapped)
+    return () => { ipcRenderer.off('crow:alert-ai-status', wrapped) }
+  },
   getAlertSound: () => ipcRenderer.invoke('crow:get-alert-sound'),
   saveAlertSound: (sound: AlertSound) => ipcRenderer.invoke('crow:save-alert-sound', sound),
   clearAlertSound: () => ipcRenderer.invoke('crow:clear-alert-sound'),

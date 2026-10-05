@@ -1,20 +1,25 @@
-import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { Host, Notice, Project, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
-import { sessionNameKey } from '../shared/session-list'
+import type { AttentionClassification, Host, Notice, Project, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
+import { sessionNameKey } from '../shared/session-list.ts'
 
 const initialState = (): SavedState => ({ hosts: [], projects: [], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' })
 
 export class Store {
-  private path = join(app.getPath('userData'), 'state.json')
+  private path: string
   private state: SavedState
 
-  constructor() {
+  constructor(directory: string) {
+    this.path = join(directory, 'state.json')
     try {
       this.state = existsSync(this.path) ? { ...initialState(), ...JSON.parse(readFileSync(this.path, 'utf8')) } : initialState()
       this.state.sessionNames ||= {}
+      // An interrupted classifier must not leave a forever-pending silent alert.
+      for (const notice of this.state.notices) if (notice.classification?.source === 'pending') {
+        notice.requiresAttention = true
+        notice.classification = { source: 'fallback', decision: 'uncertain', detail: 'El análisis se interrumpió al cerrar Crow. Revisá esta terminal.' }
+      }
     } catch {
       this.state = initialState()
     }
@@ -118,18 +123,28 @@ export class Store {
     return this.state.eventCursors[hostId] || 0
   }
 
-  recordEvent(hostId: string, event: RemoteEvent): Notice | undefined {
+  recordEvent(hostId: string, event: RemoteEvent, classification?: AttentionClassification): Notice | undefined {
     if (event.seq <= this.eventCursor(hostId)) return
     this.state.eventCursors[hostId] = event.seq
     if (event.kind === 'process-exited' && this.state.notices.some((item) => item.hostId === hostId && item.sessionId === event.sessionId && item.kind === 'turn-complete')) {
       this.write()
       return
     }
-    const notice: Notice = { ...event, hostId, read: false }
+    // Explicit allowlist: never persist or emit transient assistant text.
+    const notice: Notice = { id: event.id, seq: event.seq, sessionId: event.sessionId, kind: event.kind, at: event.at, requiresAttention: classification ? classification.source !== 'pending' && classification.decision !== 'informational' : event.requiresAttention, classification, hostId, read: false }
     this.state.notices.unshift(notice)
     this.state.notices = this.state.notices.slice(0, 100)
     this.write()
     return notice
+  }
+
+  updateClassification(hostId: string, id: string, classification: AttentionClassification): Notice | undefined {
+    const notice = this.state.notices.find((item) => item.hostId === hostId && item.id === id)
+    if (!notice) return // Host/terminal may have been deleted while inference ran.
+    notice.classification = classification
+    notice.requiresAttention = classification.decision !== 'informational'
+    this.write()
+    return { ...notice } // Preserve read=true if the user already visited it.
   }
 
   markNoticeRead(id: string): SavedState {

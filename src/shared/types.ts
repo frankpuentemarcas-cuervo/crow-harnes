@@ -74,11 +74,43 @@ export interface RemoteEvent {
   kind: 'turn-complete' | 'process-exited'
   requiresAttention?: boolean
   at: string
+  /** Opt-in, transient text. Never persisted or forwarded to renderer/mobile. */
+  message?: string
+  messageTruncated?: boolean
 }
 
-export interface Notice extends RemoteEvent {
+export interface AttentionClassification {
+  source: 'rules' | 'pending' | 'ai' | 'fallback'
+  decision: 'actionable' | 'informational' | 'uncertain'
+  detail: string
+}
+
+export interface Notice extends Omit<RemoteEvent, 'message' | 'messageTruncated'> {
   hostId: string
   read: boolean
+  classification?: AttentionClassification
+}
+
+export interface AlertAISettings {
+  enabled: boolean
+  baseURL: string
+  model: string
+  keyPresent: boolean
+  secureStorageAvailable: boolean
+  configurationError?: string
+}
+
+export interface AlertAIInput {
+  enabled: boolean
+  baseURL: string
+  model: string
+  apiKey?: string
+  removeKey?: boolean
+}
+
+export interface AlertAIStatus {
+  state: 'idle' | 'working' | 'ok' | 'error'
+  detail: string
 }
 
 export interface FileEntry {
@@ -126,6 +158,11 @@ export interface AlertSound {
 }
 
 export interface CrowAPI {
+  getAlertAISettings(): Promise<AlertAISettings>
+  saveAlertAISettings(input: AlertAIInput): Promise<AlertAISettings>
+  testAlertAI(): Promise<AlertAIStatus>
+  getAlertAIStatus(): Promise<AlertAIStatus>
+  onAlertAIStatus(listener: (status: AlertAIStatus) => void): () => void
   getAlertSound(): Promise<AlertSound | null>
   saveAlertSound(sound: AlertSound): Promise<void>
   clearAlertSound(): Promise<void>

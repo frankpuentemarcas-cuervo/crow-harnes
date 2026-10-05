@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from '../src/renderer/src/session-notices.ts'
+import { mergeNotice, shouldNotifyNotice, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from '../src/renderer/src/session-notices.ts'
 
 const notice = (id, hostId, sessionId, read = false, requiresAttention = true) => ({ id, hostId, sessionId, read, requiresAttention, kind: 'turn-complete', seq: 1, at: '2026-10-02T00:00:00Z' })
 
@@ -42,4 +42,28 @@ test('selecting a browser, editor or unavailable terminal leaves alerts unread',
   for (const kind of ['browser', 'editor']) assert.deepEqual(unreadNoticesForTab(notices, projects, { ...tab, kind }), [])
   assert.deepEqual(unreadNoticesForTab(notices, projects, { ...tab, kind: 'terminal', sessionId: undefined }), [])
   assert.deepEqual(unreadNoticesForTab(notices, [], { ...tab, kind: 'terminal' }), [])
+})
+
+test('pending AI classifications are acknowledged on click without showing a bell yet', () => {
+  const pending = { ...notice('a', 'host-a', 'session-a', false, false), classification: { source: 'pending', decision: 'uncertain', detail: 'Analizando' } }
+  const projects = [{ id: 'project-a', hostId: 'host-a' }]
+  const tab = { id: 'tab-a', projectId: 'project-a', kind: 'terminal', sessionId: 'session-a' }
+  assert.deepEqual(unreadNoticesForSession([pending], 'host-a', 'session-a'), [])
+  assert.deepEqual(unreadNoticesForTab([pending], projects, tab).map(n => n.id), ['a'])
+})
+
+test('AI result replaces notice, sounds once and never reopens a reviewed bell', () => {
+  const pending = notice('a', 'host-a', 'session-a', false, false)
+  const actionable = { ...pending, requiresAttention: true }
+  let history = [pending]
+  assert.equal(shouldNotifyNotice(history, actionable), true)
+  history = mergeNotice(history, actionable)
+  assert.equal(history.length, 1)
+  assert.equal(shouldNotifyNotice(history, actionable), false)
+  assert.equal(unreadNoticesForSession(history, 'host-a', 'session-a').length, 1)
+  history = mergeNotice([{ ...pending, read: true }], actionable)
+  assert.equal(history[0].read, true)
+  assert.equal(shouldNotifyNotice(history, actionable), false)
+  assert.equal(unreadNoticesForSession(history, 'host-a', 'session-a').length, 0)
+  assert.equal(shouldNotifyNotice([], { ...pending, requiresAttention: false }), false)
 })

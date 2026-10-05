@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
-import type { Agent, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
+import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Notice, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
 import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
-import { unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
+import { mergeNotice, shouldNotifyNotice, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
+import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 
@@ -52,6 +53,10 @@ export function App(): React.JSX.Element {
   const [projectHostId, setProjectHostId] = useState('')
   const [error, setError] = useState('')
   const [noticeOpen, setNoticeOpen] = useState(false)
+  const [alertAIOpen, setAlertAIOpen] = useState(false)
+  const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
+  const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
+  const noticesRef = useRef<Notice[]>([])
   const [soundName, setSoundName] = useState('')
   const [soundBusy, setSoundBusy] = useState(false)
   const [soundError, setSoundError] = useState('')
@@ -106,6 +111,15 @@ export function App(): React.JSX.Element {
   }
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
+  useEffect(() => { noticesRef.current = state.notices }, [state.notices])
+
+  useEffect(() => {
+    let live = true
+    void window.crow.getAlertAISettings().then((value) => { if (live) setAlertAISettings(value) }).catch(() => undefined)
+    void window.crow.getAlertAIStatus().then((value) => { if (live) setAlertAIStatus(value) }).catch(() => undefined)
+    const off = window.crow.onAlertAIStatus(setAlertAIStatus)
+    return () => { live = false; off() }
+  }, [])
 
   useEffect(() => {
     if (activeTab?.kind !== 'terminal') return
@@ -173,8 +187,10 @@ export function App(): React.JSX.Element {
       if (next === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
     })
     const offNotice = window.crow.onNotice((notice) => {
-      setState((current) => ({ ...current, notices: [notice, ...current.notices].slice(0, 100) }))
-      if (notice.requiresAttention && isFreshNotice(notice.at)) void playCompletionSound(customSound.current).catch((reason) => console.warn('Crow: no se pudo reproducir la alerta', reason))
+      const notify = shouldNotifyNotice(noticesRef.current, notice)
+      noticesRef.current = mergeNotice(noticesRef.current, notice)
+      setState((current) => ({ ...current, notices: mergeNotice(current.notices, notice) }))
+      if (notify && isFreshNotice(notice.at)) void playCompletionSound(customSound.current).catch(() => setSoundError('No se pudo reproducir la alerta. Revisá el dispositivo de audio y usá Probar sonido.'))
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
@@ -321,6 +337,7 @@ export function App(): React.JSX.Element {
   async function markNotices(ids: string[]): Promise<void> {
     if (ids.length === 0) return
     const selected = new Set(ids)
+    noticesRef.current = noticesRef.current.map((notice) => selected.has(notice.id) ? { ...notice, read: true } : notice)
     setState((current) => ({ ...current, notices: current.notices.map((notice) => selected.has(notice.id) ? { ...notice, read: true } : notice) }))
     try {
       for (const id of ids) await window.crow.markNoticeRead(id)
@@ -468,7 +485,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
-             {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena solo cuando el agente necesita una respuesta, decisión o aprobación. Clasificación local por reglas; no se envía el texto a otra IA.</small>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
+             {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
         </div>
       </header>
@@ -523,6 +540,7 @@ export function App(): React.JSX.Element {
     </div>
     {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { setState(await window.crow.removeHost(editingHost.id)); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId('') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
+    {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {mobileOpen && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileOpen(false) }}><div className="dialog-card mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-title">
       <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
       <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>

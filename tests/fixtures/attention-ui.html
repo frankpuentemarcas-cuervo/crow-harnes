@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crow · QA aislado</title></head><body>
+<div id="root"></div>
+<div style="position:fixed;bottom:30px;right:10px;z-index:25;display:flex;gap:4px;background:#222;padding:5px" aria-label="Controles QA simulados">
+  <button onclick="emit('pending')">QA pendiente</button><button onclick="emit('actionable')">QA petición</button><button onclick="emit('informational')">QA informativo</button><button onclick="emit('fallback')">QA fallo</button>
+</div>
+<script>
+// Test-only mock IPC: no SSH, provider calls, real tokens or user state.
+const host = {id:'host-a',name:'Host QA',target:'mock',port:22,remotePort:47321};
+const project = {id:'project-a',hostId:host.id,name:'Proyecto QA',root:'/test'};
+const session = {id:'0123456789abcdef0123456789abcdef',agent:'claude',mode:'normal',root:'/test',state:'running',agentState:'completed',hooksActive:true,startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),seq:1};
+let saved = {hosts:[host],projects:[project],notices:[],sessionNames:{},eventCursors:{},tabs:[],activeTabs:{},selectedProjectId:project.id};
+let ai = {enabled:false,baseURL:'http://127.0.0.1:31415/v1',model:'auto',keyPresent:false,secureStorageAvailable:true};
+let listeners = [], currentEvent = 0;
+const mock = {
+  getState:async()=>saved,saveWorkspace:async()=>saved,status:async()=> 'connected',sessions:async()=>[session],hookSettings:async()=>({enabled:true}),
+  hostMetrics:async()=>({cpuPercent:15,memoryUsed:1024,memoryTotal:4096,diskUsed:10,diskTotal:100,sleepingSessions:0,sleepingMemory:0,at:new Date().toISOString()}),
+  getAlertSound:async()=>null,getUpdateState:async()=>({status:'idle'}),getAlertAISettings:async()=>ai,getAlertAIStatus:async()=>({state:'idle',detail:'Sin análisis todavía.'}),
+  onNotice:l=>{listeners.push(l);return()=>{listeners=listeners.filter(x=>x!==l)}},
+  saveAlertAISettings:async input=>{
+    if(input.enabled&&!ai.keyPresent&&!input.apiKey)throw new Error('Guardá una clave segura antes de activar la clasificación por IA.');
+    if(input.baseURL!=='http://127.0.0.1:31415/v1')throw new Error('La API debe ser local y terminada en /v1.');
+    ai={...ai,enabled:input.enabled,baseURL:input.baseURL,model:input.model,keyPresent:input.removeKey ? false : !!input.apiKey||ai.keyPresent};return ai;
+  },
+  testAlertAI:async()=>({state:'ok',detail:'Conexión y clasificación verificadas con 3 ejemplos ficticios.'}),
+  attach:async()=> 'mock-stream',markNoticeRead:async id=>{saved.notices=saved.notices.map(n=>n.id===id?{...n,read:true}:n);return saved},files:async()=>[]
+};
+window.crow = new Proxy(mock,{get:(target,key)=>key in target ? target[key] : String(key).startsWith('on') ? ()=>()=>{} : async()=>{}});
+window.emit = kind => {
+  if(kind==='pending')currentEvent++;
+  const classification={source:kind==='pending'?'pending':kind==='fallback'?'fallback':'ai',decision:kind==='pending'||kind==='fallback'?'uncertain':kind,detail:kind==='fallback'?'Free LLM HTTP 429. Alerta preventiva: revisá esta terminal.':'Clasificación simulada QA'};
+  const notice={id:'event-'+currentEvent,seq:currentEvent,hostId:host.id,sessionId:session.id,kind:'turn-complete',at:new Date().toISOString(),read:!!saved.notices.find(n=>n.id==='event-'+currentEvent)?.read,requiresAttention:kind==='actionable'||kind==='fallback',classification};
+  saved.notices=[notice,...saved.notices.filter(n=>n.id!==notice.id)];listeners.forEach(l=>l(notice));
+};
+</script>
+<script type="module" src="/src/renderer/src/main.tsx"></script>
+</body></html>

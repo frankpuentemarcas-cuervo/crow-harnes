@@ -8,7 +8,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import WebSocket from 'ws'
-import type { ConnectionStatus, Host, Notice, RemoteEvent, TerminalFrame } from '../shared/types'
+import type { ConnectionStatus, Host, RemoteEvent, TerminalFrame } from '../shared/types'
 import { Store } from './store'
 import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './encrypted-ssh'
 import { PassphraseVault } from './passphrase-vault'
@@ -36,7 +36,8 @@ export class Connection {
   private store: Store
   private vault: PassphraseVault
   private onStatus: (hostId: string, status: ConnectionStatus) => void
-  private onNotice: (notice: Notice) => void
+  private onEvent: (hostId: string, event: RemoteEvent) => void
+  private wantEventMessages: () => boolean
   private onPassphraseRequired: (hostId: string) => void
   private tunnel?: ChildProcess
   private encryptedTunnel?: EncryptedSshTunnel
@@ -52,12 +53,13 @@ export class Connection {
   private streams = new Map<string, WebSocket>()
   private polling = false
 
-  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onNotice: (notice: Notice) => void, onPassphraseRequired: (hostId: string) => void) {
+  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onEvent: (hostId: string, event: RemoteEvent) => void, onPassphraseRequired: (hostId: string) => void, wantEventMessages: () => boolean) {
     this.host = host
     this.store = store
     this.vault = vault
     this.onStatus = onStatus
-    this.onNotice = onNotice
+    this.onEvent = onEvent
+    this.wantEventMessages = wantEventMessages
     this.onPassphraseRequired = onPassphraseRequired
   }
 
@@ -327,10 +329,9 @@ export class Connection {
     this.polling = true
     try {
       const after = this.store.eventCursor(this.host.id)
-      const events = await this.api<RemoteEvent[]>('GET', `/api/events?after=${after}`)
+      const events = await this.api<RemoteEvent[]>('GET', `/api/events?after=${after}${this.wantEventMessages() ? '&includeMessage=true' : ''}`)
       for (const event of events) {
-        const notice = this.store.recordEvent(this.host.id, event)
-        if (notice) this.onNotice(notice)
+        this.onEvent(this.host.id, event)
       }
     } catch (error) {
       await this.recoverTransport(error)

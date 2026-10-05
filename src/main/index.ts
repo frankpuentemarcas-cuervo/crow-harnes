@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, safeStorage } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { basename, join, posix } from 'node:path'
 import { Connection } from './connection'
@@ -6,11 +6,15 @@ import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
 import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
-import type { Agent, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
+import { AlertAISettingsStore } from './alert-ai-settings'
+import { AttentionService } from './attention-service'
+import type { Agent, AlertAIInput, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
 let store: Store
 let alertSoundStore: AlertSoundStore
+let alertAISettings: AlertAISettingsStore
+let attention: AttentionService
 let vault: PassphraseVault
 let mobile: MobileGateway
 const connections = new Map<string, Connection>()
@@ -43,7 +47,7 @@ function connection(hostId: string): Connection {
   if (!host) throw new Error('Host desconocido.')
   let current = connections.get(hostId)
   if (!current) {
-    current = new Connection(host, store, vault, (id, status) => send('crow:status', { hostId: id, status }), onNotice, (id) => send('crow:passphrase-required', id))
+    current = new Connection(host, store, vault, (id, status) => send('crow:status', { hostId: id, status }), (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
     connections.set(hostId, current)
   }
   return current
@@ -51,7 +55,7 @@ function connection(hostId: string): Connection {
 
 function onNotice(notice: Notice): void {
   send('crow:notice', notice)
-  if (notice.requiresAttention && Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
+  if (notice.requiresAttention && !notice.read && Notification.isSupported() && Date.now() - Date.parse(notice.at) < 60 * 60 * 1000) {
     const host = store.host(notice.hostId)
     const title = notice.requiresAttention ? 'Agente necesita tu atención' : notice.kind === 'turn-complete' ? 'Trabajo terminado' : 'Agente finalizó'
     const session = store.sessionName(notice.hostId, notice.sessionId)
@@ -96,6 +100,14 @@ function registerIPC(): void {
   }
 
   handle('crow:clipboard-read', () => clipboard.readText())
+  handle('crow:get-alert-ai-settings', () => alertAISettings.snapshot())
+  handle('crow:save-alert-ai-settings', (input: AlertAIInput) => {
+    const next = alertAISettings.save(input)
+    attention.reset()
+    return next
+  })
+  handle('crow:test-alert-ai', () => attention.testConnection())
+  handle('crow:alert-ai-status', () => attention.snapshot())
   handle('crow:get-alert-sound', () => alertSoundStore.load())
   handle('crow:save-alert-sound', (sound: AlertSound) => alertSoundStore.save(sound))
   handle('crow:clear-alert-sound', () => alertSoundStore.clear())
@@ -224,7 +236,8 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: true
+      sandbox: true,
+      autoplayPolicy: 'no-user-gesture-required'
     }
   })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -235,8 +248,10 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  store = new Store()
+  store = new Store(app.getPath('userData'))
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
+  alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
+  attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status))
   vault = new PassphraseVault()
   mobile = new MobileGateway({ snapshot: () => store.snapshot(), connection })
   registerIPC()
@@ -246,4 +261,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { void mobile?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })
