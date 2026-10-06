@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { AttentionClassification, Host, Notice, Project, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
-import { sessionNameKey } from '../shared/session-list.ts'
+import { normalizeSessionName, sessionNameKey } from '../shared/session-list.ts'
 
 const initialState = (): SavedState => ({ hosts: [], projects: [], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' })
 
@@ -106,8 +106,7 @@ export class Store {
 
   renameSession(hostId: string, sessionId: string, name: string): SavedState {
     if (!this.host(hostId) || !/^[0-9a-f]{32}$/.test(sessionId) || typeof name !== 'string') throw new Error('Terminal inválida.')
-    const trimmed = name.trim()
-    if (Array.from(trimmed).length > 48) throw new Error('El nombre de la terminal no puede superar 48 caracteres.')
+    const trimmed = normalizeSessionName(name)
     const key = sessionNameKey(hostId, sessionId)
     if (trimmed) this.state.sessionNames[key] = trimmed
     else delete this.state.sessionNames[key]

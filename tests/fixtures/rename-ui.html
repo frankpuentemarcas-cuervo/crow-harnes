@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crow · QA renombrado</title></head><body>
+<div id="root"></div>
+<div style="position:fixed;bottom:30px;right:10px;z-index:25;background:#222;padding:5px" aria-label="Controles QA simulados">
+  <label><input id="qa-fail" type="checkbox">Simular error QA</label>
+  <label><input id="qa-delay" type="checkbox">Demorar guardado QA</label>
+  <output id="qa-calls">Guardados QA: 0</output>
+</div>
+<script>
+// Only fictional data in this origin's isolated storage. Never SSH or real app settings.
+window.prompt=()=>{throw new Error('prompt() is not supported.')};
+const host={id:'rename-host',name:'Host QA',target:'mock',port:22,remotePort:47321};
+const project={id:'rename-project',hostId:host.id,name:'Proyecto QA',root:'/test'};
+const session={id:'0123456789abcdef0123456789abcdef',agent:'claude',mode:'normal',root:project.root,state:'running',agentState:'completed',hooksActive:true,startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),seq:1};
+const tab={id:'rename-tab',projectId:project.id,kind:'terminal',sessionId:session.id};
+const defaults={hosts:[host],projects:[project],notices:[],sessionNames:{[host.id+':'+session.id]:'Desarrollador'},eventCursors:{},tabs:[tab],activeTabs:{[project.id]:tab.id},selectedProjectId:project.id};
+let saved=JSON.parse(localStorage.getItem('crow-rename-qa-state')||'null')||defaults, calls=0;
+const persist=()=>{localStorage.setItem('crow-rename-qa-state',JSON.stringify(saved));return structuredClone(saved)};
+const mock={
+  getState:async()=>structuredClone(saved),
+  saveWorkspace:async(tabs,activeTabs,selectedProjectId)=>{saved={...saved,tabs,activeTabs,selectedProjectId};return persist()},
+  renameSession:async(hostId,id,name)=>{
+    calls++;document.getElementById('qa-calls').textContent='Guardados QA: '+calls;
+    if(document.getElementById('qa-delay').checked)await new Promise(resolve=>setTimeout(resolve,1500));
+    if(document.getElementById('qa-fail').checked)throw new Error('Error de guardado QA');
+    const key=hostId+':'+id;if(name.trim())saved.sessionNames[key]=name.trim();else delete saved.sessionNames[key];
+    return persist();
+  },
+  status:async()=>'connected',sessions:async()=>[structuredClone(session)],hookSettings:async()=>({enabled:true}),
+  hostMetrics:async()=>({cpuPercent:0,memoryUsed:0,memoryTotal:4096,diskUsed:0,diskTotal:100,sleepingSessions:0,sleepingMemory:0,at:new Date().toISOString()}),
+  getAlertSound:async()=>null,getUpdateState:async()=>({status:'idle'}),getAlertAISettings:async()=>({enabled:false,baseURL:'http://127.0.0.1:31415/v1',model:'auto',keyPresent:false,secureStorageAvailable:true}),getAlertAIStatus:async()=>({state:'idle',detail:'Sin análisis todavía.'}),
+  attach:async(_host,_id,_seq,listener)=>{listener({type:'state',info:session});return'qa-stream'},files:async()=>[],markNoticeRead:async()=>structuredClone(saved)
+};
+window.crow=new Proxy(mock,{get:(target,key)=>key in target?target[key]:String(key).startsWith('on')?()=>()=>{}:async()=>{}});
+</script>
+<script type="module" src="/src/renderer/src/main.tsx"></script>
+</body></html>

@@ -15,6 +15,7 @@ import { CacheWarningTracker, cacheWarningPreferences, cacheView } from '../../s
 import { CacheBadge } from './CacheBadge'
 import { CacheDetailsDialog } from './CacheDetailsDialog'
 import { CacheWarningSettings } from './CacheWarningSettings'
+import { RenameTerminalDialog } from './RenameTerminalDialog'
 
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
@@ -52,6 +53,7 @@ export function App(): React.JSX.Element {
   const cacheWarnings = useRef(new CacheWarningTracker())
   const [cacheWarning, setCacheWarning] = useState<{ key: string; hostId: string; projectId: string; sessionId: string; expiresAt: string; conversationId?: string; shownAt: number } | null>(null)
   const [cacheDetail, setCacheDetail] = useState<{ hostId: string; sessionId: string } | null>(null)
+  const [renamingSession, setRenamingSession] = useState<{ hostId: string; sessionId: string; initialName: string } | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({})
@@ -331,13 +333,9 @@ export function App(): React.JSX.Element {
     } catch (reason) { setError(String(reason)) }
   }
 
-  async function renameSession(hostId: string, session: SessionInfo): Promise<void> {
+  function renameSession(hostId: string, session: SessionInfo): void {
     const key = sessionNameKey(hostId, session.id)
-    const next = window.prompt('Nombre para esta terminal (dejalo vacío para usar el nombre del agente):', state.sessionNames[key] || '')
-    if (next === null) return
-    setError('')
-    try { setState(await window.crow.renameSession(hostId, session.id, next)) }
-    catch (reason) { setError(String(reason)) }
+    setRenamingSession({ hostId, sessionId: session.id, initialName: state.sessionNames[key] || '' })
   }
 
   async function saveHost(input: Omit<Host, 'id'> & { id?: string }): Promise<void> {
@@ -581,6 +579,9 @@ export function App(): React.JSX.Element {
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
+    {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
+      setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))
+    }} onClose={() => setRenamingSession(null)} />}
     {mobileOpen && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileOpen(false) }}><div className="dialog-card mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-title">
       <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
       <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>

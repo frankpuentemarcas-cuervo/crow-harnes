@@ -2,6 +2,12 @@ export function sessionNameKey(hostId: string, sessionId: string): string {
   return `${hostId}:${sessionId}`
 }
 
+export function normalizeSessionName(name: string): string {
+  const trimmed = name.trim()
+  if (Array.from(trimmed).length > 48) throw new Error('El nombre de la terminal no puede superar 48 caracteres.')
+  return trimmed
+}
+
 export function hasWorkingAgent(sessions: Array<{ state: string; agentState?: string }>): boolean {
   return sessions.some((session) => session.state === 'running' && session.agentState === 'working')
 }

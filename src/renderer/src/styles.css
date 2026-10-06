@@ -280,6 +280,10 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .dialog-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 .dialog-actions span { flex: 1; }
+.rename-terminal-dialog { width: min(480px, calc(100vw - 32px)); margin: auto; color: var(--text); max-height: calc(100dvh - 32px); overflow: auto; }
+.rename-terminal-dialog::backdrop { background: rgb(0 0 0 / .65); }
+.rename-terminal-dialog form { display: flex; flex-direction: column; gap: 14px; }
+.rename-terminal-dialog small { color: #b9c2cf; font-size: 11px; }
 .alert-ai-dialog { max-height: calc(100dvh - 40px); overflow-y: auto; }
 .alert-ai-dialog label small, .alert-ai-dialog > small { color: #b4becd; font-size: 11px; font-weight: 400; line-height: 1.5; }
 .alert-ai-dialog .dialog-actions { flex-wrap: wrap; }

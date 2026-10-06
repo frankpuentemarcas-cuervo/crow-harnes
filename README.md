@@ -67,6 +67,12 @@ En Crow Harness, agregá el destino SSH, conectá el host y registrá una carpet
 
 En una terminal de Windows, seleccioná texto y usá **Copiar**, `Ctrl+C` o `Ctrl+Shift+C`. Para pegar un comando o mensaje, usá **Pegar**, `Ctrl+V`, `Ctrl+Shift+V` o `Shift+Insert`. Pegar no agrega Enter, pero **los saltos de línea que ya estén en el texto pueden ejecutar comandos** según la shell o agente. Sin selección, `Ctrl+C` conserva su función de interrumpir el proceso remoto.
 
+### Renombrar una terminal
+
+Hacé clic en el lápiz junto a la terminal del panel lateral. En **Renombrar terminal**, escribí el nombre y usá **Guardar** o Enter; **Cancelar** o Escape no modifica nada. El nombre admite hasta 48 caracteres y se conserva al volver a abrir Crow. Dejalo vacío para recuperar el nombre del agente.
+
+El alias es local a Windows y se identifica por host y terminal: no cambia la carpeta ni reinicia el agente remoto. El diálogo corregido está disponible desde v0.1.20; no necesita actualizar `crowd` en Linux.
+
 ### Consultar la caché nativa de Claude
 
 > Disponible desde v0.1.19, pendiente de prueba con Claude en un host real. No requiere instalar `claude-code-templates`.
