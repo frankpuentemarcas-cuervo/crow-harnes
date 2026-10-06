@@ -8,6 +8,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "claude-statusline" {
+		_ = server.RunClaudeStatusline()
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "hook-notify" {
 		_ = server.RunHookNotify(os.Args[2:])
 		return

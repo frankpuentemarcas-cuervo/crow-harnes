@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crow · QA caché</title></head><body>
+<div id="root"></div>
+<div style="position:fixed;bottom:30px;right:10px;z-index:25;display:flex;gap:4px;background:#222;padding:5px" aria-label="Controles QA simulados">
+  <button onclick="setCache('warm')">QA activa</button><button onclick="setCache('soon')">QA por vencer</button><button onclick="setCache('cold')">QA vencida</button><button onclick="setCache('unknown')">QA sin datos</button><button onclick="setCache('working')">QA trabajando</button><output id="qa-count">Avisos QA: 0</output>
+</div>
+<script>
+// Fictional IPC/session data only. No SSH, actual providers or saved app settings.
+const host={id:'host-cache',name:'Host QA',target:'mock',port:22,remotePort:47321};
+const project={id:'project-cache',hostId:host.id,name:'Proyecto QA',root:'/test'};
+const session={id:'0123456789abcdef0123456789abcdef',agent:'claude',mode:'normal',root:project.root,state:'running',agentState:'completed',hooksActive:true,startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),seq:1};
+let saved={hosts:[host],projects:[project],notices:[],sessionNames:{[host.id+':'+session.id]:'Desarrollador'},eventCursors:{},tabs:[],activeTabs:{},selectedProjectId:project.id};
+let calls=0, cacheClicks=[], statusListeners=[];
+window.setCache=kind=>{
+  session.agentState=kind==='working'?'working':'completed';
+  session.promptCache=kind==='unknown'?undefined:{source:'claude-statusline',conversationId:'qa-session',ttlSeconds:300,expiresAt:new Date(Date.now()+(kind==='cold'?-1000:kind==='soon'||kind==='working'?45000:180000)).toISOString(),reportedAt:new Date().toISOString(),warm:kind!=='cold',observed:true,hitRatio:.96,readTokens:9600,writtenTokens:300,freshTokens:100,requests:4,misses:1,lastMissCauses:['tools_changed']};
+  statusListeners.forEach(listener=>listener(host.id,'connected'));
+};
+setCache('warm');
+const mock={
+ getState:async()=>saved,saveWorkspace:async()=>saved,status:async()=>'connected',sessions:async()=>[{...session,promptCache:session.promptCache?{...session.promptCache,serverTime:new Date().toISOString()}:undefined}],hookSettings:async()=>({enabled:true}),
+ onStatus:listener=>{statusListeners.push(listener);return()=>{statusListeners=statusListeners.filter(item=>item!==listener)}},
+ hostMetrics:async()=>({cpuPercent:15,memoryUsed:1024,memoryTotal:4096,diskUsed:10,diskTotal:100,sleepingSessions:0,sleepingMemory:0,at:new Date().toISOString()}),
+ getAlertSound:async()=>null,getUpdateState:async()=>({status:'idle'}),getAlertAISettings:async()=>({enabled:false,baseURL:'http://127.0.0.1:31415/v1',model:'auto',keyPresent:false,secureStorageAvailable:true}),getAlertAIStatus:async()=>({state:'idle',detail:'Sin análisis todavía.'}),
+ notifyCacheExpiry:async()=>{calls++;document.getElementById('qa-count').textContent='Avisos QA: '+calls},onCacheWarningClick:listener=>{cacheClicks.push(listener);return()=>{cacheClicks=cacheClicks.filter(item=>item!==listener)}},
+ attach:async(_host,_id,_seq,listener)=>{listener({type:'state',info:session});return'mock-stream'},files:async()=>[],markNoticeRead:async()=>saved
+};
+window.crow=new Proxy(mock,{get:(target,key)=>key in target?target[key]:String(key).startsWith('on')?()=>()=>{}:async()=>{}});
+</script>
+<script type="module" src="/src/renderer/src/main.tsx"></script>
+</body></html>

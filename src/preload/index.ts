@@ -7,6 +7,12 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  notifyCacheExpiry: (hostId, sessionId) => ipcRenderer.invoke('crow:cache-warning', hostId, sessionId),
+  onCacheWarningClick: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, target: { hostId: string; projectId: string; sessionId: string }): void => listener(target)
+    ipcRenderer.on('crow:cache-warning-click', wrapped)
+    return () => { ipcRenderer.removeListener('crow:cache-warning-click', wrapped) }
+  },
   getAlertAISettings: () => ipcRenderer.invoke('crow:get-alert-ai-settings'),
   saveAlertAISettings: (input) => ipcRenderer.invoke('crow:save-alert-ai-settings', input),
   testAlertAI: () => ipcRenderer.invoke('crow:test-alert-ai'),

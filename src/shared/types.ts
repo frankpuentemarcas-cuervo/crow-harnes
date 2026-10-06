@@ -54,10 +54,32 @@ export interface SessionInfo {
   hooksActive?: boolean
   cacheTtlSeconds?: number
   cacheExpiresAt?: string
+  promptCache?: PromptCache
   startedAt: string
   updatedAt: string
   seq: number
   exitCode?: number
+}
+
+/** Main-conversation statistics reported by Claude; never prompt content. */
+export interface PromptCache {
+  source: 'claude-statusline'
+  conversationId?: string
+  reportedAt: string
+  serverTime?: string
+  /** Client-only anchor; never sent back to the server or persisted. */
+  receivedAt?: number
+  ttlSeconds?: 300 | 3600
+  expiresAt?: string
+  warm?: boolean
+  observed?: boolean
+  hitRatio?: number
+  readTokens?: number
+  writtenTokens?: number
+  freshTokens?: number
+  requests?: number
+  misses?: number
+  lastMissCauses?: string[]
 }
 
 export interface TerminalFrame {
@@ -158,6 +180,8 @@ export interface AlertSound {
 }
 
 export interface CrowAPI {
+  notifyCacheExpiry(hostId: string, sessionId: string): Promise<void>
+  onCacheWarningClick(listener: (target: { hostId: string; projectId: string; sessionId: string }) => void): () => void
   getAlertAISettings(): Promise<AlertAISettings>
   saveAlertAISettings(input: AlertAIInput): Promise<AlertAISettings>
   testAlertAI(): Promise<AlertAIStatus>

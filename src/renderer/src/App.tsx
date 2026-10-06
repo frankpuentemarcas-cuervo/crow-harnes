@@ -11,6 +11,10 @@ import { mergeNotice, shouldNotifyNotice, unreadNoticesForSession, unreadNotices
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
+import { CacheWarningTracker, cacheWarningPreferences, cacheView } from '../../shared/prompt-cache'
+import { CacheBadge } from './CacheBadge'
+import { CacheDetailsDialog } from './CacheDetailsDialog'
+import { CacheWarningSettings } from './CacheWarningSettings'
 
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
@@ -41,6 +45,13 @@ export function App(): React.JSX.Element {
   const [hostMetricErrors, setHostMetricErrors] = useState<Record<string, boolean>>({})
   const [hookSettings, setHookSettings] = useState<Record<string, boolean>>({})
   const [clockNow, setClockNow] = useState(Date.now())
+  const [cachePreferences, setCachePreferences] = useState(() => {
+    try { return cacheWarningPreferences(JSON.parse(localStorage.getItem('crow-cache-warnings-v1') || 'null')) }
+    catch { return cacheWarningPreferences(null) }
+  })
+  const cacheWarnings = useRef(new CacheWarningTracker())
+  const [cacheWarning, setCacheWarning] = useState<{ key: string; hostId: string; projectId: string; sessionId: string; expiresAt: string; conversationId?: string; shownAt: number } | null>(null)
+  const [cacheDetail, setCacheDetail] = useState<{ hostId: string; sessionId: string } | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({})
@@ -101,16 +112,36 @@ export function App(): React.JSX.Element {
     return counts
   }, [state.projects, sessionsByProject])
 
-  const cacheTimer = (sessionsByProject[selectedProjectId] || [])
-    .filter((session) => session.agent === 'claude' && !!session.cacheExpiresAt && Date.parse(session.cacheExpiresAt) > clockNow)
-    .sort((a, b) => Date.parse(a.cacheExpiresAt!) - Date.parse(b.cacheExpiresAt!))[0]
-  const cacheSeconds = cacheTimer ? Math.ceil((Date.parse(cacheTimer.cacheExpiresAt!) - clockNow) / 1000) : 0
+  const activeSession = activeTab?.kind === 'terminal' ? (sessionsByProject[selectedProjectId] || []).find(session => session.id === activeTab.sessionId) : undefined
+  const cacheDetailSession = cacheDetail ? sessions[cacheDetail.hostId]?.find(session => session.id === cacheDetail.sessionId) : undefined
 
   function sessionDisplayName(hostId: string, sessionId: string, agent: Agent): string {
     return state.sessionNames[sessionNameKey(hostId, sessionId)]?.trim() || labelFor(agent)
   }
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
+  useEffect(() => {
+    try { localStorage.setItem('crow-cache-warnings-v1', JSON.stringify(cachePreferences)) } catch { /* Storage can be unavailable; settings still apply this run. */ }
+  }, [cachePreferences])
+  useEffect(() => {
+    const candidates = new Map<string, { key: string; session: SessionInfo; status: ConnectionStatus; hostId: string; projectId: string }>()
+    for (const project of state.projects) for (const session of sessionsByProject[project.id] || []) {
+      if (session.agent !== 'claude') continue
+      const key = `${project.hostId}:${session.id}`
+      candidates.set(key, { key, session, status: statuses[project.hostId] || 'disconnected', hostId: project.hostId, projectId: project.id })
+    }
+    const due = cacheWarnings.current.collect([...candidates.values()], clockNow, cachePreferences)
+    for (const item of due) {
+      setCacheWarning({ key: item.key, hostId: item.hostId, projectId: item.projectId, sessionId: item.session.id, expiresAt: item.session.promptCache!.expiresAt!, conversationId: item.session.promptCache!.conversationId, shownAt: clockNow })
+      void window.crow.notifyCacheExpiry(item.hostId, item.session.id).catch(() => undefined)
+    }
+    if (!due.length) setCacheWarning(current => {
+      if (!current) return current
+      const item = candidates.get(current.key)
+      if (!cachePreferences.enabled || clockNow - current.shownAt >= 10000 || !item || item.session.agentState === 'working' || cacheView(item.session, item.status, clockNow).state !== 'warm' || item.session.promptCache?.expiresAt !== current.expiresAt || item.session.promptCache?.conversationId !== current.conversationId) return null
+      return current
+    })
+  }, [state.projects, sessionsByProject, statuses, clockNow, cachePreferences])
   useEffect(() => { noticesRef.current = state.notices }, [state.notices])
 
   useEffect(() => {
@@ -160,8 +191,9 @@ export function App(): React.JSX.Element {
 
   async function refreshSessions(hostId: string): Promise<void> {
     try {
+      const requestedAt = Date.now()
       const items = await window.crow.sessions(hostId)
-      setSessions((current) => ({ ...current, [hostId]: items }))
+      setSessions((current) => ({ ...current, [hostId]: items.map(item => item.promptCache ? { ...item, promptCache: { ...item.promptCache, receivedAt: requestedAt } } : item) }))
     } catch { /* The status indicator shows the disconnect. */ }
   }
 
@@ -244,6 +276,10 @@ export function App(): React.JSX.Element {
     if (!existing) setTabs((current) => [...current, tab])
     selectTab(target)
   }
+
+  useEffect(() => window.crow.onCacheWarningClick(({ hostId, projectId, sessionId }) => {
+    if (state.projects.some(project => project.id === projectId && project.hostId === hostId)) openTab({ id: crypto.randomUUID(), projectId, kind: 'terminal', sessionId })
+  }), [tabs, state.projects, state.notices])
 
   function acknowledgeTab(tab: WorkspaceTab): void {
     void markNotices(unreadNoticesForTab(state.notices, state.projects, tab).map((notice) => notice.id))
@@ -458,6 +494,7 @@ export function App(): React.JSX.Element {
               <button className={`session-row ${agentWorking ? 'agent-working' : ''}`} title={agentWorking ? 'Agente trabajando; abrir terminal' : session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
                 <span className={`session-state ${session.state} ${agentWorking ? 'agent-working' : ''}`} /><span className="session-name">{sessionDisplayName(host.id, session.id, session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
               </button>
+              <CacheBadge session={session} status={statuses[host.id] || 'disconnected'} now={clockNow} compact onOpen={() => setCacheDetail({ hostId: host.id, sessionId: session.id })} />
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
               <button className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
               <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
@@ -480,15 +517,17 @@ export function App(): React.JSX.Element {
           return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria, disco raíz y terminales suspendidas. La RAM suspendida es consumo estimado, no memoria liberada.`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span><span className="sleeping-metric" role="status" aria-atomic="true">Suspendidas {sample?.sleepingSessions ?? '—'} · RAM ≈{sample ? memory(sample.sleepingMemory || 0) : '—'}</span></div>
         })}</div>
         <div className="top-actions">
-          {cacheTimer && <span className="cache-timer" title={`Caché Claude estimada · sesión ${cacheTimer.id.slice(0, 8)}. No consulta al proveedor ni garantiza una caché activa.`}><Clock3 size={13} /> Caché ≈{Math.floor(cacheSeconds / 60)}:{String(cacheSeconds % 60).padStart(2, '0')}</span>}
+          {activeSession && selectedHost && <CacheBadge session={activeSession} status={status} now={clockNow} onOpen={() => setCacheDetail({ hostId: selectedHost.id, sessionId: activeSession.id })} />}
           <button className="icon-button" title="Acceso móvil en red local" aria-label="Acceso móvil en red local" onClick={() => void openMobile()}><Smartphone size={16} /></button>
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
-             {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div>{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
+             {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div><CacheWarningSettings value={cachePreferences} onChange={setCachePreferences} />{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
         </div>
       </header>
+
+      {cacheWarning && <div className="cache-warning" role="status" aria-live="polite"><Clock3 size={15} aria-hidden="true" /><span>Caché Claude por vencer · {sessionDisplayName(cacheWarning.hostId, cacheWarning.sessionId, 'claude')}. La conversación se conserva.</span><button className="sound-test" onClick={() => { openTab({ id: crypto.randomUUID(), projectId: cacheWarning.projectId, kind: 'terminal', sessionId: cacheWarning.sessionId }); setCacheWarning(null) }}>Abrir terminal</button><button className="icon-button" aria-label="Descartar aviso de caché" onClick={() => setCacheWarning(null)}><X size={15} /></button></div>}
 
       {(updateState.status === 'available' || updateState.status === 'downloading' || updateState.status === 'downloaded' || updateState.status === 'error') && <div className={`update-banner ${updateState.status}`} role="status" aria-live="polite">
         <span className="update-message"><Download size={15} />{updateState.status === 'available' ? `Actualización ${updateState.version || ''} disponible; descargando…` : updateState.status === 'downloading' ? `Descargando actualización… ${updateState.percent ?? 0}%` : updateState.status === 'downloaded' ? `Actualización ${updateState.version || ''} lista para instalar.` : 'No se pudo buscar actualizaciones.'}</span>
@@ -541,6 +580,7 @@ export function App(): React.JSX.Element {
     {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { setState(await window.crow.removeHost(editingHost.id)); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId('') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
+    {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {mobileOpen && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileOpen(false) }}><div className="dialog-card mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-title">
       <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
       <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>
@@ -566,7 +606,7 @@ function HostDialog({ host, hostConnected, hooksEnabled, onToggleHooks, onClose,
   const [port, setPort] = useState(host?.port || 22)
   const [remotePort, setRemotePort] = useState(host?.remotePort || 47321)
   const [identity, setIdentity] = useState(host?.identity || '')
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="dialog-card" onSubmit={(event) => { event.preventDefault(); void onSave({ id: host?.id, name, target, port, remotePort, identity: identity || undefined }) }}><div className="dialog-heading"><h2>{host ? 'Editar host' : 'Agregar host'}</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><X size={18} /></button></div><p>Conexión SSH hacia el servicio Crow instalado en el servidor.</p><label>Nombre<input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Servidor principal" /></label><label>Destino SSH<input required value={target} onChange={(event) => setTarget(event.target.value)} placeholder="usuario@servidor o alias" /></label><div className="dialog-columns"><label>Puerto SSH<input required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label>Puerto del servicio<input required type="number" min="1" max="65535" value={remotePort} onChange={(event) => setRemotePort(Number(event.target.value))} /></label></div><label>Archivo de clave SSH (opcional)<input value={identity} onChange={(event) => setIdentity(event.target.value)} placeholder="C:\\Users\\...\\.ssh\\id_ed25519" /></label>{host && <label className="hook-toggle"><input type="checkbox" checked={hooksEnabled ?? false} disabled={!hostConnected || hooksEnabled === undefined} onChange={(event) => { void onToggleHooks?.(event.target.checked) }} /><span>Hooks de estado administrados por Crow<small>Trabajando, esperando y completado. Al desactivar se borra el hook de Crow en el servidor; aplica a nuevas sesiones.</small></span></label>}<div className="dialog-actions">{onDelete && <button type="button" className="danger-button" onClick={() => { if (window.confirm('¿Quitar este host y sus proyectos de la app? Las sesiones remotas no se cierran.')) void onDelete() }}>Quitar host</button>}<span /><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="submit" className="primary-button">Guardar</button></div></form></div>
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="dialog-card" onSubmit={(event) => { event.preventDefault(); void onSave({ id: host?.id, name, target, port, remotePort, identity: identity || undefined }) }}><div className="dialog-heading"><h2>{host ? 'Editar host' : 'Agregar host'}</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><X size={18} /></button></div><p>Conexión SSH hacia el servicio Crow instalado en el servidor.</p><label>Nombre<input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Servidor principal" /></label><label>Destino SSH<input required value={target} onChange={(event) => setTarget(event.target.value)} placeholder="usuario@servidor o alias" /></label><div className="dialog-columns"><label>Puerto SSH<input required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label>Puerto del servicio<input required type="number" min="1" max="65535" value={remotePort} onChange={(event) => setRemotePort(Number(event.target.value))} /></label></div><label>Archivo de clave SSH (opcional)<input value={identity} onChange={(event) => setIdentity(event.target.value)} placeholder="C:\\Users\\...\\.ssh\\id_ed25519" /></label>{host && <label className="hook-toggle"><input type="checkbox" checked={hooksEnabled ?? false} disabled={!hostConnected || hooksEnabled === undefined} onChange={(event) => { void onToggleHooks?.(event.target.checked) }} /><span>Hooks de estado administrados por Crow<small>Estados del agente y métricas de caché Claude. Al desactivar se borra el hook de Crow en el servidor; el colector se agrega a nuevas terminales.</small></span></label>}<div className="dialog-actions">{onDelete && <button type="button" className="danger-button" onClick={() => { if (window.confirm('¿Quitar este host y sus proyectos de la app? Las sesiones remotas no se cierran.')) void onDelete() }}>Quitar host</button>}<span /><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="submit" className="primary-button">Guardar</button></div></form></div>
 }
 
 function ProjectDialog({ project, hosts, defaultHostId, onClose, onSave }: { project?: Project; hosts: Host[]; defaultHostId: string; onClose: () => void; onSave: (project: Omit<Project, 'id'> & { id?: string }) => Promise<void> }): React.JSX.Element {

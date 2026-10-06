@@ -46,7 +46,7 @@ func TestTurnCompleteMarksAgentCompleted(t *testing.T) {
 	if s.lastActivity.IsZero() {
 		t.Fatal("completion did not reset inactivity timer")
 	}
-	if s.snapshot().CacheExpiresAt == nil {
-		t.Fatal("completion did not start cache estimate")
+	if s.snapshot().CacheExpiresAt != nil || s.snapshot().PromptCache != nil {
+		t.Fatal("completion invented cache telemetry")
 	}
 }

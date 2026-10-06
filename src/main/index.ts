@@ -144,6 +144,20 @@ function registerIPC(): void {
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
   handle('crow:rename-session', (hostId: string, sessionId: string, name: string) => store.renameSession(hostId, sessionId, name))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
+  handle('crow:cache-warning', async (hostId: string, sessionId: string) => {
+    if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
+    const host = store.host(hostId)
+    if (!host || connection(hostId).status() !== 'connected') return
+    const sessions = await connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
+    const session = sessions.find(item => item.id === sessionId && item.agent === 'claude')
+    const project = store.snapshot().projects.find(item => item.hostId === hostId && item.root === session?.root)
+    const cache = session?.promptCache
+    const remaining = Date.parse(cache?.expiresAt || '') - (Date.parse(cache?.serverTime || '') || Date.now())
+    if (!project || !session?.hooksActive || !['running', 'sleeping'].includes(session.state) || session.agentState === 'working' || cache?.source !== 'claude-statusline' || !cache.warm || !Number.isFinite(remaining) || remaining <= 0 || remaining > 300000 || !Notification.isSupported()) return
+    const item = new Notification({ title: 'Caché Claude por vencer', body: `${host.name} · ${store.sessionName(hostId, sessionId) || `sesión ${sessionId.slice(0, 8)}`}. No se perderá la conversación.`, silent: true })
+    item.on('click', () => { window?.show(); window?.focus(); send('crow:cache-warning-click', { hostId, projectId: project.id, sessionId }) })
+    item.show() // Separate advisory: never stored as an agent notice or classified by Free LLM.
+  })
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
   handle('crow:mobile-addresses', () => mobileAddresses())
   handle('crow:mobile-status', () => mobile.status())

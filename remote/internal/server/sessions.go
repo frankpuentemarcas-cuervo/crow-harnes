@@ -33,7 +33,13 @@ type session struct {
 func (s *session) snapshot() SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.info
+	info := s.info
+	if info.PromptCache != nil {
+		cache := *info.PromptCache
+		cache.ServerTime = time.Now().UTC()
+		info.PromptCache = &cache
+	}
+	return info
 }
 
 func (s *session) subscribe() (chan Frame, uint64) {
@@ -112,6 +118,8 @@ func (a *App) loadSessions() error {
 		return err
 	}
 	for _, info := range infos {
+		info.PromptCache = nil // Native reports describe a live CLI, not a persisted conversation.
+		info.CacheExpiresAt, info.CacheTTLSeconds = nil, 0
 		last, err := lastLoggedSequence(filepath.Join(a.dir, "terminal-"+info.ID+".jsonl"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -157,7 +165,9 @@ func (a *App) saveSessions() error {
 	a.mu.Lock()
 	infos := make([]SessionInfo, 0, len(a.sessions))
 	for _, s := range a.sessions {
-		infos = append(infos, s.snapshot())
+		info := s.snapshot()
+		info.PromptCache = nil
+		infos = append(infos, info)
 	}
 	a.mu.Unlock()
 	data, err := json.MarshalIndent(infos, "", "  ")
@@ -188,7 +198,7 @@ func (a *App) session(id string) *session {
 	return a.sessions[id]
 }
 
-func agentCommand(agent, mode, hook string) (string, []string, error) {
+func agentCommand(agent, mode, hook string, statusLine ...map[string]any) (string, []string, error) {
 	if mode != "normal" && mode != "bypass" {
 		return "", nil, errors.New("invalid permission mode")
 	}
@@ -201,12 +211,16 @@ func agentCommand(agent, mode, hook string) (string, []string, error) {
 	case "claude":
 		args := []string{}
 		if hook != "" {
-			settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+			config := map[string]any{"hooks": map[string]any{
 				"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
 				"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
 				"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},
 				"SubagentStop":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-stop"}}}},
-			}})
+			}}
+			if len(statusLine) > 0 && statusLine[0] != nil {
+				config["statusLine"] = statusLine[0]
+			}
+			settings, _ := json.Marshal(config)
 			args = append(args, "--settings", string(settings))
 		}
 		if mode == "bypass" {
@@ -241,28 +255,6 @@ func codexCommandHookConfig(event, command string) string {
 	return fmt.Sprintf("hooks.%s=[{hooks=[{type=\"command\",command=%q}]}]", event, command)
 }
 
-func claudeCacheTTL(agent string) int {
-	if agent != "claude" || os.Getenv("DISABLE_PROMPT_CACHING") == "1" || os.Getenv("ANTHROPIC_BASE_URL") != "" {
-		return 0
-	}
-	if os.Getenv("FORCE_PROMPT_CACHING_5M") == "1" {
-		return 300
-	}
-	switch os.Getenv("CLAUDE_CODE_PROMPT_CACHE_TTL") {
-	case "5m":
-		return 300
-	case "1h":
-		return 3600
-	}
-	if os.Getenv("ENABLE_PROMPT_CACHING_1H") == "1" {
-		return 3600
-	}
-	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" || os.Getenv("CLAUDE_CODE_USE_VERTEX") == "1" {
-		return 300
-	}
-	return 3600 // Claude Code subscription main conversations use 1h; shown as an estimate.
-}
-
 func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -279,7 +271,16 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	a.mu.RLock()
 	hook := a.hookPath
 	a.mu.RUnlock()
-	bin, args, err := agentCommand(agent, mode, hook)
+	var statusLine map[string]any
+	var originalStatusLine string
+	if agent == "claude" && hook != "" {
+		binary := a.binaryPath
+		if binary == "" {
+			binary, _ = os.Executable()
+		}
+		statusLine, originalStatusLine = claudeCacheStatusLine(root, binary)
+	}
+	bin, args, err := agentCommand(agent, mode, hook, statusLine)
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -298,7 +299,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "CROW_SESSION_ID="+id,
-		"CROW_EVENT_URL=http://127.0.0.1:"+a.port+"/api/events")
+		"CROW_EVENT_URL=http://127.0.0.1:"+a.port+"/api/events", "CROW_STATUSLINE_COMMAND="+originalStatusLine)
 	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 32, Cols: 120})
 	if err != nil {
 		_ = logFile.Close()
@@ -312,7 +313,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	if (hook == "" || agent == "agy") && agent != "shell" {
 		initialAgentState = "unknown"
 	}
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", CacheTTLSeconds: claudeCacheTTL(agent), StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -465,12 +466,6 @@ func (a *App) markAgentState(id, state string) {
 	s.rootAgentState = state
 	s.updateAgentStateLocked()
 	s.lastActivity = time.Now().UTC()
-	if state == "completed" && len(s.activeSubagents) == 0 && s.info.CacheTTLSeconds > 0 {
-		expires := s.lastActivity.Add(time.Duration(s.info.CacheTTLSeconds) * time.Second)
-		s.info.CacheExpiresAt = &expires
-	} else {
-		s.info.CacheExpiresAt = nil
-	}
 	info := s.info
 	s.broadcast(Frame{Type: "state", Info: &info})
 }
@@ -504,12 +499,6 @@ func (a *App) markSubagentState(id, agentID string, active bool) {
 		delete(s.activeSubagents, agentID)
 	}
 	s.lastActivity = time.Now().UTC()
-	if active {
-		s.info.CacheExpiresAt = nil
-	} else if len(s.activeSubagents) == 0 && s.rootAgentState == "completed" && s.info.CacheTTLSeconds > 0 {
-		expires := s.lastActivity.Add(time.Duration(s.info.CacheTTLSeconds) * time.Second)
-		s.info.CacheExpiresAt = &expires
-	}
 	s.updateAgentStateLocked()
 	info := s.info
 	s.broadcast(Frame{Type: "state", Info: &info})

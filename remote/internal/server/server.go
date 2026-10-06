@@ -100,6 +100,7 @@ func Run() error {
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/wake", a.handleWakeSession)
+	mux.HandleFunc("POST /api/sessions/{id}/cache", a.handlePromptCache)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)

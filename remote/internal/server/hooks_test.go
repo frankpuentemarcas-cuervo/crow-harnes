@@ -47,28 +47,3 @@ func TestAgentCommandWithoutManagedHooks(t *testing.T) {
 		}
 	}
 }
-
-func TestClaudeCacheTTL(t *testing.T) {
-	for _, key := range []string{"DISABLE_PROMPT_CACHING", "ANTHROPIC_BASE_URL", "FORCE_PROMPT_CACHING_5M", "CLAUDE_CODE_PROMPT_CACHE_TTL", "ENABLE_PROMPT_CACHING_1H", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
-		t.Setenv(key, "")
-	}
-	if got := claudeCacheTTL("claude"); got != 3600 {
-		t.Fatalf("subscription estimate = %d", got)
-	}
-	t.Setenv("ANTHROPIC_API_KEY", "test")
-	if got := claudeCacheTTL("claude"); got != 300 {
-		t.Fatalf("API estimate = %d", got)
-	}
-	t.Setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h")
-	if got := claudeCacheTTL("claude"); got != 3600 {
-		t.Fatalf("explicit 1h = %d", got)
-	}
-	t.Setenv("FORCE_PROMPT_CACHING_5M", "1")
-	if got := claudeCacheTTL("claude"); got != 300 {
-		t.Fatalf("forced 5m = %d", got)
-	}
-	t.Setenv("DISABLE_PROMPT_CACHING", "1")
-	if got := claudeCacheTTL("claude"); got != 0 {
-		t.Fatalf("disabled = %d", got)
-	}
-}

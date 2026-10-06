@@ -113,6 +113,7 @@ func (a *App) setHooksEnabled(enabled bool) error {
 			}
 			clear(s.activeSubagents)
 			s.info.CacheExpiresAt = nil
+			s.info.PromptCache = nil
 			info := s.info
 			s.broadcast(Frame{Type: "state", Info: &info})
 			s.mu.Unlock()
