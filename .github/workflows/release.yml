@@ -63,6 +63,9 @@ jobs:
       - name: Test desktop alert and terminal logic
         run: npm test
 
+      - name: Test terminal clipboard in isolated Electron
+        run: node tests/terminal-clipboard-electron.mjs
+
       - name: Type-check sources
         run: npm run typecheck
 

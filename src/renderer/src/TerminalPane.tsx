@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ConnectionStatus, SessionInfo } from '../../shared/types'
-import { terminalClipboardAction } from './terminal-clipboard'
+import { terminalClipboardAction, copyTerminalClipboardEvent, pasteTerminalClipboardEvent } from './terminal-clipboard'
 import { decodeOsc52Selection } from './terminal-osc52'
 import { PendingTerminalSelection } from './terminal-selection'
 import { canFocusTerminal } from './ui-continuity'
@@ -45,25 +45,37 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     if (remoteSelection.current) clearRemoteSelection()
   }
 
+  function selectedText(): string {
+    return pendingSelection.current.read(terminal.current?.getSelection() || '') || remoteSelection.current
+  }
+
+  function copied(): void {
+    terminal.current?.clearSelection()
+    clearPendingSelection()
+    clearRemoteSelection()
+    setClipboardError('')
+  }
+
   async function copySelection(): Promise<void> {
-    const selected = pendingSelection.current.read(terminal.current?.getSelection() || '') || remoteSelection.current
+    const selected = selectedText()
     if (!selected) return
     try {
       await window.crow.clipboardWriteText(selected)
-      terminal.current?.clearSelection()
-      clearPendingSelection()
-      clearRemoteSelection()
-      setClipboardError('')
+      // A new selection made while the clipboard IPC was pending must survive.
+      if (selectedText() === selected) copied()
     } catch (reason) { setClipboardError(`No se pudo copiar: ${String(reason)}`) }
   }
 
   async function pasteClipboard(): Promise<void> {
     if (!subscription.current) { setClipboardError('La terminal todavía no está conectada.'); return }
+    const stream = subscription.current
+    const instance = terminal.current
     try {
       const text = await window.crow.clipboardReadText()
-      if (text && subscription.current) {
+      if (!activeRef.current || subscription.current !== stream || terminal.current !== instance) return
+      if (text) {
         clearCopyCandidates()
-        terminal.current?.paste(text)
+        instance?.paste(text)
       }
       setClipboardError('')
     } catch (reason) { setClipboardError(`No se pudo pegar: ${String(reason)}`) }
@@ -101,7 +113,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     fit.current = addon
     if (activeRef.current) addon.fit()
     instance.attachCustomKeyEventHandler((event) => {
-      const action = terminalClipboardAction(event, instance.hasSelection() || pendingSelection.current.hasText())
+      const action = terminalClipboardAction(event, Boolean(selectedText()))
       if (!action) return true
       event.preventDefault()
       event.stopPropagation()
@@ -121,7 +133,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
       setHasSelection(pendingSelection.current.capture(instance.getSelection()))
     })
     const key = instance.onKey(({ domEvent }) => {
-      if (terminalClipboardAction(domEvent, instance.hasSelection() || pendingSelection.current.hasText()) !== 'copy') clearCopyCandidates()
+      if (terminalClipboardAction(domEvent, Boolean(selectedText())) !== 'copy') clearCopyCandidates()
     })
     const input = instance.onData((data) => {
       if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined)
@@ -202,12 +214,29 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
       <span className="pane-meta-right">
         {status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}
       </span>
-      <button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title={hasRemoteSelection && !hasSelection ? 'Copiar texto ofrecido por el agente (Ctrl+Shift+C)' : 'Copiar selección (Ctrl+C o Ctrl+Shift+C)'} onClick={() => void copySelection()}>Copiar</button>
+      <button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title="Copiar selección (Ctrl+C o Ctrl+Shift+C)" onClick={() => void copySelection()}>Copiar</button>
       <button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>
       {info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}
     </div>
     {wakeError && <div className="inline-error" role="alert">{wakeError}</div>}
     {clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}
-    <div className="terminal-surface" ref={container} onPointerDownCapture={clearCopyCandidates} onPasteCapture={clearCopyCandidates} onCompositionStartCapture={clearCopyCandidates} />
+    <div className="terminal-surface" ref={container} onPointerDownCapture={clearCopyCandidates} onCompositionStartCapture={clearCopyCandidates}
+      onPointerUpCapture={() => setHasSelection(pendingSelection.current.capture(terminal.current?.getSelection() || ''))}
+      onCopyCapture={(event) => {
+        try { if (copyTerminalClipboardEvent(event, selectedText())) copied() }
+        catch (reason) { event.preventDefault(); event.stopPropagation(); setClipboardError(`No se pudo copiar: ${String(reason)}`) }
+      }}
+      onPasteCapture={(event) => {
+        if (!subscription.current || !activeRef.current) {
+          event.preventDefault(); event.stopPropagation()
+          setClipboardError('La terminal todavía no está conectada.')
+          return
+        }
+        pasteTerminalClipboardEvent(event, (text) => {
+          clearCopyCandidates()
+          terminal.current?.paste(text)
+        })
+        setClipboardError('')
+      }} />
   </div>
 }

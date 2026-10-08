@@ -17,7 +17,7 @@ Descargá el instalador más reciente desde [GitHub Releases](https://github.com
 | Proyectos | Carpetas absolutas del host, sin exigir Git. |
 | Agentes | Shell, Claude Code, Codex y Antigravity CLI (`agy`), con modo normal o bypass explícito. |
 | Sesiones | El servicio remoto posee los PTY; cerrar la app o perder SSH no mata los agentes. La salida tiene secuencias y log durable. Cambiar entre pestañas conserva la vista de la terminal y, al volver, recupera solo la salida nueva. Cerrar una pestaña sí descarta su vista local, no el proceso remoto. El código actual permite eliminar una terminal y terminar sus procesos remotos. Tras 30 minutos sin entrada/salida y con trabajo completado, suspende sesiones aptas con SIGSTOP y permite reanudar el mismo proceso con SIGCONT. |
-| Portapapeles | Las terminales de Windows permiten copiar texto seleccionado y pegar desde el portapapeles mediante botones o atajos. Cuando Claude Code ofrece texto mediante OSC 52, Crow habilita **Copiar**, sin permitir que el proceso remoto escriba o lea el portapapeles sin tu acción. `Ctrl+C` copia cuando hay selección propia de xterm y, sin ella, sigue enviando la interrupción al proceso remoto; para copiar texto ofrecido por Claude usá el botón o `Ctrl+Shift+C`. |
+| Portapapeles | Las terminales de Windows permiten copiar y pegar mediante botones o atajos. `Ctrl+C` copia la selección visible, conservada tras un redibujado o ofrecida por Claude mediante OSC 52; sin texto seleccionado conserva la interrupción del proceso remoto. `Ctrl+V` pega directamente una sola vez, también en Claude Code. El proceso remoto no escribe ni lee el portapapeles sin tu acción. |
 | Archivos | Explorador, Monaco, previsualización de imágenes/PDF y escritura con detección de conflicto por hash. Desde el panel lateral podés subir archivos de Windows con el botón **Subir** o arrastrándolos a la lista o a una carpeta; cada archivo permite **Descargar** y **Copiar ruta** (ruta absoluta del servidor). Las transferencias son binarias y no reemplazan archivos remotos existentes. |
 | Navegador | Chromium ejecutado **en el host**; el cliente muestra capturas JPEG e intercambia entrada básica. |
 | Alertas | Claude `Stop` y Codex `notify` alimentan eventos de fin de turno. Por defecto se usan reglas locales; opcionalmente Free LLM clasifica semánticamente la última respuesta. Las solicitudes de intervención activan sonido y campanita; los avisos informativos quedan en el historial sin sonido. Los errores de IA generan una revisión preventiva con su motivo. El texto final no se guarda en los eventos remotos ni en las alertas de Windows. En **Notificaciones** podés configurar la IA, elegir un sonido MP3, WAV u OGG local (máximo 5 MB y 30 segundos), probarlo y restaurar el tono original. |
@@ -66,6 +66,13 @@ npm run dev
 En Crow Harness, agregá el destino SSH, conectá el host y registrá una carpeta existente, por ejemplo `/home/usuario/proyecto`. Las carpetas se introducen como rutas **del servidor**, no de Windows.
 
 En una terminal de Windows, seleccioná texto y usá **Copiar**, `Ctrl+C` o `Ctrl+Shift+C`. Para pegar un comando o mensaje, usá **Pegar**, `Ctrl+V`, `Ctrl+Shift+V` o `Shift+Insert`. Pegar no agrega Enter, pero **los saltos de línea que ya estén en el texto pueden ejecutar comandos** según la shell o agente. Sin selección, `Ctrl+C` conserva su función de interrumpir el proceso remoto.
+
+La selección ofrecida por el agente también se copia con `Ctrl+C`; se descarta al iniciar otra selección, escribir o pegar.
+
+QA aislada de teclado: `node tests/terminal-clipboard-electron.mjs` usa Electron y la terminal reales con IPC y
+portapapeles ficticios, sin SSH ni configuración guardada. Requiere el binario local de Electron instalado.
+Prueba selección, redibujado, interrupción, pegado único, OSC 52 y campos fuera de la terminal; la ventana oculta
+no valida los aceleradores del menú de una ventana Windows enfocada ni una sesión Claude remota real.
 
 ### Renombrar una terminal
 

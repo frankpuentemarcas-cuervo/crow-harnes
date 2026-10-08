@@ -8,6 +8,7 @@ import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
 import { AlertAISettingsStore } from './alert-ai-settings'
 import { AttentionService } from './attention-service'
+import { ignoreClipboardMenuShortcut } from './clipboard-shortcuts'
 import type { Agent, AlertAIInput, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
 
 let window: BrowserWindow | undefined
@@ -255,6 +256,9 @@ function createWindow(): void {
     }
   })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('before-input-event', (_event, input) => {
+    window?.webContents.setIgnoreMenuShortcuts(ignoreClipboardMenuShortcut(input))
+  })
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void window.loadFile(join(__dirname, '../renderer/index.html'))

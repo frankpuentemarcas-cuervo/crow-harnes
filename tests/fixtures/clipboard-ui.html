@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Crow · QA portapapeles</title></head>
+<body><input id="outside" aria-label="Campo fuera de terminal"><div id="root" style="height:450px;width:900px"></div>
+<script type="module">
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { flushSync } from 'react-dom'
+import { Terminal } from '@xterm/xterm'
+import { TerminalPane } from '/src/renderer/src/TerminalPane.tsx'
+import '/src/renderer/src/styles.css'
+import '@xterm/xterm/css/xterm.css'
+
+// Fictional IPC and clipboard. This page never reads the Windows clipboard,
+// connects SSH, or loads Crow's saved configuration.
+let instance, active = true
+const originalOpen = Terminal.prototype.open
+Terminal.prototype.open = function(...args) { instance = this; return originalOpen.apply(this, args) }
+const qa = { input: [], copied: '', clipboard: '', reads: 0, writes: 0, outsideKeys: [] }
+window.crow = {
+  clipboardWriteText: async text => { qa.copied = text; qa.writes++ },
+  clipboardReadText: async () => { qa.reads++; return qa.clipboard },
+  terminalInput: async (_stream, text) => { qa.input.push(text) },
+  terminalResize: async () => {}, detach: async () => {},
+  attach: async () => 'qa-stream'
+}
+const root = createRoot(document.getElementById('root'))
+const render = () => flushSync(() => root.render(React.createElement(TerminalPane, { hostId: 'qa-host', sessionId: '0123456789abcdef0123456789abcdef', status: 'connected', active })))
+render()
+document.getElementById('outside').addEventListener('keydown', event => {
+  if (event.ctrlKey && ['c', 'v'].includes(event.key.toLowerCase())) {
+    qa.outsideKeys.push(event.key.toLowerCase()); event.preventDefault()
+  }
+})
+window.qa = {
+  state: () => structuredClone(qa),
+  reset: () => { qa.input = []; qa.reads = 0; qa.writes = 0; qa.copied = ''; instance.clearSelection(); instance.textarea.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); instance.focus() },
+  clipboard: text => { qa.clipboard = text },
+  write: text => new Promise(resolve => instance.write(text, resolve)),
+  select: length => new Promise(resolve => { instance.select(0, 0, length); instance.textarea.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); instance.focus(); setTimeout(resolve, 60) }),
+  redraw: () => instance.clearSelection(),
+  focus: () => instance.focus(),
+  active: value => { active = value; render() },
+  nativeCopy: () => {
+    const clipboardData = new DataTransfer()
+    instance.textarea.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData }))
+    return clipboardData.getData('text/plain')
+  },
+  nativePaste: text => {
+    const clipboardData = new DataTransfer(); clipboardData.setData('text/plain', text)
+    instance.textarea.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }))
+  },
+  outside: () => document.getElementById('outside').focus()
+}
+</script></body></html>
