@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Globe2, RotateCw } from 'lucide-react'
 import type { ConnectionStatus } from '../../shared/types'
 
-export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostId: string; root: string; initialURL: string; status: ConnectionStatus; onURL(url: string): void }): React.JSX.Element {
+export function BrowserPane({ hostId, root, initialURL, status, onURL, active = true }: { hostId: string; root: string; initialURL: string; status: ConnectionStatus; onURL(url: string): void; active?: boolean }): React.JSX.Element {
   const [address, setAddress] = useState(initialURL)
   const [frame, setFrame] = useState('')
   const [error, setError] = useState('')
@@ -12,49 +12,57 @@ export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostI
   const started = useRef(false)
   const refreshing = useRef(false)
   const navigating = useRef(false)
+  const addressDirty = useRef(false), addressVersion = useRef(0), epoch = useRef(0)
 
   async function navigate(raw: string): Promise<void> {
-    if (status !== 'connected') return
+    if (!active || status !== 'connected' || navigating.current) return
+    const version = addressVersion.current, current = epoch.current
     const url = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`
     setBusy(true)
     navigating.current = true
+    started.current = true
     setError('')
     try {
       const result = await window.crow.browserOpen(hostId, root, url)
-      setAddress(result.url)
+      if (current !== epoch.current) return
+      if (version === addressVersion.current) { setAddress(result.url); addressDirty.current = false }
       onURL(result.url)
-      started.current = true
       await refresh()
-    } catch (reason) { setError(String(reason)) }
-    finally { navigating.current = false; setBusy(false) }
+    } catch (reason) { if (current === epoch.current) setError(String(reason)) }
+    finally { if (current === epoch.current) { navigating.current = false; setBusy(false) } }
   }
 
   async function refresh(): Promise<void> {
-    if (status !== 'connected' || refreshing.current) return
+    if (!active || status !== 'connected' || refreshing.current) return
     refreshing.current = true
+    const current = epoch.current
     try {
       const result = await window.crow.browserFrame(hostId, root)
+      if (current !== epoch.current) return
       setFrame(result.data)
       if (result.url && result.url !== 'about:blank') {
-        setAddress(result.url)
+        if (!addressDirty.current) setAddress(result.url)
         onURL(result.url)
       }
       setError('')
-    } catch (reason) { setError(String(reason)) }
-    finally { refreshing.current = false }
+    } catch (reason) { if (current === epoch.current) setError(String(reason)) }
+    finally { if (current === epoch.current) refreshing.current = false }
   }
 
   useEffect(() => {
-    if (status !== 'connected') return
+    navigating.current = false; refreshing.current = false; setBusy(false)
+    if (!active || status !== 'connected') return
     let stopped = false
     if (!started.current) void navigate(initialURL)
     const timer = setInterval(() => { if (!stopped && !navigating.current) void refresh() }, 1200)
-    return () => { stopped = true; clearInterval(timer) }
-  }, [hostId, root, status])
+    return () => { stopped = true; epoch.current++; clearInterval(timer) }
+  }, [hostId, root, status, active])
 
   async function action(kind: string, payload?: Record<string, unknown>): Promise<void> {
-    try { await window.crow.browserInput(hostId, root, kind, payload); await refresh() }
-    catch (reason) { setError(String(reason)) }
+    if (!active || status !== 'connected' || navigating.current) return
+    const current = epoch.current
+    try { await window.crow.browserInput(hostId, root, kind, payload); if (current === epoch.current) await refresh() }
+    catch (reason) { if (current === epoch.current) setError(String(reason)) }
   }
 
   function coordinates(clientX: number, clientY: number): { x: number; y: number } {
@@ -69,7 +77,7 @@ export function BrowserPane({ hostId, root, initialURL, status, onURL }: { hostI
   }
 
   return <div className="browser-pane">
-    <div className="browser-toolbar"><button className="icon-button" title="Atrás" aria-label="Atrás" onClick={() => void action('back')}><ArrowLeft size={16} /></button><button className="icon-button" title="Adelante" aria-label="Adelante" onClick={() => void action('forward')}><ArrowRight size={16} /></button><button className="icon-button" title="Recargar" aria-label="Recargar" onClick={() => void action('reload')}><RotateCw size={16} /></button><form onSubmit={(event) => { event.preventDefault(); void navigate(address) }}><Globe2 size={15} /><input aria-label="Dirección web" value={address} onChange={(event) => setAddress(event.target.value)} spellCheck={false} /><span>en servidor</span></form></div>
+    <div className="browser-toolbar"><button className="icon-button" disabled={busy || status !== 'connected'} title="Atrás" aria-label="Atrás" onClick={() => void action('back')}><ArrowLeft size={16} /></button><button className="icon-button" disabled={busy || status !== 'connected'} title="Adelante" aria-label="Adelante" onClick={() => void action('forward')}><ArrowRight size={16} /></button><button className="icon-button" disabled={busy || status !== 'connected'} title="Recargar" aria-label="Recargar" onClick={() => void action('reload')}><RotateCw size={16} /></button><form onSubmit={(event) => { event.preventDefault(); void navigate(address) }}><Globe2 size={15} /><input aria-label="Dirección web" value={address} onChange={(event) => { addressDirty.current = true; addressVersion.current++; setAddress(event.target.value) }} spellCheck={false} /><span>en servidor</span></form></div>
     {error && <div className="inline-error" role="alert">{error}</div>}
     <div className="browser-surface" ref={surface} tabIndex={0} role="application" aria-label="Navegador remoto" onKeyDown={(event) => {
       if (event.key === 'Enter') { event.preventDefault(); void action('enter') }

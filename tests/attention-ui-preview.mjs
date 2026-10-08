@@ -22,3 +22,4 @@ console.log('QA aislado: http://127.0.0.1:31516/__attention-test — IPC simulad
 console.log('Markdown QA: http://127.0.0.1:31516/tests/fixtures/markdown-ui.html — documento ficticio, editor/visor reales')
 console.log('Cache QA: http://127.0.0.1:31516/tests/fixtures/cache-ui.html — métricas ficticias, componentes reales')
 console.log('Rename QA: http://127.0.0.1:31516/tests/fixtures/rename-ui.html — prompt no soportado, IPC ficticio')
+console.log('Continuity QA: http://127.0.0.1:31516/tests/fixtures/continuity-ui.html — eliminación, foco y errores, sin servidores reales')

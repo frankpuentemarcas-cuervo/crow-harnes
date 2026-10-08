@@ -10,6 +10,7 @@ import { loader } from '@monaco-editor/react'
 import '@xterm/xterm/css/xterm.css'
 import './styles.css'
 import { App } from './App'
+import { ConfirmProvider } from './ConfirmDialog'
 
 self.MonacoEnvironment = {
   getWorker(_moduleId: string, label: string) {
@@ -23,5 +24,5 @@ self.MonacoEnvironment = {
 loader.config({ monaco })
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><App /></React.StrictMode>
+  <React.StrictMode><ConfirmProvider><App /></ConfirmProvider></React.StrictMode>
 )

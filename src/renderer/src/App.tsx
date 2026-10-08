@@ -16,6 +16,11 @@ import { CacheBadge } from './CacheBadge'
 import { CacheDetailsDialog } from './CacheDetailsDialog'
 import { CacheWarningSettings } from './CacheWarningSettings'
 import { RenameTerminalDialog } from './RenameTerminalDialog'
+import { Modal } from './Modal'
+import { useConfirm } from './ConfirmDialog'
+import { HostDialog, ProjectDialog } from './WorkspaceDialogs'
+import { SidebarResize } from './SidebarResize'
+import { RequestVersions, sidebarWidth, visibleSidebarWidth, withoutSessionTabs } from './ui-continuity'
 
 type Dialog = 'host' | 'project' | null
 const labelFor = (agent: Agent): string => ({ shell: 'Shell', claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' })[agent]
@@ -38,6 +43,15 @@ function readSoundBase64(file: File): Promise<string> {
 }
 
 export function App(): React.JSX.Element {
+  const confirm = useConfirm()
+  const sessionVersions = useRef(new RequestVersions())
+  const operationKeys = useRef(new Set<string>())
+  const [starting, setStarting] = useState(false)
+  const dirtyEditors = useRef(new Set<string>())
+  const busyEditors = useRef(new Set<string>())
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
+  const [sidebarSize, setSidebarSize] = useState(() => { try { return sidebarWidth(localStorage.getItem('crow-sidebar-width')) } catch { return 340 } })
+  const actualSidebarSize = visibleSidebarWidth(sidebarSize, windowWidth)
   const [state, setState] = useState<SavedState>(empty)
   const [loaded, setLoaded] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
@@ -55,9 +69,11 @@ export function App(): React.JSX.Element {
   const [cacheDetail, setCacheDetail] = useState<{ hostId: string; sessionId: string } | null>(null)
   const [renamingSession, setRenamingSession] = useState<{ hostId: string; sessionId: string; initialName: string } | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
+  const selectedProjectRef = useRef(selectedProjectId)
+  selectedProjectRef.current = selectedProjectId
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({})
-  const [visitedTerminalTabs, setVisitedTerminalTabs] = useState<string[]>([])
+  const [visitedPaneTabs, setVisitedPaneTabs] = useState<string[]>([])
   const [agent, setAgent] = useState<Agent>('claude')
   const [mode, setMode] = useState<Mode>('normal')
   const [dialog, setDialog] = useState<Dialog>(null)
@@ -77,7 +93,8 @@ export function App(): React.JSX.Element {
   const soundGeneration = useRef(0)
   const soundInput = useRef<HTMLInputElement>(null)
   const [filePanelOpen, setFilePanelOpen] = useState(true)
-  const [passphraseHostId, setPassphraseHostId] = useState('')
+  const [passphraseHosts, setPassphraseHosts] = useState<string[]>([])
+  const passphraseHostId = passphraseHosts[0] || ''
   const [passphrase, setPassphrase] = useState('')
   const [passphraseVisible, setPassphraseVisible] = useState(false)
   const [passphraseError, setPassphraseError] = useState('')
@@ -122,6 +139,8 @@ export function App(): React.JSX.Element {
   }
 
   useEffect(() => { const timer = setInterval(() => setClockNow(Date.now()), 1000); return () => clearInterval(timer) }, [])
+  useEffect(() => { const resized = (): void => setWindowWidth(window.innerWidth); window.addEventListener('resize', resized); return () => window.removeEventListener('resize', resized) }, [])
+  useEffect(() => { try { localStorage.setItem('crow-sidebar-width', String(sidebarSize)) } catch { /* In-memory sizing remains available. */ } }, [sidebarSize])
   useEffect(() => {
     try { localStorage.setItem('crow-cache-warnings-v1', JSON.stringify(cachePreferences)) } catch { /* Storage can be unavailable; settings still apply this run. */ }
   }, [cachePreferences])
@@ -155,8 +174,8 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (activeTab?.kind !== 'terminal') return
-    setVisitedTerminalTabs((current) => current.includes(activeTab.id) ? current : [...current, activeTab.id])
+    if (!activeTab) return
+    setVisitedPaneTabs((current) => current.includes(activeTab.id) ? current : [...current, activeTab.id])
   }, [activeTab?.id, activeTab?.kind])
 
   useEffect(() => {
@@ -192,9 +211,11 @@ export function App(): React.JSX.Element {
   }
 
   async function refreshSessions(hostId: string): Promise<void> {
+    const version = sessionVersions.current.begin(hostId)
     try {
       const requestedAt = Date.now()
       const items = await window.crow.sessions(hostId)
+      if (!sessionVersions.current.current(hostId, version)) return
       setSessions((current) => ({ ...current, [hostId]: items.map(item => item.promptCache ? { ...item, promptCache: { ...item.promptCache, receivedAt: requestedAt } } : item) }))
     } catch { /* The status indicator shows the disconnect. */ }
   }
@@ -207,13 +228,13 @@ export function App(): React.JSX.Element {
       setTabs(saved.tabs || [])
       setActiveTabs(saved.activeTabs || {})
       setSelectedProjectId(saved.projects.some((project) => project.id === saved.selectedProjectId) ? saved.selectedProjectId : saved.projects[0]?.id || '')
-      const pairs = await Promise.all(saved.hosts.map(async (host) => [host.id, await window.crow.status(host.id)] as const))
+      const pairs = await Promise.all(saved.hosts.map(async (host) => [host.id, await window.crow.status(host.id).catch(() => 'disconnected' as ConnectionStatus)] as const))
       if (live) {
         setStatuses(Object.fromEntries(pairs))
         setLoaded(true)
         for (const [hostId, hostStatus] of pairs) if (hostStatus === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
-        const authHost = pairs.find(([, status]) => status === 'auth-required')
-        if (authHost) setPassphraseHostId(authHost[0])
+        const authHosts = pairs.filter(([, status]) => status === 'auth-required').map(([id]) => id)
+        setPassphraseHosts(current => [...new Set([...current, ...authHosts])])
       }
     }).catch((reason) => { if (live) setError(String(reason)) })
     const offStatus = window.crow.onStatus((hostId, next) => {
@@ -228,8 +249,7 @@ export function App(): React.JSX.Element {
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
-      setPassphraseHostId(hostId)
-      setPassphraseError('')
+      setPassphraseHosts(current => current.includes(hostId) ? current : [...current, hostId])
     })
     const offUpdate = window.crow.onUpdateState(setUpdateState)
     void window.crow.getUpdateState().then((current) => { if (live) setUpdateState(current) }).catch(() => undefined)
@@ -272,11 +292,11 @@ export function App(): React.JSX.Element {
     return () => { live = false; clearInterval(timer) }
   }, [state.hosts, statuses])
 
-  function openTab(tab: WorkspaceTab): void {
+  function openTab(tab: WorkspaceTab, activate = true): void {
     const existing = tabs.find((item) => item.projectId === tab.projectId && item.kind === tab.kind && (tab.kind === 'terminal' ? item.sessionId === tab.sessionId : tab.kind === 'editor' ? item.path === tab.path : true))
     const target = existing || tab
-    if (!existing) setTabs((current) => [...current, tab])
-    selectTab(target)
+    if (!existing) setTabs((current) => current.some(item => item.id === tab.id) ? current : [...current, tab])
+    if (activate) selectTab(target)
   }
 
   useEffect(() => window.crow.onCacheWarningClick(({ hostId, projectId, sessionId }) => {
@@ -293,14 +313,19 @@ export function App(): React.JSX.Element {
     acknowledgeTab(tab)
   }
 
-  function closeTab(id: string): void {
+  async function closeTab(id: string): Promise<void> {
     const tab = tabs.find((item) => item.id === id)
     if (!tab) return
-    const remaining = tabs.filter((item) => item.id !== id)
-    setTabs(remaining)
-    if (activeTabs[tab.projectId] === id) {
-      setActiveTabs((current) => ({ ...current, [tab.projectId]: remaining.find((item) => item.projectId === tab.projectId)?.id || '' }))
-    }
+    const key = `close:${id}`
+    if (operationKeys.current.has(key)) return
+    operationKeys.current.add(key)
+    try {
+      if (busyEditors.current.has(id)) { setError('Esperá a que termine el guardado antes de cerrar el archivo.'); return }
+      if (dirtyEditors.current.has(id) && !await confirm({ message: '¿Cerrar este archivo y descartar los cambios sin guardar?', accept: 'Descartar y cerrar', danger: true })) return
+      dirtyEditors.current.delete(id)
+      setTabs(current => current.filter(item => item.id !== id))
+      setActiveTabs(current => current[tab.projectId] === id ? { ...current, [tab.projectId]: '' } : current)
+    } finally { operationKeys.current.delete(key) }
   }
 
   async function connect(hostId: string): Promise<void> {
@@ -311,61 +336,65 @@ export function App(): React.JSX.Element {
 
   async function startSession(): Promise<void> {
     if (!selectedProject || !selectedHost) return
-    if (mode === 'bypass' && !window.confirm('Bypass desactiva protecciones y aprobaciones del agente. ¿Querés iniciar esta sesión con acceso ampliado?')) return
+    if (operationKeys.current.has('start')) return
+    operationKeys.current.add('start'); operationKeys.current.add(`start-host:${selectedHost.id}`); setStarting(true)
     setError('')
     try {
+      if (mode === 'bypass' && !await confirm({ message: 'Bypass desactiva protecciones y aprobaciones del agente. ¿Querés iniciar esta sesión con acceso ampliado?' })) return
       const session = await window.crow.startSession(selectedHost.id, selectedProject.id, agent, mode)
       setSessions((current) => ({ ...current, [selectedHost.id]: [...(current[selectedHost.id] || []), session] }))
-      openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'terminal', sessionId: session.id })
+      openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'terminal', sessionId: session.id }, selectedProjectRef.current === selectedProject.id)
     } catch (reason) { setError(String(reason)) }
+    finally { operationKeys.current.delete('start'); operationKeys.current.delete(`start-host:${selectedHost.id}`); setStarting(false) }
   }
 
   async function deleteSession(hostId: string, session: SessionInfo): Promise<void> {
-    if (!window.confirm(`¿Eliminar definitivamente la terminal ${sessionDisplayName(hostId, session.id, session.agent)} (${session.id.slice(0, 8)})? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`)) return
+    const key = `delete:${hostId}:${session.id}`
+    if (operationKeys.current.has(key)) return
+    operationKeys.current.add(key)
     setError('')
     try {
+      if (!await confirm({ message: `¿Eliminar definitivamente la terminal ${sessionDisplayName(hostId, session.id, session.agent)} (${session.id.slice(0, 8)})? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`, accept: 'Eliminar terminal', danger: true })) return
       await window.crow.saveWorkspace(tabs, activeTabs, selectedProjectId)
       const saved = await window.crow.deleteSession(hostId, session.id)
+      sessionVersions.current.begin(hostId)
       setState(saved)
-      setTabs(saved.tabs)
-      setActiveTabs(saved.activeTabs)
+      const projectIds = new Set(state.projects.filter(project => project.hostId === hostId).map(project => project.id))
+      setTabs(current => withoutSessionTabs(current, projectIds, session.id))
+      if (cacheDetail?.hostId === hostId && cacheDetail.sessionId === session.id) setCacheDetail(null)
       setSessions((current) => ({ ...current, [hostId]: (current[hostId] || []).filter((item) => item.id !== session.id) }))
     } catch (reason) { setError(String(reason)) }
+    finally { operationKeys.current.delete(key) }
   }
 
   function renameSession(hostId: string, session: SessionInfo): void {
+    if (operationKeys.current.has(`delete:${hostId}:${session.id}`)) { setError('Esta terminal se está eliminando. Esperá a que termine.'); return }
     const key = sessionNameKey(hostId, session.id)
     setRenamingSession({ hostId, sessionId: session.id, initialName: state.sessionNames[key] || '' })
   }
 
   async function saveHost(input: Omit<Host, 'id'> & { id?: string }): Promise<void> {
-    try {
-      const saved = await window.crow.saveHost(input)
-      setState(saved)
-      const id = input.id || saved.hosts.at(-1)?.id
-      if (id) void connect(id)
-      setDialog(null)
-      setEditingHost(undefined)
-    } catch (reason) { setError(String(reason)) }
+    const saved = await window.crow.saveHost(input)
+    setState(saved)
+    const id = input.id || saved.hosts.at(-1)?.id
+    if (id) void connect(id)
+    setDialog(null)
+    setEditingHost(undefined)
   }
 
   async function toggleHooks(hostId: string, enabled: boolean): Promise<void> {
     setError('')
-    try {
-      const next = await window.crow.setHookSettings(hostId, enabled)
-      setHookSettings((current) => ({ ...current, [hostId]: next.enabled }))
-      await refreshSessions(hostId)
-    } catch (reason) { setError(String(reason)) }
+    const next = await window.crow.setHookSettings(hostId, enabled)
+    setHookSettings((current) => ({ ...current, [hostId]: next.enabled }))
+    await refreshSessions(hostId)
   }
 
   async function saveProject(input: Omit<Project, 'id'> & { id?: string }): Promise<void> {
-    try {
-      const saved = await window.crow.saveProject(input)
-      setState(saved)
-      setSelectedProjectId(input.id || saved.projects.at(-1)?.id || '')
-      setDialog(null)
-      setEditingProject(undefined)
-    } catch (reason) { setError(String(reason)) }
+    const saved = await window.crow.saveProject(input)
+    setState(saved)
+    setSelectedProjectId(input.id || saved.projects.at(-1)?.id || '')
+    setDialog(null)
+    setEditingProject(undefined)
   }
 
   async function markNotices(ids: string[]): Promise<void> {
@@ -385,6 +414,8 @@ export function App(): React.JSX.Element {
   }
 
   async function openMobile(): Promise<void> {
+    if (operationKeys.current.has('mobile')) return
+    operationKeys.current.add('mobile'); setMobileBusy(true)
     setMobileOpen(true)
     setMobileError('')
     try {
@@ -392,35 +423,38 @@ export function App(): React.JSX.Element {
       setMobileAddresses(addresses)
       setMobileAddress((value) => addresses.includes(value) ? value : addresses[0] || '')
       if (!current.running && addresses.length === 1) {
-        setMobileBusy(true)
         try { setMobileStatus(await window.crow.mobileStart(addresses[0])) }
         catch (reason) { setMobileStatus(current); setMobileError(String(reason)) }
-        finally { setMobileBusy(false) }
       } else setMobileStatus(current)
     } catch (reason) { setMobileError(String(reason)) }
+    finally { operationKeys.current.delete('mobile'); setMobileBusy(false) }
   }
 
   async function toggleMobile(): Promise<void> {
+    if (operationKeys.current.has('mobile')) return
+    operationKeys.current.add('mobile')
     setMobileBusy(true)
     setMobileError('')
     try { setMobileStatus(mobileStatus.running ? await window.crow.mobileStop() : await window.crow.mobileStart(mobileAddress)) }
     catch (reason) { setMobileError(String(reason)) }
-    finally { setMobileBusy(false) }
+    finally { operationKeys.current.delete('mobile'); setMobileBusy(false) }
   }
 
   async function unlockHost(): Promise<void> {
     if (!passphraseHostId || !passphrase) return
+    if (operationKeys.current.has('unlock')) return
+    operationKeys.current.add('unlock')
     setPassphraseBusy(true)
     setPassphraseError('')
     try {
       await window.crow.submitPassphrase(passphraseHostId, passphrase)
       setPassphrase('')
-      setPassphraseHostId('')
+      setPassphraseHosts(current => current.filter(id => id !== passphraseHostId))
       setPassphraseVisible(false)
     } catch (reason) {
       setPassphraseError(String(reason))
       setPassphrase('')
-    } finally { setPassphraseBusy(false) }
+    } finally { operationKeys.current.delete('unlock'); setPassphraseBusy(false) }
   }
 
   async function chooseAlertSound(file?: File): Promise<void> {
@@ -462,8 +496,8 @@ export function App(): React.JSX.Element {
     finally { setSoundBusy(false) }
   }
 
-  return <div className="app-shell">
-    <aside className="sidebar">
+  return <div className="app-shell" tabIndex={-1}>
+    <aside className="sidebar" style={{ width: actualSidebarSize }}>
       <div className="brand"><span className="brand-mark"><Code2 size={18} /></span><span>CROW<span className="brand-soft"> HARNESS</span></span><button className="icon-button sidebar-action" title="Configuración" aria-label="Configuración" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Settings2 size={16} /></button></div>
       <div className="sidebar-scroll">
         <div className="section-heading"><span>HOSTS</span><button className="icon-button" title="Agregar host" aria-label="Agregar host" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Plus size={16} /></button></div>
@@ -490,7 +524,7 @@ export function App(): React.JSX.Element {
               const agentWorking = session.state === 'running' && session.agentState === 'working'
               return <div key={session.id} className={`session-entry ${agentWorking ? 'agent-working' : ''}`}>
               <button className={`session-row ${agentWorking ? 'agent-working' : ''}`} title={agentWorking ? 'Agente trabajando; abrir terminal' : session.state === 'sleeping' ? 'Abrir terminal suspendida para reanudarla' : 'Abrir vista de terminal'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}>
-                <span className={`session-state ${session.state} ${agentWorking ? 'agent-working' : ''}`} /><span className="session-name">{sessionDisplayName(host.id, session.id, session.agent)}</span><span className="session-tail">{session.id.slice(0, 5)}</span>
+                <span className={`session-state ${session.state} ${agentWorking ? 'agent-working' : ''}`} /><span className="session-name" title={`${sessionDisplayName(host.id, session.id, session.agent)} · ${session.id}`}>{sessionDisplayName(host.id, session.id, session.agent)}</span>
               </button>
               <CacheBadge session={session} status={statuses[host.id] || 'disconnected'} now={clockNow} compact onOpen={() => setCacheDetail({ hostId: host.id, sessionId: session.id })} />
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
@@ -505,6 +539,7 @@ export function App(): React.JSX.Element {
       </div>
       <div className="sidebar-footer"><HardDrive size={14} /><span>Windows · Hosts Linux</span></div>
     </aside>
+    <SidebarResize width={actualSidebarSize} onChange={setSidebarSize} />
 
     <div className="workspace">
       <header className="topbar">
@@ -542,7 +577,7 @@ export function App(): React.JSX.Element {
           <div className="toolbar-right">
             <select aria-label="Agente" value={agent} onChange={(event) => { const next = event.target.value as Agent; setAgent(next); if (next === 'shell') setMode('normal') }}><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="agy">Antigravity</option><option value="shell">Shell</option></select>
             <select aria-label="Modo de permisos" value={mode} disabled={agent === 'shell'} onChange={(event) => setMode(event.target.value as Mode)}><option value="normal">Permisos normales</option><option value="bypass">Bypass permisos</option></select>
-            <button className="primary-button" disabled={status !== 'connected'} onClick={() => void startSession()}><Plus size={15} /> Terminal</button>
+            <button className="primary-button" disabled={status !== 'connected' || starting} onClick={() => void startSession()}><Plus size={15} /> Terminal</button>
             <button className="secondary-button" disabled={status !== 'connected'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'browser', url: 'http://localhost:3000' })}><Globe2 size={15} /> Navegador</button>
           </div>
         </div>
@@ -554,20 +589,29 @@ export function App(): React.JSX.Element {
                 const title = tab.kind === 'terminal' ? sessionDisplayName(selectedProject.hostId, tab.sessionId || '', session?.agent || 'shell') : tab.kind === 'browser' ? 'Navegador' : tab.path?.split('/').at(-1)
                 return <div key={tab.id} className={`tab ${activeTab?.id === tab.id ? 'active' : ''}`} role="tab" aria-selected={activeTab?.id === tab.id}>
                   <button className="tab-select" onClick={() => selectTab(tab)}>{tab.kind === 'terminal' ? <TerminalSquare size={14} /> : tab.kind === 'browser' ? <Globe2 size={14} /> : <FileCode2 size={14} />}<span>{title}</span></button>
-                  <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => closeTab(tab.id)}><X size={13} /></button>
+                  <button className="tab-close" title="Cerrar vista (la sesión remota sigue activa)" aria-label="Cerrar vista" onClick={() => void closeTab(tab.id)}><X size={13} /></button>
                 </div>
               })}
             </div>
             <div className="pane-body">
-              {!activeTab && <div className="blank-state"><div className="blank-icon"><TerminalSquare size={30} /></div><h2>Tu espacio está listo</h2><p>Abrí una terminal con un agente, explorá archivos o iniciá el navegador del servidor.</p><button className="secondary-button" disabled={status !== 'connected'} onClick={() => void startSession()}><CirclePlus size={16} /> Nueva terminal</button></div>}
-              {tabs.filter((tab) => tab.kind === 'terminal' && tab.sessionId && visitedTerminalTabs.includes(tab.id)).map((tab) => {
+              {!activeTab && <div className="blank-state"><div className="blank-icon"><TerminalSquare size={30} /></div><h2>Tu espacio está listo</h2><p>Abrí una terminal con un agente, explorá archivos o iniciá el navegador del servidor.</p><button className="secondary-button" disabled={status !== 'connected' || starting} onClick={() => void startSession()}><CirclePlus size={16} /> Nueva terminal</button></div>}
+              {tabs.filter((tab) => tab.kind === 'terminal' && tab.sessionId && visitedPaneTabs.includes(tab.id)).map((tab) => {
                 const project = state.projects.find((item) => item.id === tab.projectId)
                 if (!project) return null
                 const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
                 return <div key={tab.id} className="terminal-tab-slot" hidden={!active} onPointerDownCapture={() => acknowledgeTab(tab)}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
               })}
-              {activeTab?.kind === 'editor' && activeTab.path && <EditorPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} path={activeTab.path} status={status} onOpenLink={(target) => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: target.kind === 'url' ? 'browser' : 'editor', ...(target.kind === 'url' ? { url: target.value } : { path: target.value }) })} />}
-              {activeTab?.kind === 'browser' && <BrowserPane key={activeTab.id} hostId={selectedHost.id} root={selectedProject.root} initialURL={activeTab.url || 'http://localhost:3000'} status={status} onURL={(url) => setTabs((current) => current.some((tab) => tab.id === activeTab.id && tab.url !== url) ? current.map((tab) => tab.id === activeTab.id ? { ...tab, url } : tab) : current)} />}
+              {tabs.filter(tab => tab.kind === 'editor' && tab.path && visitedPaneTabs.includes(tab.id)).map(tab => {
+                const project = state.projects.find(item => item.id === tab.projectId)
+                if (!project) return null
+                return <div key={tab.id} className="terminal-tab-slot" hidden={activeTab?.id !== tab.id || selectedProjectId !== tab.projectId}><EditorPane hostId={project.hostId} root={project.root} path={tab.path!} status={statuses[project.hostId] || 'disconnected'} onBusyChange={busy => { if (busy) busyEditors.current.add(tab.id); else busyEditors.current.delete(tab.id) }} onDirtyChange={dirty => { if (dirty) dirtyEditors.current.add(tab.id); else dirtyEditors.current.delete(tab.id) }} onOpenLink={target => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: target.kind === 'url' ? 'browser' : 'editor', ...(target.kind === 'url' ? { url: target.value } : { path: target.value }) })} /></div>
+              })}
+              {tabs.filter(tab => tab.kind === 'browser' && visitedPaneTabs.includes(tab.id)).map(tab => {
+                const project = state.projects.find(item => item.id === tab.projectId)
+                if (!project) return null
+                const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
+                return <div key={tab.id} className="terminal-tab-slot" hidden={!active}><BrowserPane hostId={project.hostId} root={project.root} initialURL={tab.url || 'http://localhost:3000'} status={statuses[project.hostId] || 'disconnected'} active={active} onURL={url => setTabs(current => current.some(item => item.id === tab.id && item.url !== url) ? current.map(item => item.id === tab.id ? { ...item, url } : item) : current)} /></div>
+              })}
             </div>
           </main>
           {filePanelOpen && <aside className="files-pane"><FileTree key={selectedProject.id} hostId={selectedHost.id} root={selectedProject.root} projectName={selectedProject.name} status={status} onOpen={(path) => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'editor', path })} /></aside>}
@@ -575,44 +619,28 @@ export function App(): React.JSX.Element {
       </> : <div className="welcome"><div className="welcome-symbol"><Code2 size={36} /></div><h1>Un espacio para tus agentes</h1><p>Conectá un host Linux y agregá una carpeta de proyecto para empezar.</p><button className="primary-button" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Plus size={16} /> Agregar host</button></div>}
       <footer className="statusbar"><span><span className={`status-dot ${status}`} /> {selectedHost?.name || 'Sin conexión'}</span><span>{selectedProject?.root || 'Crow Harness v0.1'}</span></footer>
     </div>
-    {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { setState(await window.crow.removeHost(editingHost.id)); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId('') } : undefined} />}
+    {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { if (operationKeys.current.has(`start-host:${editingHost.id}`)) throw new Error('Esperá a que termine la creación de la terminal antes de quitar el host.'); if (tabs.some(tab => state.projects.some(project => project.id === tab.projectId && project.hostId === editingHost.id) && busyEditors.current.has(tab.id))) throw new Error('Esperá a que termine el guardado de archivos antes de quitar el host.'); const saved = await window.crow.removeHost(editingHost.id); sessionVersions.current.begin(editingHost.id); setState(saved); setTabs(current => current.filter(tab => saved.projects.some(project => project.id === tab.projectId))); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId(saved.projects[0]?.id || '') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
       setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))
     }} onClose={() => setRenamingSession(null)} />}
-    {mobileOpen && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileOpen(false) }}><div className="dialog-card mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-title">
-      <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
+    {mobileOpen && <Modal className="mobile-dialog" titleId="mobile-title" busy={mobileBusy} onClose={() => setMobileOpen(false)}>
+      <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" disabled={mobileBusy} onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
       <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>
       {!mobileStatus.running ? <><label>Dirección de este equipo<select value={mobileAddress} onChange={(event) => setMobileAddress(event.target.value)}>{mobileAddresses.map((address) => <option key={address} value={address}>{address}</option>)}</select></label>{mobileAddresses.length === 0 && <p>No se detectó una IPv4 privada. Conectá este equipo a una red local.</p>}</> : mobileStatus.paired ? <div className="mobile-qr-done" role="status">Celular conectado. Para revocar el acceso, detené el servidor móvil.</div> : <><div className="mobile-qr-panel"><strong>Escaneá el QR con la cámara del celular</strong>{mobileQR ? <img src={mobileQR} alt="QR de emparejamiento de un solo uso" width="256" height="256" /> : <span role="status">Generando QR…</span>}<small>El celular se emparejará automáticamente, sin escribir código.</small></div><details className="mobile-manual"><summary>No puedo escanear el QR</summary><div className="mobile-credentials"><div><strong>Dirección</strong><code>{mobileStatus.url}</code></div><div><strong>Código de un solo uso</strong><code>{mobileStatus.pairingCode}</code></div></div></details></>}
       {mobileStatus.running && <div className="mobile-fingerprint"><strong>Huella SHA-256 del certificado</strong><code>{mobileStatus.fingerprint}</code></div>}
       <p className="mobile-security-note">El certificado es autofirmado: el navegador avisará que no es de confianza. Compará su huella SHA-256 con la que aparece acá ANTES de aceptar la excepción. Usá solo una red privada confiable; no abras este puerto a Internet.</p>
       {mobileError && <div className="inline-error" role="alert">{mobileError}</div>}
-      <div className="dialog-actions"><span /><button className="secondary-button" onClick={() => setMobileOpen(false)}>Cerrar</button><button className={mobileStatus.running ? 'danger-button' : 'primary-button'} disabled={mobileBusy || (!mobileStatus.running && !mobileAddress)} onClick={() => void toggleMobile()}>{mobileBusy ? 'Aplicando…' : mobileStatus.running ? 'Detener acceso' : 'Activar acceso'}</button></div>
-    </div></div>}
-    {passphraseHostId && <div className="dialog-backdrop"><form className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="passphrase-title" onSubmit={(event) => { event.preventDefault(); void unlockHost() }}>
-      <div className="dialog-heading"><h2 id="passphrase-title">Desbloquear llave SSH</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={() => { setPassphraseHostId(''); setPassphrase(''); setPassphraseError('') }}><X size={18} /></button></div>
+      <div className="dialog-actions"><span /><button className="secondary-button" disabled={mobileBusy} onClick={() => setMobileOpen(false)}>Cerrar</button><button className={mobileStatus.running ? 'danger-button' : 'primary-button'} disabled={mobileBusy || (!mobileStatus.running && !mobileAddress)} onClick={() => void toggleMobile()}>{mobileBusy ? 'Aplicando…' : mobileStatus.running ? 'Detener acceso' : 'Activar acceso'}</button></div>
+    </Modal>}
+    {passphraseHostId && <Modal key={passphraseHostId} titleId="passphrase-title" initialFocus="input" busy={passphraseBusy} onClose={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}><form onSubmit={(event) => { event.preventDefault(); void unlockHost() }}>
+      <div className="dialog-heading"><h2 id="passphrase-title">Desbloquear llave SSH</h2><button type="button" className="icon-button" aria-label="Cerrar" disabled={passphraseBusy} onClick={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}><X size={18} /></button></div>
       <p>Ingresá la frase de la llave para conectar con {state.hosts.find((host) => host.id === passphraseHostId)?.name || 'el host'}. Se recordará en este equipo hasta reiniciar Windows.</p>
-      <label>Frase de la llave SSH<div className="secret-field"><input autoFocus required type={passphraseVisible ? 'text' : 'password'} value={passphrase} aria-describedby={passphraseError ? 'passphrase-error' : undefined} onChange={(event) => setPassphrase(event.target.value)} autoComplete="off" /><button type="button" className="icon-button" aria-label={passphraseVisible ? 'Ocultar frase' : 'Mostrar frase'} onClick={() => setPassphraseVisible((value) => !value)}>{passphraseVisible ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
+      <label>Frase de la llave SSH<div className="secret-field"><input required readOnly={passphraseBusy} type={passphraseVisible ? 'text' : 'password'} value={passphrase} aria-describedby={passphraseError ? 'passphrase-error' : undefined} onChange={(event) => setPassphrase(event.target.value)} autoComplete="off" /><button type="button" className="icon-button" aria-label={passphraseVisible ? 'Ocultar frase' : 'Mostrar frase'} onClick={() => setPassphraseVisible((value) => !value)}>{passphraseVisible ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
       {passphraseError && <div id="passphrase-error" className="inline-error" role="alert">{passphraseError}</div>}
-      <div className="dialog-actions"><span /><button type="button" className="secondary-button" onClick={() => { setPassphraseHostId(''); setPassphrase(''); setPassphraseError('') }}>Cancelar</button><button type="submit" className="primary-button" disabled={passphraseBusy || !passphrase}>{passphraseBusy ? 'Conectando…' : 'Conectar'}</button></div>
-    </form></div>}
+      <div className="dialog-actions"><span /><button type="button" className="secondary-button" disabled={passphraseBusy} onClick={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}>Cancelar</button><button type="submit" className="primary-button" disabled={passphraseBusy || !passphrase}>{passphraseBusy ? 'Conectando…' : 'Conectar'}</button></div>
+    </form></Modal>}
   </div>
-}
-
-function HostDialog({ host, hostConnected, hooksEnabled, onToggleHooks, onClose, onSave, onDelete }: { host?: Host; hostConnected: boolean; hooksEnabled?: boolean; onToggleHooks?: (enabled: boolean) => Promise<void>; onClose: () => void; onSave: (host: Omit<Host, 'id'> & { id?: string }) => Promise<void>; onDelete?: () => Promise<void> }): React.JSX.Element {
-  const [name, setName] = useState(host?.name || '')
-  const [target, setTarget] = useState(host?.target || '')
-  const [port, setPort] = useState(host?.port || 22)
-  const [remotePort, setRemotePort] = useState(host?.remotePort || 47321)
-  const [identity, setIdentity] = useState(host?.identity || '')
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="dialog-card" onSubmit={(event) => { event.preventDefault(); void onSave({ id: host?.id, name, target, port, remotePort, identity: identity || undefined }) }}><div className="dialog-heading"><h2>{host ? 'Editar host' : 'Agregar host'}</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><X size={18} /></button></div><p>Conexión SSH hacia el servicio Crow instalado en el servidor.</p><label>Nombre<input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Servidor principal" /></label><label>Destino SSH<input required value={target} onChange={(event) => setTarget(event.target.value)} placeholder="usuario@servidor o alias" /></label><div className="dialog-columns"><label>Puerto SSH<input required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label>Puerto del servicio<input required type="number" min="1" max="65535" value={remotePort} onChange={(event) => setRemotePort(Number(event.target.value))} /></label></div><label>Archivo de clave SSH (opcional)<input value={identity} onChange={(event) => setIdentity(event.target.value)} placeholder="C:\\Users\\...\\.ssh\\id_ed25519" /></label>{host && <label className="hook-toggle"><input type="checkbox" checked={hooksEnabled ?? false} disabled={!hostConnected || hooksEnabled === undefined} onChange={(event) => { void onToggleHooks?.(event.target.checked) }} /><span>Hooks de estado administrados por Crow<small>Estados del agente y métricas de caché Claude. Al desactivar se borra el hook de Crow en el servidor; el colector se agrega a nuevas terminales.</small></span></label>}<div className="dialog-actions">{onDelete && <button type="button" className="danger-button" onClick={() => { if (window.confirm('¿Quitar este host y sus proyectos de la app? Las sesiones remotas no se cierran.')) void onDelete() }}>Quitar host</button>}<span /><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="submit" className="primary-button">Guardar</button></div></form></div>
-}
-
-function ProjectDialog({ project, hosts, defaultHostId, onClose, onSave }: { project?: Project; hosts: Host[]; defaultHostId: string; onClose: () => void; onSave: (project: Omit<Project, 'id'> & { id?: string }) => Promise<void> }): React.JSX.Element {
-  const [name, setName] = useState(project?.name || '')
-  const [hostId, setHostId] = useState(project?.hostId || defaultHostId)
-  const [root, setRoot] = useState(project?.root || '')
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="dialog-card" onSubmit={(event) => { event.preventDefault(); void onSave({ id: project?.id, name, hostId, root }) }}><div className="dialog-heading"><h2>Agregar proyecto</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><X size={18} /></button></div><p>Elegí una carpeta existente en el servidor. No hace falta que sea un repositorio Git.</p><label>Nombre<input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Mi aplicación" /></label><label>Host<select value={hostId} onChange={(event) => setHostId(event.target.value)}>{hosts.map((host) => <option key={host.id} value={host.id}>{host.name}</option>)}</select></label><label>Carpeta absoluta en Linux<input required value={root} onChange={(event) => setRoot(event.target.value)} placeholder="/home/usuario/proyectos/mi-app" /></label><div className="dialog-actions"><span /><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="submit" className="primary-button">Guardar proyecto</button></div></form></div>
 }

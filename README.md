@@ -73,6 +73,8 @@ Hacé clic en el lápiz junto a la terminal del panel lateral. En **Renombrar te
 
 El alias es local a Windows y se identifica por host y terminal: no cambia la carpeta ni reinicia el agente remoto. El diálogo corregido está disponible desde v0.1.20; no necesita actualizar `crowd` en Linux.
 
+Desde v0.1.21, el panel lateral recuerda su ancho y se amplía arrastrando el borde derecho, con flechas al enfocarlo o con Home/End. Doble clic restaura el ancho predeterminado. Los nombres completos y sus IDs están disponibles en el tooltip. La [revisión de continuidad de la interfaz](docs/ui-continuity-review.md) detalla las correcciones y las pruebas pendientes en Windows instalado.
+
 ### Consultar la caché nativa de Claude
 
 > Disponible desde v0.1.19, pendiente de prueba con Claude en un host real. No requiere instalar `claude-code-templates`.

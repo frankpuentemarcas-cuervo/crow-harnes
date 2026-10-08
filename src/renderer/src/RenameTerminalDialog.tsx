@@ -1,27 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { normalizeSessionName } from '../../shared/session-list'
+import { Modal } from './Modal'
 
 export function RenameTerminalDialog({ initialName, onSave, onClose }: {
   initialName: string
   onSave: (name: string) => Promise<void>
   onClose: () => void
 }): React.JSX.Element {
-  const dialog = useRef<HTMLDialogElement>(null)
   const input = useRef<HTMLInputElement>(null)
   const saving = useRef(false)
   const [name, setName] = useState(initialName)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    const element = dialog.current
-    element?.showModal()
-    input.current?.focus()
-    input.current?.select()
-    return () => { element?.close(); previous?.focus() }
-  }, [])
 
   async function submit(event: React.FormEvent): Promise<void> {
     event.preventDefault()
@@ -37,10 +28,7 @@ export function RenameTerminalDialog({ initialName, onSave, onClose }: {
     finally { saving.current = false; setBusy(false) }
   }
 
-  return <dialog ref={dialog} className="dialog-card rename-terminal-dialog" aria-labelledby="rename-terminal-title" onCancel={(event) => {
-    event.preventDefault()
-    if (!saving.current) onClose()
-  }}>
+  return <Modal className="rename-terminal-dialog" titleId="rename-terminal-title" initialFocus="input" selectInitialText busy={busy} onClose={onClose}>
     <form onSubmit={(event) => void submit(event)} aria-busy={busy}>
       <div className="dialog-heading"><h2 id="rename-terminal-title">Renombrar terminal</h2><button type="button" className="icon-button" aria-label="Cerrar renombrado" disabled={busy} onClick={onClose}><X size={18} /></button></div>
       <label htmlFor="terminal-name">Nombre de la terminal</label>
@@ -50,5 +38,5 @@ export function RenameTerminalDialog({ initialName, onSave, onClose }: {
       {error && <div id="terminal-name-error" className="inline-error" role="alert">{error}</div>}
       <div className="dialog-actions"><span /><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancelar</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Guardando…' : 'Guardar'}</button></div>
     </form>
-  </dialog>
+  </Modal>
 }

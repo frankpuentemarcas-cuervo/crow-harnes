@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crow · QA continuidad</title></head><body>
+<div id="root"></div>
+<div style="position:fixed;bottom:30px;right:10px;z-index:25;background:#222;padding:5px" aria-label="Controles QA simulados">
+  <label><input id="qa-fail" type="checkbox">Simular error QA</label>
+  <label><input id="qa-delay" type="checkbox">Demorar guardado QA</label>
+  <output id="qa-calls">Guardados QA: 0</output>
+</div>
+<script>
+// Only fictional data in this origin's isolated storage. Never SSH or real app settings.
+for(const name of ['prompt','confirm','alert'])window[name]=()=>{throw new Error('Diálogo nativo prohibido en QA: '+name)};
+const host={id:'rename-host',name:'Host QA',target:'mock',port:22,remotePort:47321};
+const project={id:'rename-project',hostId:host.id,name:'Proyecto QA',root:'/test'};
+const session={id:'0123456789abcdef0123456789abcdef',agent:'claude',mode:'normal',root:project.root,state:'running',agentState:'completed',hooksActive:true,startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),seq:1};
+const tab={id:'rename-tab',projectId:project.id,kind:'terminal',sessionId:session.id};
+const other={...session,id:'abcdef0123456789abcdef0123456789',startedAt:new Date(Date.now()+1000).toISOString()};
+let liveSessions=[session,other];
+const defaults={hosts:[host],projects:[project],notices:[],sessionNames:{[host.id+':'+session.id]:'Desarrollador del servidor',[host.id+':'+other.id]:'QA de integración'},eventCursors:{},tabs:[tab],activeTabs:{[project.id]:tab.id},selectedProjectId:project.id};
+let saved=JSON.parse(localStorage.getItem('crow-continuity-qa-state')||'null')||defaults, calls=0;
+const persist=()=>{localStorage.setItem('crow-continuity-qa-state',JSON.stringify(saved));return structuredClone(saved)};
+const mock={
+  getState:async()=>structuredClone(saved),
+  saveWorkspace:async(tabs,activeTabs,selectedProjectId)=>{saved={...saved,tabs,activeTabs,selectedProjectId};return persist()},
+  renameSession:async(hostId,id,name)=>{
+    calls++;document.getElementById('qa-calls').textContent='Guardados QA: '+calls;
+    if(document.getElementById('qa-delay').checked)await new Promise(resolve=>setTimeout(resolve,1500));
+    if(document.getElementById('qa-fail').checked)throw new Error('Error de guardado QA');
+    const key=hostId+':'+id;if(name.trim())saved.sessionNames[key]=name.trim();else delete saved.sessionNames[key];
+    return persist();
+  },
+  status:async()=>'connected',sessions:async()=>structuredClone(liveSessions),hookSettings:async()=>({enabled:true}),
+  hostMetrics:async()=>({cpuPercent:0,memoryUsed:0,memoryTotal:4096,diskUsed:0,diskTotal:100,sleepingSessions:0,sleepingMemory:0,at:new Date().toISOString()}),
+  getAlertSound:async()=>null,getUpdateState:async()=>({status:'idle'}),getAlertAISettings:async()=>({enabled:false,baseURL:'http://127.0.0.1:31415/v1',model:'auto',keyPresent:false,secureStorageAvailable:true}),getAlertAIStatus:async()=>({state:'idle',detail:'Sin análisis todavía.'}),
+  attach:async(_host,id,_seq,listener)=>{await new Promise(resolve=>setTimeout(resolve,2000));listener({type:'state',info:liveSessions.find(s=>s.id===id)||session});return'qa-stream-'+id},
+  deleteSession:async(_host,id)=>{await new Promise(resolve=>setTimeout(resolve,1200));if(document.getElementById('qa-fail').checked)throw new Error('Error eliminando QA');liveSessions=liveSessions.filter(s=>s.id!==id);saved.tabs=saved.tabs.filter(t=>t.sessionId!==id);return persist()},
+  files:async()=>[{name:'notas.md',path:'notas.md',dir:false}],
+  readFile:async()=>({content:'# Documento de prueba',hash:'qa-hash'}),saveFile:async()=>({hash:'qa-saved'}),
+  browserOpen:async(_host,_root,url)=>{await new Promise(resolve=>setTimeout(resolve,1000));return {url}},
+  browserFrame:async()=>({url:'http://localhost:3000',data:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><text x="30" y="40" fill="white">Navegador QA simulado</text></svg>'}),
+  saveHost:async()=>{throw new Error('Error guardando host QA')},removeHost:async()=>{throw new Error('Error quitando host QA')},
+  saveProject:async()=>{throw new Error('Error guardando proyecto QA')},
+  mobileAddresses:async()=>[],mobileStatus:async()=>({running:false}),
+  markNoticeRead:async()=>structuredClone(saved)
+};
+window.crow=new Proxy(mock,{get:(target,key)=>key in target?target[key]:String(key).startsWith('on')?()=>()=>{}:async()=>{}});
+</script>
+<script type="module" src="/src/renderer/src/main.tsx"></script>
+</body></html>

@@ -5,6 +5,7 @@ import type { ConnectionStatus, SessionInfo } from '../../shared/types'
 import { terminalClipboardAction } from './terminal-clipboard'
 import { decodeOsc52Selection } from './terminal-osc52'
 import { PendingTerminalSelection } from './terminal-selection'
+import { canFocusTerminal } from './ui-continuity'
 
 function bytes(encoded: string): Uint8Array {
   const raw = atob(encoded)
@@ -148,6 +149,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
     if (!active || status !== 'connected' || !terminal.current) return
     let cancelled = false
     let attached = ''
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     const attach = async (): Promise<void> => {
       try {
         attached = await window.crow.attach(hostId, sessionId, lastSeq.current, (frame) => {
@@ -160,21 +162,24 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
             setInfo(frame.info)
           } else if (frame.type === 'disconnected') {
             subscription.current = ''
-            setTimeout(() => { if (!cancelled) setRetry((current) => current + 1) }, 1200)
+            clearTimeout(retryTimer)
+            retryTimer = setTimeout(() => { if (!cancelled) setRetry((current) => current + 1) }, 1200)
           }
         })
         if (cancelled) { await window.crow.detach(attached).catch(() => undefined); return }
         subscription.current = attached
+        lastRemoteSize.current = ''
         fit.current?.fit()
         if (terminal.current) await resizeRemote(attached, terminal.current.cols, terminal.current.rows)
-        terminal.current?.focus()
+        if (!cancelled && activeRef.current && container.current && canFocusTerminal(document, container.current)) terminal.current?.focus()
       } catch {
-        if (!cancelled) setTimeout(() => setRetry((current) => current + 1), 1500)
+        if (!cancelled) retryTimer = setTimeout(() => { if (!cancelled) setRetry((current) => current + 1) }, 1500)
       }
     }
     void attach()
     return () => {
       cancelled = true
+      clearTimeout(retryTimer)
       if (attached) void window.crow.detach(attached).catch(() => undefined)
       if (subscription.current === attached) subscription.current = ''
     }

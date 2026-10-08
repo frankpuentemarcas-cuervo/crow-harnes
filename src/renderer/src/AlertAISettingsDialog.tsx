@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import type { AlertAISettings, AlertAIStatus } from '../../shared/types'
+import { Modal } from './Modal'
 
 export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (settings: AlertAISettings) => void }): React.JSX.Element {
   const form = useRef<HTMLFormElement>(null)
@@ -14,22 +15,23 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [status, setStatus] = useState<AlertAIStatus | null>(null)
+  const saving = useRef(false)
 
   useEffect(() => {
     let live = true
-    const previous = document.activeElement as HTMLElement | null
-    form.current?.querySelector<HTMLElement>('button')?.focus()
     void window.crow.getAlertAISettings().then((value) => {
       if (!live) return
       setSettings(value); setEnabled(value.enabled); setBaseURL(value.baseURL); setModel(value.model)
       if (value.configurationError) setError(value.configurationError)
     }).catch(() => { if (live) setError('No se pudo cargar la configuración de Free LLM.') })
-    return () => { live = false; previous?.focus() }
+    return () => { live = false }
   }, [])
 
   useEffect(() => { if (error) errorBox.current?.focus() }, [error])
 
   async function save(test = false): Promise<void> {
+    if (saving.current) return
+    saving.current = true
     setBusy(true); setError(''); setStatus(null)
     try {
       const next = await window.crow.saveAlertAISettings({ enabled, baseURL, model, apiKey: apiKey || undefined, removeKey })
@@ -41,19 +43,11 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
         if (result.state === 'error') setError(result.detail)
       } else setStatus({ state: 'ok', detail: 'Guardado. Se aplicará a las próximas respuestas.' })
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo guardar la configuración.') }
-    finally { setBusy(false) }
+    finally { saving.current = false; setBusy(false) }
   }
 
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (!busy && event.target === event.currentTarget) onClose() }}>
-    <form ref={form} className="dialog-card alert-ai-dialog" role="dialog" aria-modal="true" aria-labelledby="alert-ai-title" onSubmit={(event) => { event.preventDefault(); void save() }} onKeyDown={(event) => {
-      if (event.key === 'Escape' && !busy) { event.preventDefault(); onClose() }
-      if (event.key === 'Tab') {
-        const controls = Array.from(form.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]') || [])
-        const first = controls[0], last = controls.at(-1)
-        if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement as HTMLElement))) { event.preventDefault(); last?.focus() }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
-      }
-    }}>
+  return <Modal className="alert-ai-dialog" titleId="alert-ai-title" busy={busy} onClose={onClose}>
+    <form ref={form} onSubmit={(event) => { event.preventDefault(); void save() }}>
       <div className="dialog-heading"><h2 id="alert-ai-title">Alertas inteligentes · Free LLM</h2><button type="button" className="icon-button" disabled={busy} aria-label="Cerrar ajustes de IA" onClick={onClose}><X size={18} aria-hidden="true" /></button></div>
       <p>Crow analiza la última respuesta final para detectar pedidos de autorización, decisiones o información que necesita el agente. Los avisos de progreso y resultados informativos quedan sin sonido.</p>
       {error && <div ref={errorBox} tabIndex={-1} className="inline-error" role="alert">{error}</div>}
@@ -70,5 +64,5 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
         <small>La prueba envía 3 ejemplos ficticios, no conversaciones reales. Free LLM debe tener modelos disponibles en su cadena.</small>
       </>}
     </form>
-  </div>
+  </Modal>
 }
