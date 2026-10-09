@@ -21,6 +21,12 @@ const api: CrowAPI = {
     return () => { ipcRenderer.removeListener('crow:cache-warning-click', wrapped) }
   },
   getAlertAISettings: () => ipcRenderer.invoke('crow:get-alert-ai-settings'),
+  ensureFreeLLM: () => ipcRenderer.invoke('crow:ensure-free-llm'),
+  onFreeLLMStatus: (listener) => {
+    const wrapped = (_event: unknown, status: import('../shared/free-llm-startup').FreeLLMRuntimeStatus): void => listener(status)
+    ipcRenderer.on('crow:free-llm-status', wrapped)
+    return () => { ipcRenderer.off('crow:free-llm-status', wrapped) }
+  },
   saveAlertAISettings: (input) => ipcRenderer.invoke('crow:save-alert-ai-settings', input),
   testAlertAI: () => ipcRenderer.invoke('crow:test-alert-ai'),
   getAlertAIStatus: () => ipcRenderer.invoke('crow:alert-ai-status'),

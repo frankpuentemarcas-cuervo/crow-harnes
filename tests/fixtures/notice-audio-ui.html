@@ -11,6 +11,10 @@ import '/src/renderer/src/styles.css'
 const callbacks = new Map()
 const starts = []
 const saved = { hosts: [{ id: 'host', name: 'QA', target: 'fictional', port: 22, remotePort: 47321 }], projects: [{ id: 'project', hostId: 'host', name: 'QA project', root: '/qa' }], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: 'project' }
+const startupQA = new URLSearchParams(location.search).has('startup')
+if (startupQA) saved.hosts.push({ id: 'host2', name: 'QA second', target: 'fictional2', port: 22, remotePort: 47321 })
+const statuses = Object.fromEntries(saved.hosts.map(host => [host.id, startupQA ? 'auth-required' : 'connected']))
+let startupCalls = 0
 window.AudioContext = class {
   state = 'suspended'
   currentTime = 0
@@ -30,9 +34,11 @@ window.crow = new Proxy({
   getState: async () => structuredClone(saved),
   getAlertSound: async () => ({ name: 'QA.wav', dataBase64: btoa('fictional') }),
   getAlertAISettings: async () => ({ enabled: true }),
+  ensureFreeLLM: async () => { startupCalls++; return { state: 'available', detail: 'QA API disponible' } },
+  submitPassphrase: async id => { statuses[id] = 'connected'; callbacks.get('onStatus')?.(id, 'connected') },
   getAlertAIStatus: async () => ({ state: 'idle', detail: 'QA' }),
   getUpdateState: async () => ({ status: 'idle' }),
-  status: async () => 'connected',
+  status: async id => statuses[id],
   hookSettings: async () => ({ enabled: true }),
   sessions: async () => [{ id: 'session', agent: 'claude', mode: 'normal', root: '/qa', state: 'interrupted', agentState: 'completed', startedAt: new Date().toISOString() }],
   files: async () => [],
@@ -43,6 +49,9 @@ window.crow = new Proxy({
   return async () => undefined
 } })
 window.__audioQA = {
+  startupCalls: () => startupCalls,
+  emitStatus: (id, status) => callbacks.get('onStatus')(id,status),
+  runtimeError: () => callbacks.get('onFreeLLMStatus')({state:'unavailable',detail:'QA API apagada'}),
   starts: () => [...starts], reset: () => { starts.length = 0 },
   emit: notice => callbacks.get('onNotice')(notice),
   snapshot: notices => window.__audioQA.replaceState({ ...saved, notices }),

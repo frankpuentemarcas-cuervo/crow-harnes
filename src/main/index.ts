@@ -9,6 +9,7 @@ import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
 import { AlertAISettingsStore } from './alert-ai-settings'
 import { AttentionService } from './attention-service'
+import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
 import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
 import { ignoreClipboardMenuShortcut } from './clipboard-shortcuts'
@@ -19,6 +20,7 @@ let store: Store
 let alertSoundStore: AlertSoundStore
 let alertAISettings: AlertAISettingsStore
 let attention: AttentionService
+let freeLLM: FreeLLMRuntime
 let alertAudit: AlertAuditStore
 let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
@@ -125,9 +127,11 @@ function registerIPC(): void {
     return { canceled: false }
   })
   handle('crow:get-alert-ai-settings', () => alertAISettings.snapshot())
+  handle('crow:ensure-free-llm', () => freeLLM.ensure())
   handle('crow:save-alert-ai-settings', (input: AlertAIInput) => {
     const next = alertAISettings.save(input)
     attention.reset()
+    freeLLM.reset()
     return next
   })
   handle('crow:test-alert-ai', () => attention.testConnection())
@@ -292,6 +296,7 @@ app.whenReady().then(() => {
   store = new Store(app.getPath('userData'))
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
+  freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)
   auditTimer.unref()
@@ -305,4 +310,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })

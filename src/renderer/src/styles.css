@@ -316,5 +316,8 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .alert-ai-dialog .alert-ai-result { color: #b4dfc6; }
 .alert-ai-summary { display: flex; flex-direction: column; gap: 7px; padding: 8px 2px; border-top: 1px solid #434b56; }
 .alert-ai-summary .ai-error { color: #ffccad; }
+.free-llm-banner { display: flex; align-items: center; gap: 8px; padding: 9px 14px; flex-wrap: wrap; background: #263445; font-size: 12px; }
+.free-llm-banner[role="alert"] { background: #49372d; color: #ffddc5; }
+.free-llm-banner span { flex: 1 1 240px; overflow-wrap: anywhere; }
 @media (max-width: 1190px) { .files-pane { width: 205px; } .toolbar select { max-width: 136px; } .toolbar { height: auto; flex-wrap: wrap; padding-top: 6px; padding-bottom: 6px; gap: 6px; } .toolbar-right { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }

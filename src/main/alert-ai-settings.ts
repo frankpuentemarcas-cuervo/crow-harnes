@@ -8,8 +8,8 @@ export interface SecretEncryption {
   encryptString(value: string): Buffer
   decryptString(value: Buffer): string
 }
-interface SettingsFile { enabled: boolean; baseURL: string; model: string; encryptedKey: string }
-const defaults = (): SettingsFile => ({ enabled: false, baseURL: DEFAULT_AI_URL, model: 'auto', encryptedKey: '' })
+interface SettingsFile { enabled: boolean; autoOpenFreeLLM: boolean; baseURL: string; model: string; encryptedKey: string }
+const defaults = (): SettingsFile => ({ enabled: false, autoOpenFreeLLM: true, baseURL: DEFAULT_AI_URL, model: 'auto', encryptedKey: '' })
 
 function validateModel(value: string): string {
   if (typeof value !== 'string' || !/^[\w.:/+-]{1,120}$/.test(value.trim())) throw new Error('Ingresá un modelo válido, por ejemplo auto o auto:fast.')
@@ -31,7 +31,8 @@ export class AlertAISettingsStore {
       if (existsSync(this.path)) {
         const value = JSON.parse(readFileSync(this.path, 'utf8'))
         if (typeof value.enabled !== 'boolean' || typeof value.encryptedKey !== 'string') throw new Error('La configuración de Free LLM está dañada.')
-        this.data = { enabled: value.enabled, baseURL: validateAIBaseURL(value.baseURL), model: validateModel(value.model), encryptedKey: value.encryptedKey }
+        if (value.autoOpenFreeLLM !== undefined && typeof value.autoOpenFreeLLM !== 'boolean') throw new Error('Preferencia de inicio inválida.')
+        this.data = { enabled: value.enabled, autoOpenFreeLLM: value.autoOpenFreeLLM ?? true, baseURL: validateAIBaseURL(value.baseURL), model: validateModel(value.model), encryptedKey: value.encryptedKey }
       }
     } catch { this.configurationError = 'No se pudo leer la configuración guardada de Free LLM. Volvé a configurarla; el archivo original no se borró.' }
   }
@@ -50,7 +51,8 @@ export class AlertAISettingsStore {
 
   save(input: AlertAIInput): AlertAISettings {
     if (!input || typeof input.enabled !== 'boolean' || (input.removeKey !== undefined && typeof input.removeKey !== 'boolean')) throw new Error('Configuración de alertas inválida.')
-    const next: SettingsFile = { enabled: input.enabled, baseURL: validateAIBaseURL(input.baseURL), model: validateModel(input.model), encryptedKey: input.removeKey ? '' : this.data.encryptedKey }
+    if (input.autoOpenFreeLLM !== undefined && typeof input.autoOpenFreeLLM !== 'boolean') throw new Error('Preferencia de inicio inválida.')
+    const next: SettingsFile = { enabled: input.enabled, autoOpenFreeLLM: input.autoOpenFreeLLM ?? this.data.autoOpenFreeLLM, baseURL: validateAIBaseURL(input.baseURL), model: validateModel(input.model), encryptedKey: input.removeKey ? '' : this.data.encryptedKey }
     if (input.apiKey !== undefined) {
       if (typeof input.apiKey !== 'string' || input.apiKey.length > 8192 || /[\r\n]/.test(input.apiKey)) throw new Error('La clave de Free LLM no es válida.')
       if (input.removeKey && input.apiKey.trim()) throw new Error('No podés eliminar y guardar una clave nueva a la vez.')

@@ -8,6 +8,7 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
   const errorBox = useRef<HTMLDivElement>(null)
   const [settings, setSettings] = useState<AlertAISettings | null>(null)
   const [enabled, setEnabled] = useState(false)
+  const [autoOpenFreeLLM, setAutoOpenFreeLLM] = useState(true)
   const [baseURL, setBaseURL] = useState('http://127.0.0.1:31415/v1')
   const [model, setModel] = useState('auto')
   const [apiKey, setApiKey] = useState('')
@@ -22,6 +23,7 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
     void window.crow.getAlertAISettings().then((value) => {
       if (!live) return
       setSettings(value); setEnabled(value.enabled); setBaseURL(value.baseURL); setModel(value.model)
+      setAutoOpenFreeLLM(value.autoOpenFreeLLM !== false)
       if (value.configurationError) setError(value.configurationError)
     }).catch(() => { if (live) setError('No se pudo cargar la configuración de Free LLM.') })
     return () => { live = false }
@@ -34,7 +36,7 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
     saving.current = true
     setBusy(true); setError(''); setStatus(null)
     try {
-      const next = await window.crow.saveAlertAISettings({ enabled, baseURL, model, apiKey: apiKey || undefined, removeKey })
+      const next = await window.crow.saveAlertAISettings({ enabled, autoOpenFreeLLM, baseURL, model, apiKey: apiKey || undefined, removeKey })
       setSettings(next); setApiKey(''); setRemoveKey(false); setBaseURL(next.baseURL); setModel(next.model)
       onSaved(next)
       if (test) {
@@ -53,6 +55,7 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
       {error && <div ref={errorBox} tabIndex={-1} className="inline-error" role="alert">{error}</div>}
       {!settings ? <p role="status">Cargando ajustes…</p> : <>
         <label className="hook-toggle"><input type="checkbox" checked={enabled} disabled={busy || !settings.secureStorageAvailable} onChange={(event) => setEnabled(event.target.checked)} /><span>Activar clasificación por IA<small>Al activarla, autorizás enviar las respuestas a Free LLM y a los proveedores de tu cadena. Una API local NO garantiza un modelo local.</small></span></label>
+        <label className="hook-toggle"><input type="checkbox" checked={autoOpenFreeLLM} disabled={busy} onChange={event => setAutoOpenFreeLLM(event.target.checked)} /><span>Abrir Free LLM API al iniciar Crow<small>Después de resolver las llaves SSH, si la IA está activada y la API no responde. Desmarcado, Crow sólo avisa.</small></span></label>
         <label htmlFor="alert-ai-url">URL base local<input id="alert-ai-url" required value={baseURL} disabled={busy} onChange={(event) => setBaseURL(event.target.value)} aria-describedby="alert-ai-url-help" /><small id="alert-ai-url-help">Free LLM debe estar abierto en esta PC Windows. No se consulta desde Linux.</small></label>
         <label htmlFor="alert-ai-model">Modelo o estrategia<input id="alert-ai-model" required value={model} disabled={busy} onChange={(event) => setModel(event.target.value)} aria-describedby="alert-ai-model-help" /><small id="alert-ai-model-help">auto respeta tu cadena. auto:fast prioriza velocidad entre los modelos habilitados.</small></label>
         <label htmlFor="alert-ai-key">Clave unificada de Free LLM<input id="alert-ai-key" type="password" value={apiKey} disabled={busy || removeKey || !settings.secureStorageAvailable} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.keyPresent ? 'Guardada · dejá vacío para conservarla' : 'Ingresá la clave desde Free LLM'} aria-describedby="alert-ai-key-help" /><small id="alert-ai-key-help">Se guarda cifrada en Windows y no se devuelve a la interfaz. No se incluye en mensajes al modelo.</small></label>

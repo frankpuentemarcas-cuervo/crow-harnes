@@ -60,3 +60,21 @@ test('corrupted settings disable inference and remain recoverable without breaki
     assert.equal(store.configuration().apiKey, input.apiKey)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
+
+test('automatic opening preference migrates old settings, persists and validates without touching the key', () => {
+  const directory=mkdtempSync(join(tmpdir(),'crow-ai-settings-'))
+  try {
+    const store=new AlertAISettingsStore(directory,encryption)
+    assert.equal(store.snapshot().autoOpenFreeLLM,true)
+    store.save({...input,autoOpenFreeLLM:false})
+    const reopened=new AlertAISettingsStore(directory,encryption)
+    assert.equal(reopened.snapshot().autoOpenFreeLLM,false)
+    reopened.save({...input,apiKey:undefined})
+    assert.equal(reopened.snapshot().autoOpenFreeLLM,false)
+    assert.equal(reopened.configuration().apiKey,input.apiKey)
+    assert.throws(()=>reopened.save({...input,autoOpenFreeLLM:'yes'}))
+    const old=JSON.parse(readFileSync(join(directory,'alert-ai.json'),'utf8'));delete old.autoOpenFreeLLM
+    writeFileSync(join(directory,'alert-ai.json'),JSON.stringify(old))
+    assert.equal(new AlertAISettingsStore(directory,encryption).snapshot().autoOpenFreeLLM,true)
+  } finally {rmSync(directory,{recursive:true,force:true})}
+})

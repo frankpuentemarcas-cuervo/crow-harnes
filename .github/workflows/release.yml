@@ -69,6 +69,9 @@ jobs:
       - name: Test automatic alert audio in isolated Electron
         run: node tests/notice-audio-electron.mjs
 
+      - name: Test Free LLM startup after SSH unlock in isolated Electron
+        run: node tests/free-llm-startup-electron.mjs
+
       - name: Type-check sources
         run: npm run typecheck
 

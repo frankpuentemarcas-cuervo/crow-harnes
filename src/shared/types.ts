@@ -1,5 +1,6 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'auth-required'
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, NoticeSoundOutcome } from './alert-diagnostics'
+import type { FreeLLMRuntimeStatus } from './free-llm-startup'
 
 export type Agent = 'shell' | 'claude' | 'codex' | 'agy'
 export type Mode = 'normal' | 'bypass'
@@ -117,6 +118,7 @@ export interface Notice extends Omit<RemoteEvent, 'message' | 'messageTruncated'
 
 export interface AlertAISettings {
   enabled: boolean
+  autoOpenFreeLLM?: boolean
   baseURL: string
   model: string
   keyPresent: boolean
@@ -126,6 +128,7 @@ export interface AlertAISettings {
 
 export interface AlertAIInput {
   enabled: boolean
+  autoOpenFreeLLM?: boolean
   baseURL: string
   model: string
   apiKey?: string
@@ -192,6 +195,8 @@ export interface CrowAPI {
   notifyCacheExpiry(hostId: string, sessionId: string): Promise<void>
   onCacheWarningClick(listener: (target: { hostId: string; projectId: string; sessionId: string }) => void): () => void
   getAlertAISettings(): Promise<AlertAISettings>
+  ensureFreeLLM(): Promise<FreeLLMRuntimeStatus>
+  onFreeLLMStatus(listener: (status: FreeLLMRuntimeStatus) => void): () => void
   saveAlertAISettings(input: AlertAIInput): Promise<AlertAISettings>
   testAlertAI(): Promise<AlertAIStatus>
   getAlertAIStatus(): Promise<AlertAIStatus>

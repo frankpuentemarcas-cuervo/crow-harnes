@@ -11,6 +11,7 @@ import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNotices
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { AlertAuditDialog } from './AlertAuditDialog'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
+import { freeLLMStartupReady, type FreeLLMRuntimeStatus } from '../../shared/free-llm-startup'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 import { CacheWarningTracker, cacheWarningPreferences, cacheView } from '../../shared/prompt-cache'
@@ -88,6 +89,9 @@ export function App(): React.JSX.Element {
   const [alertAuditOpen, setAlertAuditOpen] = useState(false)
   const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
   const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
+  const [freeLLMStatus, setFreeLLMStatus] = useState<FreeLLMRuntimeStatus | null>(null)
+  const freeLLMChecked = useRef(false)
+  const freeLLMLive = useRef(false)
   const noticesRef = useRef<Notice[]>([])
   const noticeSounds = useRef(new NoticeSoundTracker())
   const [soundName, setSoundName] = useState('')
@@ -111,6 +115,23 @@ export function App(): React.JSX.Element {
   const [mobileBusy, setMobileBusy] = useState(false)
   const [mobileError, setMobileError] = useState('')
   const [mobileQR, setMobileQR] = useState('')
+
+  async function checkFreeLLM(): Promise<void> {
+    try { const result = await window.crow.ensureFreeLLM(); if (freeLLMLive.current) setFreeLLMStatus(result) }
+    catch { if (freeLLMLive.current) setFreeLLMStatus({ state: 'unavailable', detail: 'No se pudo comprobar Free LLM. Abrilo y activá su servidor local.' }) }
+  }
+  useEffect(() => {
+    freeLLMLive.current = true
+    const off = window.crow.onFreeLLMStatus(setFreeLLMStatus)
+    return () => { freeLLMLive.current = false; off() }
+  }, [])
+  useEffect(() => {
+    if (freeLLMChecked.current || !freeLLMStartupReady({ loaded, enabled: !!alertAISettings?.enabled, busy: passphraseBusy, pending: passphraseHosts.length, hostIds: state.hosts.map(host => host.id), statuses })) return
+    // Let late SSH prompts/status events settle; never open another app while
+    // the user is still typing a passphrase. One startup check per Crow run.
+    const timer = setTimeout(() => { freeLLMChecked.current = true; void checkFreeLLM() }, 750)
+    return () => clearTimeout(timer)
+  }, [loaded, alertAISettings?.enabled, passphraseBusy, passphraseHosts.length, state.hosts, statuses])
 
   const selectedProject = state.projects.find((project) => project.id === selectedProjectId)
   const selectedHost = selectedProject && state.hosts.find((host) => host.id === selectedProject.hostId)
@@ -580,6 +601,10 @@ export function App(): React.JSX.Element {
       </div>}
 
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Cerrar error" onClick={() => setError('')}><X size={15} /></button></div>}
+      {alertAISettings?.enabled && freeLLMStatus && !['idle', 'disabled'].includes(freeLLMStatus.state) && <div className="free-llm-banner" role={freeLLMStatus.state === 'unavailable' ? 'alert' : 'status'}><span>{freeLLMStatus.detail}</span>
+        {freeLLMStatus.state === 'unavailable' && <><button className="secondary-button small-button" onClick={() => void checkFreeLLM()}>Comprobar de nuevo</button><button className="secondary-button small-button" onClick={() => setAlertAIOpen(true)}>Configurar IA</button></>}
+        {freeLLMStatus.state === 'available' && <button className="icon-button" aria-label="Cerrar aviso de Free LLM" onClick={() => setFreeLLMStatus(null)}><X size={15} /></button>}
+      </div>}
 
       {selectedProject && selectedHost ? <>
         <div className="toolbar">
