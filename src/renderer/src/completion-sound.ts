@@ -18,7 +18,7 @@ export function isFreshNotice(at: string, now = Date.now()): boolean {
   return Number.isFinite(age) && age >= -60_000 && age <= 120_000
 }
 
-export async function playCompletionSound(custom?: AudioBuffer | null): Promise<void> {
+export async function playCompletionSound(custom?: AudioBuffer | null, onEnded?: () => void): Promise<void> {
   const current = audioContext()
   if (current.state === 'suspended') await current.resume()
   if (current.state !== 'running') throw new Error('El dispositivo de audio no está disponible.')
@@ -28,6 +28,7 @@ export async function playCompletionSound(custom?: AudioBuffer | null): Promise<
     const source = current.createBufferSource()
     source.buffer = custom
     source.connect(current.destination)
+    if (onEnded) source.onended = onEnded
     source.start(start)
     return
   }
@@ -41,6 +42,7 @@ export async function playCompletionSound(custom?: AudioBuffer | null): Promise<
     gain.gain.linearRampToValueAtTime(0.17, at + 0.025)
     gain.gain.exponentialRampToValueAtTime(0.001, at + 0.17)
     oscillator.connect(gain).connect(current.destination)
+    if (offset === 0.18 && onEnded) oscillator.onended = onEnded
     oscillator.start(at)
     oscillator.stop(at + 0.18)
   }

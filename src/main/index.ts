@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, safeStorage } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import { basename, join, posix } from 'node:path'
+import { basename, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
+import { writeFile } from 'node:fs/promises'
 import { Connection } from './connection'
 import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
@@ -8,6 +9,8 @@ import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
 import { AlertAISettingsStore } from './alert-ai-settings'
 import { AttentionService } from './attention-service'
+import { AlertAuditStore } from './alert-audit-store'
+import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
 import { ignoreClipboardMenuShortcut } from './clipboard-shortcuts'
 import type { Agent, AlertAIInput, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
 
@@ -16,6 +19,8 @@ let store: Store
 let alertSoundStore: AlertSoundStore
 let alertAISettings: AlertAISettingsStore
 let attention: AttentionService
+let alertAudit: AlertAuditStore
+let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
 let mobile: MobileGateway
 const connections = new Map<string, Connection>()
@@ -101,6 +106,24 @@ function registerIPC(): void {
   }
 
   handle('crow:clipboard-read', () => clipboard.readText())
+  handle('crow:audit-status', () => alertAudit.status())
+  handle('crow:audit-enabled', (enabled: boolean) => alertAudit.setEnabled(enabled))
+  handle('crow:audit-list', () => alertAudit.list())
+  handle('crow:audit-detail', (id: string) => alertAudit.detail(id))
+  handle('crow:audit-clear', () => alertAudit.clear())
+  handle('crow:audit-sound', (hostId: string, eventId: string, outcome: NoticeSoundOutcome) => {
+    if (typeof hostId !== 'string' || typeof eventId !== 'string' || typeof outcome !== 'string') throw new Error('Diagnóstico de audio inválido.')
+    alertAudit.sound(hostId, eventId, outcome)
+  })
+  handle('crow:audit-export', async () => {
+    if (!window) return { canceled: true }
+    const result = await dialog.showSaveDialog(window, { title: 'Exportar diagnóstico · contiene texto privado SIN cifrar', defaultPath: join(app.getPath('downloads'), `crow-alertas-${new Date().toISOString().slice(0, 10)}.json`), filters: [{ name: 'JSON de diagnóstico', extensions: ['json'] }] })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    const inside = relative(resolve(app.getPath('userData')), resolve(result.filePath))
+    if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) throw new Error('Exportá fuera de la carpeta interna de Crow.')
+    await writeFile(result.filePath, alertAudit.exportJSON(), { encoding: 'utf8', mode: 0o600 })
+    return { canceled: false }
+  })
   handle('crow:get-alert-ai-settings', () => alertAISettings.snapshot())
   handle('crow:save-alert-ai-settings', (input: AlertAIInput) => {
     const next = alertAISettings.save(input)
@@ -269,7 +292,10 @@ app.whenReady().then(() => {
   store = new Store(app.getPath('userData'))
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
-  attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status))
+  alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
+  auditTimer = setInterval(() => alertAudit.prune(), 60_000)
+  auditTimer.unref()
+  attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status), undefined, Date.now, alertAudit)
   vault = new PassphraseVault()
   mobile = new MobileGateway({ snapshot: () => store.snapshot(), connection })
   registerIPC()
@@ -279,4 +305,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })

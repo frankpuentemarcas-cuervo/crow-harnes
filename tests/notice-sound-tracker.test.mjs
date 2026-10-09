@@ -49,3 +49,15 @@ test('pending redelivery does not extend freshness forever', () => {
   tracker.accept([], pending(), now + 119000)
   assert.equal(tracker.accept([], notice(), now + 130000), false)
 })
+
+test('audit distinguishes review, duplicates, history, age and classification silence', () => {
+  const tracker = new NoticeSoundTracker()
+  tracker.restore([notice({ id: 'restored' })])
+  assert.equal(tracker.evaluate([], notice({ id: 'restored' }), now), 'restored')
+  assert.equal(tracker.evaluate([], pending(), now), 'pending')
+  assert.equal(tracker.evaluate([], notice(), now), 'eligible')
+  assert.equal(tracker.evaluate([], notice(), now), 'duplicate')
+  assert.equal(tracker.evaluate([], notice({ id: 'read', read: true }), now), 'already-read')
+  assert.equal(tracker.evaluate([], notice({ id: 'info', requiresAttention: false }), now), 'informational')
+  assert.equal(tracker.evaluate([], notice({ id: 'old', at: new Date(now - 600000).toISOString() }), now), 'stale')
+})

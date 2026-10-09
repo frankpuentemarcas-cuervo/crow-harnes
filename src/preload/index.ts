@@ -7,6 +7,13 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  getAlertAuditStatus: () => ipcRenderer.invoke('crow:audit-status'),
+  setAlertAuditEnabled: (enabled) => ipcRenderer.invoke('crow:audit-enabled', enabled),
+  listAlertAudit: () => ipcRenderer.invoke('crow:audit-list'),
+  getAlertAudit: (id) => ipcRenderer.invoke('crow:audit-detail', id),
+  clearAlertAudit: () => ipcRenderer.invoke('crow:audit-clear'),
+  exportAlertAudit: () => ipcRenderer.invoke('crow:audit-export'),
+  reportNoticeSound: (hostId, eventId, outcome) => ipcRenderer.invoke('crow:audit-sound', hostId, eventId, outcome),
   notifyCacheExpiry: (hostId, sessionId) => ipcRenderer.invoke('crow:cache-warning', hostId, sessionId),
   onCacheWarningClick: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, target: { hostId: string; projectId: string; sessionId: string }): void => listener(target)

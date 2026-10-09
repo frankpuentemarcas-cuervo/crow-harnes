@@ -4,6 +4,7 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from '/src/renderer/src/App.tsx'
+import { ConfirmProvider } from '/src/renderer/src/ConfirmDialog.tsx'
 import '/src/renderer/src/styles.css'
 
 // Fictional IPC + instrumented audio graph. No device playback, keys or SSH.
@@ -19,6 +20,13 @@ window.AudioContext = class {
   createBufferSource() { return { buffer: null, connect() {}, start(at) { starts.push(at) } } }
 }
 window.crow = new Proxy({
+  getAlertAuditStatus: async () => window.__auditBridge?.status(),
+  setAlertAuditEnabled: async enabled => window.__auditBridge?.enable(enabled),
+  listAlertAudit: async () => window.__auditBridge?.list() || [],
+  getAlertAudit: async id => window.__auditBridge?.detail(id),
+  clearAlertAudit: async () => window.__auditBridge?.clear(),
+  exportAlertAudit: async () => window.__auditBridge?.export(),
+  reportNoticeSound: async (...args) => window.__auditBridge?.sound(...args),
   getState: async () => structuredClone(saved),
   getAlertSound: async () => ({ name: 'QA.wav', dataBase64: btoa('fictional') }),
   getAlertAISettings: async () => ({ enabled: true }),
@@ -43,5 +51,5 @@ window.__audioQA = {
   openNotices: () => document.querySelector('button[title="Notificaciones"]').click(),
   ready: () => callbacks.has('onNotice') && Boolean(window.__audioQA.replaceState) && document.body.textContent.includes('QA.wav')
 }
-createRoot(document.getElementById('root')).render(React.createElement(App))
+createRoot(document.getElementById('root')).render(React.createElement(ConfirmProvider, null, React.createElement(App)))
 </script></body></html>

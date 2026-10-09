@@ -292,6 +292,23 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .app-dialog fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .rename-terminal-dialog small { color: #b9c2cf; font-size: 11px; }
 .alert-ai-dialog { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.audit-dialog { width: min(1000px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); overflow: auto; }
+.audit-dialog .hook-toggle { display: flex; align-items: flex-start; gap: 10px; }
+.audit-dialog .hook-toggle input { width: 16px; height: 16px; }
+.audit-dialog small { color: #b4becd; font-size: 11px; line-height: 1.5; }
+.audit-dialog .hook-toggle small { display: block; }
+.audit-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 14px 0; }
+.audit-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 14px; }
+.audit-list { max-height: 480px; overflow: auto; }
+.audit-row { display: flex; flex-direction: column; gap: 5px; text-align: left; width: 100%; padding: 10px; border: 1px solid #434b56; background: #1d2026; border-radius: 6px; margin-bottom: 7px; overflow-wrap: anywhere; }
+.audit-row.selected { border-color: #8faadd; }
+.audit-row:focus-visible { outline: 2px solid #8faadd; outline-offset: -3px; }
+.audit-detail { min-width: 0; }
+.audit-detail dl { font-size: 12px; overflow-wrap: anywhere; }
+.audit-detail dt { color: #b4becd; margin-top: 10px; }
+.audit-detail dd { margin: 3px 0 0; }
+.audit-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 320px; overflow: auto; background: #151920; padding: 12px; border-radius: 6px; }
+@media (max-width: 720px) { .audit-layout { grid-template-columns: minmax(0, 1fr); } .audit-list { max-height: 220px; } }
 .alert-ai-dialog label small, .alert-ai-dialog > small { color: #b4becd; font-size: 11px; font-weight: 400; line-height: 1.5; }
 .alert-ai-dialog .dialog-actions { flex-wrap: wrap; }
 .alert-ai-dialog .hook-toggle input { width: 16px; height: 16px; }

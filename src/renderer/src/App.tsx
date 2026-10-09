@@ -9,6 +9,8 @@ import { FileTree } from './FileTree'
 import { decodeCompletionSound, playCompletionSound } from './completion-sound'
 import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
+import { AlertAuditDialog } from './AlertAuditDialog'
+import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
 import { CacheWarningTracker, cacheWarningPreferences, cacheView } from '../../shared/prompt-cache'
@@ -83,6 +85,7 @@ export function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [noticeOpen, setNoticeOpen] = useState(false)
   const [alertAIOpen, setAlertAIOpen] = useState(false)
+  const [alertAuditOpen, setAlertAuditOpen] = useState(false)
   const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
   const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
   const noticesRef = useRef<Notice[]>([])
@@ -244,10 +247,14 @@ export function App(): React.JSX.Element {
       if (next === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
     })
     const offNotice = window.crow.onNotice((notice) => {
-      const notify = noticeSounds.current.accept(noticesRef.current, notice)
+      const soundOutcome = noticeSounds.current.evaluate(noticesRef.current, notice)
+      const report = (outcome: NoticeSoundOutcome): void => { void window.crow.reportNoticeSound(notice.hostId, notice.id, outcome).catch(() => undefined) }
+      report(soundOutcome)
       noticesRef.current = mergeNotice(noticesRef.current, notice)
       setState((current) => ({ ...current, notices: mergeNotice(current.notices, notice) }))
-      if (notify) void playCompletionSound(customSound.current).catch(() => setSoundError('No se pudo reproducir la alerta. Revisá el dispositivo de audio y usá Probar sonido.'))
+      if (soundOutcome === 'eligible') void playCompletionSound(customSound.current, () => report('playback-ended')).then(() => report('scheduled')).catch(() => {
+        report('playback-error'); setSoundError('No se pudo reproducir la alerta. Revisá el dispositivo de audio y usá Probar sonido.')
+      })
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
@@ -556,6 +563,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Acceso móvil en red local" aria-label="Acceso móvil en red local" onClick={() => void openMobile()}><Smartphone size={16} /></button>
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
+          <button className="icon-button" title="Diagnóstico de alertas" aria-label="Diagnóstico de alertas" onClick={() => setAlertAuditOpen(true)}><Eye size={17} /></button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
              {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div><CacheWarningSettings value={cachePreferences} onChange={setCachePreferences} />{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
@@ -624,6 +632,7 @@ export function App(): React.JSX.Element {
     {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { if (operationKeys.current.has(`start-host:${editingHost.id}`)) throw new Error('Esperá a que termine la creación de la terminal antes de quitar el host.'); if (tabs.some(tab => state.projects.some(project => project.id === tab.projectId && project.hostId === editingHost.id) && busyEditors.current.has(tab.id))) throw new Error('Esperá a que termine el guardado de archivos antes de quitar el host.'); const saved = await window.crow.removeHost(editingHost.id); sessionVersions.current.begin(editingHost.id); setState(saved); setTabs(current => current.filter(tab => saved.projects.some(project => project.id === tab.projectId))); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId(saved.projects[0]?.id || '') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
+    {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
       setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))

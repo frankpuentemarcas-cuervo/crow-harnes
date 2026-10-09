@@ -1,4 +1,6 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'auth-required'
+import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, NoticeSoundOutcome } from './alert-diagnostics'
+
 export type Agent = 'shell' | 'claude' | 'codex' | 'agy'
 export type Mode = 'normal' | 'bypass'
 export type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'downloaded' | 'error'
@@ -180,6 +182,13 @@ export interface AlertSound {
 }
 
 export interface CrowAPI {
+  getAlertAuditStatus(): Promise<AlertAuditStatus>
+  setAlertAuditEnabled(enabled: boolean): Promise<AlertAuditStatus>
+  listAlertAudit(): Promise<AlertAuditSummary[]>
+  getAlertAudit(id: string): Promise<AlertAuditRecord | undefined>
+  clearAlertAudit(): Promise<void>
+  exportAlertAudit(): Promise<{ canceled: boolean }>
+  reportNoticeSound(hostId: string, eventId: string, outcome: NoticeSoundOutcome): Promise<void>
   notifyCacheExpiry(hostId: string, sessionId: string): Promise<void>
   onCacheWarningClick(listener: (target: { hostId: string; projectId: string; sessionId: string }) => void): () => void
   getAlertAISettings(): Promise<AlertAISettings>

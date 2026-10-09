@@ -13,18 +13,22 @@ test('sound is reserved for recent events, allowing modest host clock skew', () 
 test('decoded custom sound is played instead of the default tone', async () => {
   const previous = globalThis.AudioContext
   const played = []
+  let source
   globalThis.AudioContext = class {
     state = 'running'
     currentTime = 0
     destination = {}
     async decodeAudioData() { return { duration: 2 } }
     createBufferSource() {
-      return { connect() {}, start(at) { played.push(at) }, set buffer(value) { played.push(value.duration) } }
+      source = { connect() {}, start(at) { played.push(at) }, set buffer(value) { played.push(value.duration) } }
+      return source
     }
   }
   try {
     const decoded = await decodeCompletionSound(Buffer.from('audio').toString('base64'))
-    await playCompletionSound(decoded)
+    await playCompletionSound(decoded, () => played.push('ended'))
     assert.deepEqual(played, [2, 0.02])
+    source.onended()
+    assert.deepEqual(played, [2, 0.02, 'ended'])
   } finally { globalThis.AudioContext = previous }
 })
