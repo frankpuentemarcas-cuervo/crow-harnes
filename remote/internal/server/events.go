@@ -177,6 +177,9 @@ func boundedEventMessage(message string) (string, bool) {
 }
 
 func (a *App) addEvent(sessionID, kind string, attention bool, messages ...eventMessage) {
+	if kind == "process-exited" && a.bridge != nil {
+		_ = a.bridge.Interrupt(sessionID)
+	}
 	id, err := randomID()
 	if err != nil {
 		return
@@ -274,6 +277,12 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		a.markSubagentState(body.SessionID, body.AgentID, false)
 	} else {
 		a.markAgentState(body.SessionID, "completed")
+		if a.bridge != nil {
+			if err := a.bridge.Complete(body.SessionID, body.Message); err != nil {
+				http.Error(w, "bridge completion persistence failed", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		text, truncated := boundedEventMessage(body.Message)
 		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message), eventMessage{text: text, truncated: truncated || body.MessageTruncated})
 	}

@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crow-harness/remote/internal/bridge"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -36,6 +38,7 @@ type App struct {
 	events        []Event
 	eventMessages map[string]eventMessage
 	browsers      map[string]*browser
+	bridge        *bridge.Store
 }
 
 func randomID() (string, error) {
@@ -93,6 +96,13 @@ func Run() error {
 	if err := a.loadEvents(); err != nil {
 		return err
 	}
+	a.bridge, err = bridge.Open(dir)
+	if err != nil {
+		// Corrupt mailbox disables only the opt-in bridge, not the existing
+		// terminal/file/browser service. Never reset deduplication silently.
+		log.Print("crowd bridge unavailable: mailbox requires owner review")
+		a.bridge = nil
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/host/metrics", a.handleMetrics)
@@ -104,6 +114,8 @@ func Run() error {
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
+	mux.HandleFunc("POST /api/bridge/hello", a.handleBridgeHello)
+	mux.HandleFunc("GET /api/bridge/tasks/{id}", a.handleBridgeTask)
 	mux.HandleFunc("GET /api/hooks", a.handleHookSettings)
 	mux.HandleFunc("PUT /api/hooks", a.handleHookSettings)
 	mux.HandleFunc("GET /api/files/tree", a.handleTree)
@@ -161,7 +173,11 @@ func requestJSON(w http.ResponseWriter, r *http.Request, value any) bool {
 }
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1})
+	bridgeVersion := 0
+	if a.bridge != nil {
+		bridgeVersion = 1
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1, "bridgeHelloVersion": bridgeVersion})
 }
 
 func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +284,11 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 				data, err := decodeInput(msg.Data)
 				if err == nil {
 					_, _ = a.wakeSession(id)
-					_ = s.write(data)
+					if a.bridge != nil {
+						_ = a.bridge.WithManualInput(id, func() error { return s.write(data) })
+					} else {
+						_ = s.write(data)
+					}
 				}
 			case "resize":
 				_ = s.resize(msg.Cols, msg.Rows)

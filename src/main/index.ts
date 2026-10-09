@@ -12,6 +12,10 @@ import { AttentionService } from './attention-service'
 import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
 import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
+import { BridgeGateway } from './bridge-gateway'
+import { readBridgePolicy } from './bridge-policy'
+import { BridgeRegistry } from './bridge-registry'
+import { BridgeService } from './bridge-service'
 import { ignoreClipboardMenuShortcut } from './clipboard-shortcuts'
 import type { Agent, AlertAIInput, AlertSound, Host, HostMetrics, Mode, Notice, Project, SessionInfo, FileEntry, FileContent, FileUploadResult, UpdateState, WorkspaceTab } from '../shared/types'
 
@@ -25,6 +29,7 @@ let alertAudit: AlertAuditStore
 let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
 let mobile: MobileGateway
+let bridge: BridgeGateway | undefined
 const connections = new Map<string, Connection>()
 let updateState: UpdateState = { status: 'idle' }
 
@@ -306,8 +311,16 @@ app.whenReady().then(() => {
   registerIPC()
   createWindow()
   configureUpdater()
+  // Explicit owner opt-in. No new listeners or permissions by default; reuse
+  // the exact Connection/passphrase path already used by the desktop app.
+  if (process.env.CROW_MCP_CONFIG) {
+    try {
+      bridge = new BridgeGateway(readBridgePolicy(process.env.CROW_MCP_CONFIG), () => new BridgeService(new BridgeRegistry(app.getPath('userData')), store, connection))
+      void bridge.start().catch(() => { console.error('Crow MCP no pudo iniciarse. Revisá el puerto/configuración local.'); bridge = undefined })
+    } catch { console.error('Crow MCP deshabilitado: configuración local inválida.') }
+  }
   for (const host of store.snapshot().hosts) void connection(host.id).connect().catch(() => undefined)
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); void bridge?.stop(); for (const item of connections.values()) item.stop() })

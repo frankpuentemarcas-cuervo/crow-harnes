@@ -17,6 +17,7 @@
     "package:win": "electron-vite build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@monaco-editor/react": "^4.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -30,7 +31,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "ssh2": "^1.17.0",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

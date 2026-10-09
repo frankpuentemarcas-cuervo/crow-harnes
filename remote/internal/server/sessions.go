@@ -26,6 +26,7 @@ type session struct {
 	cmd             *exec.Cmd
 	done            chan struct{}
 	deleting        bool
+	userDraft       bool
 	lastActivity    time.Time
 	subs            map[chan Frame]struct{}
 }
@@ -394,6 +395,9 @@ func (a *App) deleteSession(id string) error {
 	}
 	done := s.done
 	s.mu.Unlock()
+	if a.bridge != nil {
+		_ = a.bridge.Interrupt(id)
+	}
 	if err := terminateSessionProcess(pid, id, done); err != nil {
 		s.mu.Lock()
 		s.deleting = false
@@ -436,11 +440,15 @@ func (a *App) deleteSession(id string) error {
 func (s *session) write(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pty == nil || s.info.State != "running" {
+	if s.deleting || s.pty == nil || s.info.State != "running" {
 		return errors.New("session is not running")
 	}
 	_, err := s.pty.Write(data)
 	if err == nil {
+		if len(data) > 0 {
+			lastEnter := strings.LastIndexAny(string(data), "\r\n")
+			s.userDraft = lastEnter != len(data)-1
+		}
 		s.lastActivity = time.Now().UTC()
 		if s.info.HooksActive && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
 			s.rootAgentState = "working"

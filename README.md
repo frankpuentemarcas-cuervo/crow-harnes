@@ -1,5 +1,7 @@
 # Crow Harness
 
+Puente MCP experimental multi-cliente (primer corte opt-in, sin validar con agentes reales): [configuración, pruebas y límites](docs/mcp-bridge.md).
+
 Aplicación de escritorio **Windows** para trabajar con agentes CLI en varios **hosts Linux**. Conserva el flujo esencial de Orca —hosts, proyectos, pestañas de terminal/editor/navegador y alertas— sin sus módulos de orquestación. Permite conectar opcionalmente Free LLM para clasificar las alertas.
 
 > Consultá la última versión publicada en [GitHub Releases](https://github.com/frankpuentemarcas-cuervo/crow-harnes/releases). Los cambios nuevos del código fuente no llegan al instalador hasta publicar otra versión.
