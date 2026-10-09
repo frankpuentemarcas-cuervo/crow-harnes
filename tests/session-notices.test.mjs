@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mergeNotice, shouldNotifyNotice, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from '../src/renderer/src/session-notices.ts'
+import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from '../src/renderer/src/session-notices.ts'
 
 const notice = (id, hostId, sessionId, read = false, requiresAttention = true) => ({ id, hostId, sessionId, read, requiresAttention, kind: 'turn-complete', seq: 1, at: '2026-10-02T00:00:00Z' })
 
@@ -53,17 +53,19 @@ test('pending AI classifications are acknowledged on click without showing a bel
 })
 
 test('AI result replaces notice, sounds once and never reopens a reviewed bell', () => {
+  const sounds = new NoticeSoundTracker()
   const pending = notice('a', 'host-a', 'session-a', false, false)
   const actionable = { ...pending, requiresAttention: true }
+  const now = Date.parse(pending.at)
   let history = [pending]
-  assert.equal(shouldNotifyNotice(history, actionable), true)
+  assert.equal(sounds.accept(history, actionable, now), true)
   history = mergeNotice(history, actionable)
   assert.equal(history.length, 1)
-  assert.equal(shouldNotifyNotice(history, actionable), false)
+  assert.equal(sounds.accept(history, actionable, now), false)
   assert.equal(unreadNoticesForSession(history, 'host-a', 'session-a').length, 1)
   history = mergeNotice([{ ...pending, read: true }], actionable)
   assert.equal(history[0].read, true)
-  assert.equal(shouldNotifyNotice(history, actionable), false)
+  assert.equal(new NoticeSoundTracker().accept(history, actionable, now), false)
   assert.equal(unreadNoticesForSession(history, 'host-a', 'session-a').length, 0)
-  assert.equal(shouldNotifyNotice([], { ...pending, requiresAttention: false }), false)
+  assert.equal(sounds.accept([], { ...pending, requiresAttention: false }, now), false)
 })

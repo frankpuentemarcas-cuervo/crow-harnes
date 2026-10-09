@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Crow · QA alertas</title></head><body><div id="root"></div>
+<script type="module">
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { App } from '/src/renderer/src/App.tsx'
+import '/src/renderer/src/styles.css'
+
+// Fictional IPC + instrumented audio graph. No device playback, keys or SSH.
+const callbacks = new Map()
+const starts = []
+const saved = { hosts: [{ id: 'host', name: 'QA', target: 'fictional', port: 22, remotePort: 47321 }], projects: [{ id: 'project', hostId: 'host', name: 'QA project', root: '/qa' }], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: 'project' }
+window.AudioContext = class {
+  state = 'suspended'
+  currentTime = 0
+  destination = {}
+  async resume() { this.state = 'running' }
+  async decodeAudioData() { return { duration: 2 } }
+  createBufferSource() { return { buffer: null, connect() {}, start(at) { starts.push(at) } } }
+}
+window.crow = new Proxy({
+  getState: async () => structuredClone(saved),
+  getAlertSound: async () => ({ name: 'QA.wav', dataBase64: btoa('fictional') }),
+  getAlertAISettings: async () => ({ enabled: true }),
+  getAlertAIStatus: async () => ({ state: 'idle', detail: 'QA' }),
+  getUpdateState: async () => ({ status: 'idle' }),
+  status: async () => 'connected',
+  hookSettings: async () => ({ enabled: true }),
+  sessions: async () => [{ id: 'session', agent: 'claude', mode: 'normal', root: '/qa', state: 'interrupted', agentState: 'completed', startedAt: new Date().toISOString() }],
+  files: async () => [],
+  hostMetrics: async () => undefined
+}, { get(target, key) {
+  if (key in target) return target[key]
+  if (key.startsWith('on')) return listener => { callbacks.set(key, listener); return () => callbacks.delete(key) }
+  return async () => undefined
+} })
+window.__audioQA = {
+  starts: () => [...starts], reset: () => { starts.length = 0 },
+  emit: notice => callbacks.get('onNotice')(notice),
+  snapshot: notices => window.__audioQA.replaceState({ ...saved, notices }),
+  bells: () => document.querySelectorAll('.session-notice').length,
+  testSound: () => [...document.querySelectorAll('button')].find(button => button.textContent === 'Probar sonido').click(),
+  openNotices: () => document.querySelector('button[title="Notificaciones"]').click(),
+  ready: () => callbacks.has('onNotice') && Boolean(window.__audioQA.replaceState) && document.body.textContent.includes('QA.wav')
+}
+createRoot(document.getElementById('root')).render(React.createElement(App))
+</script></body></html>

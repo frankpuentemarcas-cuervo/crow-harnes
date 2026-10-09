@@ -6,8 +6,8 @@ import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
 import { FileTree } from './FileTree'
-import { decodeCompletionSound, isFreshNotice, playCompletionSound } from './completion-sound'
-import { mergeNotice, shouldNotifyNotice, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
+import { decodeCompletionSound, playCompletionSound } from './completion-sound'
+import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNoticesForTab, unreadSessionCountForProject } from './session-notices'
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
 import { mobilePairingURL } from '../../shared/mobile-pairing'
@@ -86,6 +86,7 @@ export function App(): React.JSX.Element {
   const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
   const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
   const noticesRef = useRef<Notice[]>([])
+  const noticeSounds = useRef(new NoticeSoundTracker())
   const [soundName, setSoundName] = useState('')
   const [soundBusy, setSoundBusy] = useState(false)
   const [soundError, setSoundError] = useState('')
@@ -224,6 +225,7 @@ export function App(): React.JSX.Element {
     let live = true
     void window.crow.getState().then(async (saved) => {
       if (!live) return
+      noticeSounds.current.restore(saved.notices)
       setState(saved)
       setTabs(saved.tabs || [])
       setActiveTabs(saved.activeTabs || {})
@@ -242,10 +244,10 @@ export function App(): React.JSX.Element {
       if (next === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
     })
     const offNotice = window.crow.onNotice((notice) => {
-      const notify = shouldNotifyNotice(noticesRef.current, notice)
+      const notify = noticeSounds.current.accept(noticesRef.current, notice)
       noticesRef.current = mergeNotice(noticesRef.current, notice)
       setState((current) => ({ ...current, notices: mergeNotice(current.notices, notice) }))
-      if (notify && isFreshNotice(notice.at)) void playCompletionSound(customSound.current).catch(() => setSoundError('No se pudo reproducir la alerta. Revisá el dispositivo de audio y usá Probar sonido.'))
+      if (notify) void playCompletionSound(customSound.current).catch(() => setSoundError('No se pudo reproducir la alerta. Revisá el dispositivo de audio y usá Probar sonido.'))
       void refreshSessions(notice.hostId)
     })
     const offPassphrase = window.crow.onPassphraseRequired((hostId) => {
