@@ -109,3 +109,21 @@ test('quoted credentials and escaped configured keys are redacted before encrypt
     assert.ok(!exported.includes('secret-key'))
   } finally { c.cleanup() }
 })
+
+test('structured diagnostics persist, export and reject arbitrary metadata values', () => {
+  const c = setup()
+  try {
+    const store = c.create(); store.setEnabled(true)
+    const ref = store.begin('host', event, 'auto')
+    assert.equal(store.detail(ref.id).errorCode, undefined) // Older records remain readable.
+    const diagnostic = { stage: 'model_json', errorCode: 'invalid_model_json', finishReason: 'length', transportCause: 'unknown', responseBytes: 120, contentChars: 45 }
+    store.update(ref, diagnostic)
+    store.update(ref, { stage: 'forbidden', errorCode: 'forbidden', finishReason: 'forbidden', transportCause: 'forbidden', responseBytes: -1, contentChars: 'forbidden', rawResponse: 'forbidden' })
+    for (const [key, value] of Object.entries(diagnostic)) {
+      assert.equal(c.create().detail(ref.id)[key], value)
+      assert.equal(store.list()[0][key], value)
+      assert.equal(JSON.parse(store.exportJSON()).records[0][key], value)
+    }
+    assert.ok(!store.exportJSON().includes('forbidden'))
+  } finally { c.cleanup() }
+})

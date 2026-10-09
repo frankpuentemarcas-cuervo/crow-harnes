@@ -1,5 +1,5 @@
 import type { AttentionClassification } from '../shared/types'
-import type { AuditReason, ClassifierDiagnostic } from '../shared/alert-diagnostics'
+import { finishReasons, transportCauses, type AuditReason, type ClassifierDiagnostic } from '../shared/alert-diagnostics.ts'
 
 export interface AIConfiguration { baseURL: string; model: string; apiKey: string }
 export const DEFAULT_AI_URL = 'http://127.0.0.1:31415/v1'
@@ -34,23 +34,46 @@ export function fallbackClassification(detail: string): AttentionClassification 
 
 export async function classifyAttention(config: AIConfiguration, message: string, request: typeof fetch = fetch, timeoutMs = 15000, cancel?: AbortSignal, observe?: (diagnostic: ClassifierDiagnostic) => void): Promise<AttentionClassification> {
   const report = (diagnostic: ClassifierDiagnostic): void => { try { observe?.(diagnostic) } catch { /* Diagnostics cannot break classification. */ } }
-  const url = validateAIBaseURL(config.baseURL) + '/chat/completions'
-  if (!message.trim() || message.length > MAX_MESSAGE_CHARS) throw new Error('La respuesta está vacía o supera el límite de análisis.')
+  let url: string
+  try { url = validateAIBaseURL(config.baseURL) + '/chat/completions' }
+  catch (error) { report({ stage: 'configuration', errorCode: 'invalid_url' }); throw error }
+  if (!message.trim() || message.length > MAX_MESSAGE_CHARS) {
+    report({ stage: 'input', errorCode: message.trim() ? 'input_too_large' : 'empty_input' })
+    throw new Error('La respuesta está vacía o supera el límite de análisis.')
+  }
+  const timeout = AbortSignal.timeout(timeoutMs)
+  const signal = cancel ? AbortSignal.any([cancel, timeout]) : timeout
+  const transportCause = (error: unknown): ClassifierDiagnostic['transportCause'] => {
+    // Inspect only known codes/names, never retain messages, URLs or stacks.
+    if (signal.aborted) return signal.reason?.name === 'TimeoutError' ? 'timeout' : 'cancelled'
+    const value = error as { name?: unknown; code?: unknown; cause?: { code?: unknown } } | null
+    if (value?.name === 'TimeoutError') return 'timeout'
+    if (value?.name === 'AbortError') return 'cancelled'
+    const code = value?.cause?.code ?? value?.code
+    return transportCauses.find(item => item !== 'timeout' && item !== 'cancelled' && item === code) ?? 'unknown'
+  }
   let response: Response
   try {
     response = await request(url, {
-      method: 'POST', redirect: 'error', signal: cancel ? AbortSignal.any([cancel, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+      method: 'POST', redirect: 'error', signal,
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: config.model, stream: false, max_tokens: 512, messages: [{ role: 'system', content: instruction }, { role: 'user', content: message }] })
     })
-  } catch { throw new Error('Free LLM no respondió a tiempo o no está disponible.') }
+  } catch (error) {
+    report({ stage: 'request', errorCode: 'transport_error', transportCause: transportCause(error) })
+    throw new Error('Free LLM no respondió a tiempo o no está disponible.')
+  }
   report({ httpStatus: response.status })
   if (!response.ok) {
+    report({ httpStatus: response.status, stage: 'http', errorCode: 'http_error' })
     void response.body?.cancel().catch(() => undefined)
     const hint = response.status === 401 ? 'Revisá la clave unificada.' : response.status === 429 ? 'Se alcanzó el límite del proveedor gratuito.' : 'Revisá los modelos habilitados en Free LLM.'
     throw new Error(`Free LLM HTTP ${response.status}. ${hint}`)
   }
-  if (!response.body) throw new Error('Free LLM no entregó una respuesta válida.')
+  if (!response.body) {
+    report({ stage: 'response_body', errorCode: 'missing_body', responseBytes: 0 })
+    throw new Error('Free LLM no entregó una respuesta válida.')
+  }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
@@ -59,20 +82,32 @@ export async function classifyAttention(config: AIConfiguration, message: string
       const { done, value } = await reader.read()
       if (done) break
       size += value.byteLength
-      if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error('Free LLM entregó una respuesta demasiado grande.') }
+      if (size > MAX_RESPONSE_BYTES) {
+        report({ stage: 'response_body', errorCode: 'response_too_large', responseBytes: size })
+        await reader.cancel(); throw new Error('Free LLM entregó una respuesta demasiado grande.')
+      }
       chunks.push(value)
     }
   } catch (error) {
     if (size > MAX_RESPONSE_BYTES) throw error
+    report({ stage: 'response_body', errorCode: 'body_read_error', responseBytes: size, transportCause: transportCause(error) })
     throw new Error('Free LLM no respondió a tiempo o no está disponible.')
   } finally { reader.releaseLock() }
+  report({ responseBytes: size })
+  let stage: ClassifierDiagnostic['stage'] = 'envelope'
+  let errorCode: ClassifierDiagnostic['errorCode'] = 'invalid_envelope_json'
   try {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    const reportedModel = typeof body.model === 'string' && /^[\w.:/+-]{1,120}$/.test(body.model) ? body.model : undefined
-    report({ reportedModel })
+    const reportedModel = typeof body?.model === 'string' && /^[\w.:/+-]{1,120}$/.test(body.model) ? body.model : undefined
+    const finishReason = finishReasons.find(item => item === body?.choices?.[0]?.finish_reason)
+    report({ reportedModel, finishReason })
     const content = body?.choices?.[0]?.message?.content
+    stage = 'content'; errorCode = content == null ? 'missing_content' : 'invalid_content_type'
     if (typeof content !== 'string') throw new Error()
+    report({ contentChars: content.length })
+    stage = 'model_json'; errorCode = 'invalid_model_json'
     const value = JSON.parse(content.trim().replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, '$1'))
+    stage = 'decision'; errorCode = 'invalid_decision'
     if (!['actionable', 'informational', 'uncertain'].includes(value?.decision)) throw new Error()
     const codes: Record<string, string[]> = { actionable: ['approval', 'choice', 'missing_information', 'blocked'], informational: ['progress', 'background_work', 'completed_no_action', 'quoted_or_resolved'], uncertain: ['insufficient_context'] }
     const reasonCode: AuditReason = codes[value.decision].includes(value.reasonCode) ? value.reasonCode : 'not_reported'
@@ -81,5 +116,8 @@ export async function classifyAttention(config: AIConfiguration, message: string
     // Model prose stays out of notices/state/mobile. Only an opted-in encrypted
     // audit receives the short explanation; never request chain-of-thought.
     return aiClassification(value.decision)
-  } catch { throw new Error('Free LLM no entregó una respuesta válida de clasificación.') }
+  } catch {
+    report({ stage, errorCode })
+    throw new Error('Free LLM no entregó una respuesta válida de clasificación.')
+  }
 }

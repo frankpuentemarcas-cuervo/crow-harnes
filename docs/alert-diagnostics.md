@@ -17,6 +17,8 @@ No recupera respuestas anteriores. Si no hay registro para una respuesta nueva, 
 | Modelo solicitado / reportado | `auto` puede ser la estrategia solicitada; el modelo reportado es lo que devuelve la API, no una comprobación independiente del proveedor. |
 | Decisión / motivo / justificación | Resultado del modelo. La justificación es breve y puede ser incorrecta; no es su razonamiento interno. Si falta el motivo, se indica sin inventarlo. |
 | Cola / API / HTTP | Espera local, duración del intento y estado HTTP cuando hubo respuesta. Los fallos usan el motivo de la alerta preventiva. |
+| Etapa / código / transporte | Separa configuración, entrada, solicitud, HTTP, lectura, JSON HTTP, contenido, JSON del modelo y decisión inválida. Transporte distingue timeout, cancelación y códigos conocidos (p. ej. `ECONNREFUSED`); el resto figura como `unknown`, sin mensajes ni stacks. |
+| Respuesta de la API | Bytes recibidos (parciales si falla la lectura), caracteres del contenido y `finish_reason` conocido. `length` es evidencia de un límite reportado, NO prueba que ese límite causó el error. Campos ausentes en registros anteriores. |
 | Texto truncado / redactado | El análisis recibe como máximo 24.000 caracteres. El log indica truncamiento y oculta claves configuradas y patrones comunes de credenciales. No promete detectar todo secreto presente en texto libre. |
 | Sonido pendiente / informativo / revisado / repetido / restaurado / antiguo | Motivo por el cual no se programó audio. |
 | Sonido programado / finalizado / error | Estado de Web Audio. **No prueba que los altavoces sonaran**, ni observa el volumen o silenciamiento de Windows. |
@@ -30,3 +32,5 @@ No recupera respuestas anteriores. Si no hay registro para una respuesta nueva, 
 - No se registran cabeceras HTTP ni claves configuradas. El texto empresarial sigue siendo sensible aunque algunas credenciales estén redactadas.
 
 Los errores del diagnóstico no deben interrumpir las terminales ni cambiar una clasificación válida. El panel muestra problemas de almacenamiento o descifrado; un registro dañado se conserva hasta su expiración o borrado manual.
+
+No se captura la respuesta cruda del proveedor. Estos datos identifican la etapa y clase de fallo; no permiten reconstruir el JSON inválido ni garantizar la causa exacta del contenido. No cambian la decisión, el fallback ni el sonido.

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SecretEncryption } from './alert-ai-settings'
+import { classifierStages, classifierErrorCodes, finishReasons, transportCauses } from '../shared/alert-diagnostics.ts'
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, AttentionAudit, AuditRef, NoticeSoundOutcome } from '../shared/alert-diagnostics'
 
 const TTL = 7 * 86400000
@@ -67,6 +68,15 @@ export class AlertAuditStore implements AttentionAudit {
     // No generic object spreads: credentials/headers are never an audit field.
     for (const field of ['classification', 'reasonCode', 'explanation', 'reportedModel', 'httpStatus', 'queueMs', 'inferenceMs', 'finishedAt', 'noticeEmitted'] as const) {
       if (patch[field] !== undefined) Object.assign(row, { [field]: patch[field] })
+    }
+    const allowed = { stage: classifierStages, errorCode: classifierErrorCodes, finishReason: finishReasons, transportCause: transportCauses }
+    for (const field of ['stage', 'errorCode', 'finishReason', 'transportCause'] as const) {
+      const value = patch[field]
+      if (typeof value === 'string' && (allowed[field] as readonly string[]).includes(value)) Object.assign(row, { [field]: value })
+    }
+    for (const field of ['responseBytes', 'contentChars'] as const) {
+      const value = patch[field]
+      if (Number.isSafeInteger(value) && value! >= 0) Object.assign(row, { [field]: value })
     }
     try { this.write(row) } catch { this.error = 'No se pudo actualizar el diagnóstico cifrado.' }
   }

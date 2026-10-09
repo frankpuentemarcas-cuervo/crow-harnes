@@ -140,3 +140,25 @@ test('broken audit storage cannot suppress an otherwise valid agent alert', asyn
   try { c.service.receive('host', c.event(1)); await tick(); assert.equal(c.emitted.at(-1).requiresAttention, true) }
   finally { c.cleanup() }
 })
+
+test('invalid provider reply reaches encrypted audit but not notices or state', async () => {
+  const { classifyAttention } = await import('../src/main/attention-classifier.ts')
+  const { AlertAuditStore } = await import('../src/main/alert-audit-store.ts')
+  const directory = mkdtempSync(join(tmpdir(), 'crow-audit-integration-'))
+  const encryption = { isEncryptionAvailable: () => true, encryptString: text => Buffer.from(text), decryptString: bytes => bytes.toString() }
+  const audit = new AlertAuditStore(directory, encryption); audit.setEnabled(true)
+  const body = JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: 'secret-provider-text' } }] })
+  const c = setup((config, message, cancel, observe) => classifyAttention(config, message, async () => new Response(body), 1000, cancel, observe), audit)
+  try {
+    c.service.receive('host', c.event(1)); await tick()
+    const row = audit.detail(audit.list()[0].id)
+    assert.equal(row.stage, 'model_json')
+    assert.equal(row.errorCode, 'invalid_model_json')
+    assert.equal(row.finishReason, 'length')
+    assert.equal(row.responseBytes, Buffer.byteLength(body))
+    assert.equal(row.classification.source, 'fallback')
+    assert.equal(c.emitted.at(-1).requiresAttention, true)
+    for (const text of [audit.exportJSON(), JSON.stringify(c.emitted), readFileSync(join(c.directory, 'state.json'), 'utf8')]) assert.ok(!text.includes('secret-provider-text'))
+    assert.ok(!JSON.stringify(c.emitted).includes('invalid_model_json'))
+  } finally { c.cleanup(); rmSync(directory, { recursive: true, force: true }) }
+})

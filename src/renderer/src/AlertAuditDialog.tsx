@@ -84,6 +84,8 @@ export function AlertAuditDialog({ hosts, sessionNames, onClose }: { hosts: Host
             <dt>Motivo declarado</dt><dd>{auditReasons[detail.reasonCode || 'not_reported']}</dd>
             <dt>Justificación breve del modelo</dt><dd>{detail.explanation || 'No informó una justificación.'}</dd>
             <dt>Diagnóstico del clasificador</dt><dd>{detail.classification?.detail}</dd>
+            {detail.errorCode && <><dt>Etapa / código de error</dt><dd>{detail.stage || '—'} / {detail.errorCode}{detail.transportCause ? ` · transporte: ${detail.transportCause}` : ''}</dd></>}
+            {(detail.responseBytes !== undefined || detail.contentChars !== undefined || detail.finishReason !== undefined) && <><dt>Respuesta de la API</dt><dd>{detail.responseBytes ?? '—'} bytes / {detail.contentChars ?? '—'} caracteres de contenido · finish_reason: {detail.finishReason || 'No informado'}{detail.finishReason === 'length' ? ' (límite reportado; no prueba la causa del fallo)' : ''}</dd></>}
             <dt>Cola / API / HTTP</dt><dd>{detail.queueMs ?? '—'} ms / {detail.inferenceMs ?? '—'} ms / {detail.httpStatus ?? '—'}</dd>
             <dt>Evento remoto / recepción local</dt><dd>{detail.eventAt} / {detail.receivedAt}</dd>
             <dt>Prompt / texto</dt><dd>{detail.promptVersion} · {detail.inputChars} caracteres{detail.inputTruncated ? ' · texto truncado' : ''}{detail.inputRedacted ? ' · secretos detectados ocultos' : ''}</dd>

@@ -87,3 +87,90 @@ test('mismatched or unknown reason codes are not invented; provider HTTP failure
   assert.equal(captured.at(-1).httpStatus, 429)
   assert.ok(!JSON.stringify(captured).includes('secret'))
 })
+
+test('failure diagnostics identify parsing stages without retaining provider text', async () => {
+  const cases = [
+    ['secret-test-key', 'envelope', 'invalid_envelope_json'],
+    ['null', 'content', 'missing_content'],
+    [JSON.stringify({ choices: [{ message: { content: 42 } }] }), 'content', 'invalid_content_type'],
+    [JSON.stringify({ choices: [{ message: { content: 'secret-test-key' } }] }), 'model_json', 'invalid_model_json'],
+    [JSON.stringify({ choices: [{ message: { content: '{"decision":"secret-test-key"}' } }] }), 'decision', 'invalid_decision']
+  ]
+  for (const [body, stage, errorCode] of cases) {
+    const captured = []
+    await assert.rejects(() => classifyAttention(config, 'Respuesta', async () => new Response(body), 1000, undefined, value => captured.push(value)), /respuesta válida/)
+    const diagnostic = Object.assign({}, ...captured)
+    assert.equal(diagnostic.stage, stage)
+    assert.equal(diagnostic.errorCode, errorCode)
+    assert.equal(diagnostic.responseBytes, Buffer.byteLength(body))
+    assert.ok(!JSON.stringify(captured).includes(config.apiKey))
+  }
+})
+
+test('metadata reports completion evidence, not inferred truncation or arbitrary strings', async () => {
+  for (const finish_reason of ['length', 'stop', 'secret-test-key']) {
+    const captured = []
+    const content = '{"decision":"informational"}'
+    const body = JSON.stringify({ choices: [{ finish_reason, message: { content } }] })
+    const result = await classifyAttention(config, 'Respuesta', async () => new Response(body), 1000, undefined, value => captured.push(value))
+    const diagnostic = Object.assign({}, ...captured)
+    assert.equal(result.decision, 'informational')
+    assert.equal(diagnostic.finishReason, finish_reason === config.apiKey ? undefined : finish_reason)
+    assert.equal(diagnostic.contentChars, content.length)
+    assert.equal(diagnostic.responseBytes, Buffer.byteLength(body))
+    assert.equal(diagnostic.errorCode, undefined)
+    assert.ok(!JSON.stringify(captured).includes(config.apiKey))
+  }
+})
+
+test('transport diagnostics allowlist causes and distinguish request from reading', async () => {
+  for (const code of ['ECONNREFUSED', 'ECONNRESET', 'secret-test-key']) {
+    const captured = []
+    await assert.rejects(() => classifyAttention(config, 'Respuesta', async () => { throw Object.assign(Error(config.apiKey), { cause: { code } }) }, 1000, undefined, value => captured.push(value)))
+    const diagnostic = Object.assign({}, ...captured)
+    assert.equal(diagnostic.stage, 'request')
+    assert.equal(diagnostic.errorCode, 'transport_error')
+    assert.equal(diagnostic.transportCause, code === config.apiKey ? 'unknown' : code)
+    assert.ok(!JSON.stringify(captured).includes(config.apiKey))
+  }
+  const captured = []
+  const response = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.error(Object.assign(Error(config.apiKey), { name: 'TimeoutError' })) } }))
+  await assert.rejects(() => classifyAttention(config, 'Respuesta', async () => response, 1000, undefined, value => captured.push(value)))
+  assert.equal(captured.at(-1).stage, 'response_body')
+  assert.equal(captured.at(-1).transportCause, 'timeout')
+  const cancel = new AbortController(); cancel.abort()
+  await assert.rejects(() => classifyAttention(config, 'Respuesta', async () => { throw Error(config.apiKey) }, 1000, cancel.signal, value => captured.push(value)))
+  assert.equal(captured.at(-1).transportCause, 'cancelled')
+})
+
+test('boundary failures carry structured diagnostics with unchanged public errors', async () => {
+  const cases = [
+    [' ', () => reply('actionable'), 'input', 'empty_input'],
+    ['x'.repeat(24001), () => reply('actionable'), 'input', 'input_too_large'],
+    ['Respuesta', () => new Response(null), 'response_body', 'missing_body'],
+    ['Respuesta', () => new Response('x'.repeat(65537)), 'response_body', 'response_too_large'],
+    ['Respuesta', () => new Response(config.apiKey, { status: 401 }), 'http', 'http_error']
+  ]
+  for (const [message, request, stage, errorCode] of cases) {
+    const captured = []
+    await assert.rejects(() => classifyAttention(config, message, async () => request(), 1000, undefined, value => captured.push(value)))
+    assert.equal(captured.at(-1).stage, stage)
+    assert.equal(captured.at(-1).errorCode, errorCode)
+    assert.ok(!JSON.stringify(captured).includes(config.apiKey))
+  }
+  const captured = []
+  await assert.rejects(() => classifyAttention({ ...config, baseURL: 'https://example.com/v1' }, 'Respuesta', fetch, 1000, undefined, value => captured.push(value)))
+  assert.equal(captured.at(-1).errorCode, 'invalid_url')
+})
+
+test('real stalled body preserves received byte count and reports timeout', async () => {
+  const server = createServer((_request, response) => { response.writeHead(200); response.write('abc') })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  const captured = []
+  try {
+    await assert.rejects(() => classifyAttention({ ...config, baseURL: `http://127.0.0.1:${server.address().port}/v1` }, 'Respuesta', fetch, 100, undefined, value => captured.push(value)), /no respondió/)
+    assert.equal(captured.at(-1).stage, 'response_body')
+    assert.equal(captured.at(-1).transportCause, 'timeout')
+    assert.equal(captured.at(-1).responseBytes, 3)
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})

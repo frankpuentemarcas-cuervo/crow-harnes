@@ -35,7 +35,10 @@ const assert=require('node:assert/strict')
 const fs=require('node:fs')
 const ts=require(${JSON.stringify(require.resolve('typescript'))})
 const exportsStore={}
-new Function('require','exports',ts.transpileModule(fs.readFileSync(${JSON.stringify(join(process.cwd(), 'src/main/alert-audit-store.ts'))},'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(require,exportsStore)
+const exportsDiagnostics={}
+new Function('exports',ts.transpileModule(fs.readFileSync(${JSON.stringify(join(process.cwd(), 'src/shared/alert-diagnostics.ts'))},'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(exportsDiagnostics)
+const storeRequire=id=>id==='../shared/alert-diagnostics.ts'?exportsDiagnostics:require(id)
+new Function('require','exports',ts.transpileModule(fs.readFileSync(${JSON.stringify(join(process.cwd(), 'src/main/alert-audit-store.ts'))},'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(storeRequire,exportsStore)
 app.setPath('userData',${JSON.stringify(join(temp, 'profile'))})
 app.disableHardwareAcceleration()
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms))
