@@ -1,6 +1,7 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'auth-required'
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, NoticeSoundOutcome } from './alert-diagnostics'
 import type { FreeLLMRuntimeStatus } from './free-llm-startup'
+import type { AccountUsageAPI } from './account-usage'
 
 export type Agent = 'shell' | 'claude' | 'codex' | 'agy'
 export type Mode = 'normal' | 'bypass'
@@ -184,7 +185,7 @@ export interface AlertSound {
   dataBase64: string
 }
 
-export interface CrowAPI {
+export interface CrowAPI extends AccountUsageAPI {
   getAlertAuditStatus(): Promise<AlertAuditStatus>
   setAlertAuditEnabled(enabled: boolean): Promise<AlertAuditStatus>
   listAlertAudit(): Promise<AlertAuditSummary[]>

@@ -11,6 +11,8 @@ import { AlertAISettingsStore } from './alert-ai-settings'
 import { AttentionService } from './attention-service'
 import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
+import { AccountUsageService } from './account-usage-service'
+import { createAccountUsageAdapters } from './account-usage-adapters'
 import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
 import { BridgeGateway } from './bridge-gateway'
 import { readBridgePolicy } from './bridge-policy'
@@ -26,6 +28,7 @@ let alertAISettings: AlertAISettingsStore
 let attention: AttentionService
 let freeLLM: FreeLLMRuntime
 let alertAudit: AlertAuditStore
+let accountUsage: AccountUsageService
 let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
 let mobile: MobileGateway
@@ -113,6 +116,11 @@ function registerIPC(): void {
   }
 
   handle('crow:clipboard-read', () => clipboard.readText())
+  handle('crow:accounts-list', () => accountUsage.list())
+  handle('crow:accounts-add', (input: unknown) => accountUsage.add(input))
+  handle('crow:accounts-login', (id: string) => accountUsage.login(id))
+  handle('crow:accounts-refresh', (id: string) => accountUsage.refresh(id))
+  handle('crow:accounts-remove', (id: string) => accountUsage.remove(id))
   handle('crow:audit-status', () => alertAudit.status())
   handle('crow:audit-enabled', (enabled: boolean) => alertAudit.setEnabled(enabled))
   handle('crow:audit-list', () => alertAudit.list())
@@ -299,6 +307,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   store = new Store(app.getPath('userData'))
+  accountUsage = new AccountUsageService(app.getPath('userData'), createAccountUsageAdapters())
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
@@ -323,4 +332,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); void bridge?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { accountUsage?.stop(); if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); void bridge?.stop(); for (const item of connections.values()) item.stop() })

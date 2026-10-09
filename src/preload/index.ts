@@ -7,6 +7,11 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  accountsList: () => ipcRenderer.invoke('crow:accounts-list'),
+  accountsAdd: (input) => ipcRenderer.invoke('crow:accounts-add', input),
+  accountsLogin: (id) => ipcRenderer.invoke('crow:accounts-login', id),
+  accountsRefresh: (id) => ipcRenderer.invoke('crow:accounts-refresh', id),
+  accountsRemove: (id) => ipcRenderer.invoke('crow:accounts-remove', id),
   getAlertAuditStatus: () => ipcRenderer.invoke('crow:audit-status'),
   setAlertAuditEnabled: (enabled) => ipcRenderer.invoke('crow:audit-enabled', enabled),
   listAlertAudit: () => ipcRenderer.invoke('crow:audit-list'),

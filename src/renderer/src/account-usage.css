@@ -1,0 +1,16 @@
+.account-usage-dialog { width: min(760px, calc(100vw - 32px)); }
+.account-add-form { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin: 20px 0; }
+.account-add-form label { flex: 1; min-width: 150px; }
+.account-panel-status, .account-security-note { font-size: 12px; color: var(--muted); }
+.account-list { display: grid; gap: 14px; margin: 16px 0; }
+.account-card { border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+.account-card-heading { display: flex; gap: 12px; justify-content: space-between; align-items: start; }
+.account-card h3 { margin: 0 0 6px; overflow-wrap: anywhere; }
+.account-card small { color: var(--muted); overflow-wrap: anywhere; }
+.account-state { font-size: 12px; flex-shrink: 0; }
+.account-state.stale, .account-state.error, .account-state.rate-limited { color: #fbbf24; }
+.account-quota { margin: 16px 0; }
+.account-quota > div { display: flex; gap: 12px; justify-content: space-between; font-size: 13px; }
+.account-quota progress { width: 100%; height: 10px; accent-color: var(--accent); margin: 7px 0; }
+.account-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+@media (max-width: 560px) { .account-card-heading { flex-direction: column; } .account-add-form button { width: 100%; } }
