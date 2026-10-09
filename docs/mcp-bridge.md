@@ -1,6 +1,6 @@
 # Puente MCP de Crow: primer corte de prueba
 
-Implementado en código, **no publicado ni validado con agentes reales**. Un cliente MCP local puede descubrir destinos aprobados, registrar una terminal existente como orquestador, enviar un saludo fijo y recuperar su resultado correlacionado. No hay despacho libre de tareas, cambios de negocio ni acceso shell genérico.
+Publicado desde **v0.1.26 como experimental opt-in, aún no validado con agentes reales**. Un cliente MCP local puede descubrir destinos aprobados, registrar una terminal existente como orquestador, enviar un saludo fijo y recuperar su resultado correlacionado. No hay despacho libre de tareas, cambios de negocio ni acceso shell genérico.
 
 ## Arquitectura y autoridad
 
