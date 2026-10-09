@@ -65,3 +65,25 @@ test('real local HTTP request enforces timeout without waiting on a stalled mode
     await assert.rejects(() => classifyAttention({ ...config, baseURL: `http://127.0.0.1:${server.address().port}/v1` }, 'Respuesta', fetch, 35), /no respondió/i)
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
 })
+
+test('diagnostics capture reported model and bounded explanation without leaking them into notices', async () => {
+  const captured = []
+  const response = () => new Response(JSON.stringify({ model: 'provider/model-a', choices: [{ message: { content: JSON.stringify({ decision: 'actionable', reasonCode: 'choice', explanation: 'Pide elegir entre dos opciones.' }) } }] }))
+  const result = await classifyAttention(config, '¿A o B?', async () => response(), 1000, undefined, value => captured.push(value))
+  assert.equal(result.explanation, undefined)
+  assert.equal(captured.at(-1).reportedModel, 'provider/model-a')
+  assert.equal(captured.at(-1).reasonCode, 'choice')
+  assert.equal(captured.at(-1).explanation, 'Pide elegir entre dos opciones.')
+  assert.equal(captured[0].httpStatus, 200)
+  // Diagnostics must never turn a valid classification into an API failure.
+  assert.equal((await classifyAttention(config, 'Respuesta', async () => response(), 1000, undefined, () => { throw Error('disk') })).decision, 'actionable')
+})
+
+test('mismatched or unknown reason codes are not invented; provider HTTP failures are observable', async () => {
+  const captured = []
+  await classifyAttention(config, 'Respuesta', async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"decision":"informational","reasonCode":"approval"}' } }] })), 1000, undefined, value => captured.push(value))
+  assert.equal(captured.at(-1).reasonCode, 'not_reported')
+  await assert.rejects(() => classifyAttention(config, 'Respuesta', async () => new Response('secret', { status: 429 }), 1000, undefined, value => captured.push(value)))
+  assert.equal(captured.at(-1).httpStatus, 429)
+  assert.ok(!JSON.stringify(captured).includes('secret'))
+})

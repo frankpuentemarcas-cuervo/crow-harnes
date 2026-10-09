@@ -1,5 +1,6 @@
 import type { AlertAISettings, AlertAIStatus, AttentionClassification, Notice, RemoteEvent } from '../shared/types'
 import { classifyAttention, fallbackClassification, type AIConfiguration } from './attention-classifier.ts'
+import type { AttentionAudit, AuditRef, ClassifierDiagnostic } from '../shared/alert-diagnostics'
 
 interface NoticeStore {
   recordEvent(hostId: string, event: RemoteEvent, classification?: AttentionClassification): Notice | undefined
@@ -9,8 +10,8 @@ interface Settings {
   snapshot(): AlertAISettings
   configuration(): AIConfiguration
 }
-interface Job { hostId: string; event: RemoteEvent; generation: number; controller: AbortController }
-type Classifier = (config: AIConfiguration, message: string, cancel?: AbortSignal) => Promise<AttentionClassification>
+interface Job { hostId: string; event: RemoteEvent; generation: number; controller: AbortController; auditRef?: AuditRef; receivedAt: number }
+type Classifier = (config: AIConfiguration, message: string, cancel?: AbortSignal, observe?: (diagnostic: ClassifierDiagnostic) => void) => Promise<AttentionClassification>
 const rules = (event: RemoteEvent): AttentionClassification => ({ source: 'rules', decision: event.requiresAttention ? 'actionable' : 'informational', detail: 'Clasificación local por reglas; IA desactivada.' })
 
 // One bounded queue shared by every host. Never block SSH polling or PTYs on AI.
@@ -27,14 +28,16 @@ export class AttentionService {
   private readonly emitStatus: (status: AlertAIStatus) => void
   private readonly classify: Classifier
   private readonly now: () => number
+  private readonly audit?: AttentionAudit
 
-  constructor(store: NoticeStore, settings: Settings, emit: (notice: Notice) => void, emitStatus: (status: AlertAIStatus) => void, classify: Classifier = (config, message, cancel) => classifyAttention(config, message, fetch, 15000, cancel), now = Date.now) {
+  constructor(store: NoticeStore, settings: Settings, emit: (notice: Notice) => void, emitStatus: (status: AlertAIStatus) => void, classify: Classifier = (config, message, cancel, observe) => classifyAttention(config, message, fetch, 15000, cancel, observe), now = Date.now, audit?: AttentionAudit) {
     this.store = store
     this.settings = settings
     this.emit = emit
     this.emitStatus = emitStatus
     this.classify = classify
     this.now = now
+    this.audit = audit
   }
 
   enabled(): boolean { return this.settings.snapshot().enabled }
@@ -52,10 +55,13 @@ export class AttentionService {
     }
     const notice = this.store.recordEvent(hostId, event, initial)
     if (!notice) return // Cursor dedupe also prevents duplicate model calls/sounds.
+    let auditRef: AuditRef | undefined
+    try { auditRef = this.audit?.begin(hostId, event, enabled ? this.settings.snapshot().model : '(reglas locales)') } catch { /* Never block agents on diagnostic I/O. */ }
+    this.auditUpdate(auditRef, { classification: initial, noticeEmitted: true, finishedAt: initial.source === 'pending' ? undefined : new Date(this.now()).toISOString() })
     this.emit(notice)
     if (initial.source === 'fallback') this.setStatus({ state: 'error', detail: initial.detail })
     if (initial.source !== 'pending') return
-    this.jobs.push({ hostId, event, generation: this.generation, controller: new AbortController() })
+    this.jobs.push({ hostId, event, generation: this.generation, controller: new AbortController(), auditRef, receivedAt: this.now() })
     this.drain()
   }
 
@@ -65,6 +71,7 @@ export class AttentionService {
     this.testController?.abort()
     for (const job of [...this.jobs, ...this.active]) {
       job.controller.abort()
+      this.auditUpdate(job.auditRef, { explanation: 'Análisis cancelado al cambiar la configuración de Free LLM.' })
       this.finish(job, rules(job.event))
     }
     this.jobs = []
@@ -74,7 +81,10 @@ export class AttentionService {
   stop(): void {
     this.generation++
     this.testController?.abort()
-    for (const job of this.active) job.controller.abort()
+    for (const job of [...this.jobs, ...this.active]) {
+      job.controller.abort()
+      this.auditUpdate(job.auditRef, { classification: fallbackClassification('El análisis se interrumpió al cerrar Crow.'), finishedAt: new Date(this.now()).toISOString(), noticeEmitted: false })
+    }
     this.jobs = []
   }
 
@@ -107,7 +117,12 @@ export class AttentionService {
 
   private finish(job: Job, classification: AttentionClassification): void {
     const notice = this.store.updateClassification(job.hostId, job.event.id, classification)
+    this.auditUpdate(job.auditRef, { classification, finishedAt: new Date(this.now()).toISOString(), noticeEmitted: !!notice })
     if (notice) this.emit(notice)
+  }
+
+  private auditUpdate(ref: AuditRef | undefined, patch: Parameters<AttentionAudit['update']>[1]): void {
+    try { this.audit?.update(ref, patch) } catch { /* A full disk must not break an alert. */ }
   }
 
   private drain(): void {
@@ -122,7 +137,9 @@ export class AttentionService {
   }
 
   private async run(job: Job): Promise<void> {
+    let startedAt: number | undefined
     try {
+      this.auditUpdate(job.auditRef, { queueMs: Math.max(0, this.now() - job.receivedAt) })
       if (this.now() - Date.parse(job.event.at) > 90000) {
         const detail = 'El análisis esperó demasiado en la cola. Revisá esta terminal.'
         this.finish(job, fallbackClassification(detail))
@@ -131,7 +148,10 @@ export class AttentionService {
       }
       if (this.now() < this.cooldownUntil) throw new Error('Free LLM está temporalmente en pausa tras un error.')
       this.setStatus({ state: 'working', detail: 'Analizando respuestas de agentes…' })
-      const result = await this.classify(this.settings.configuration(), job.event.message!, job.controller.signal)
+      startedAt = this.now()
+      const result = await this.classify(this.settings.configuration(), job.event.message!, job.controller.signal, diagnostic => {
+        if (job.generation === this.generation) this.auditUpdate(job.auditRef, diagnostic)
+      })
       if (job.generation !== this.generation) return
       this.finish(job, result)
       this.setStatus({ state: result.decision === 'uncertain' ? 'error' : 'ok', detail: result.detail })
@@ -141,6 +161,6 @@ export class AttentionService {
       this.cooldownUntil = this.now() + 30000
       this.finish(job, fallbackClassification(`${detail} Alerta preventiva: revisá esta terminal.`))
       this.setStatus({ state: 'error', detail })
-    }
+    } finally { if (startedAt !== undefined && job.generation === this.generation) this.auditUpdate(job.auditRef, { inferenceMs: Math.max(0, this.now() - startedAt) }) }
   }
 }

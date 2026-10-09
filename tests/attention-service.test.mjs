@@ -8,13 +8,13 @@ import { AttentionService } from '../src/main/attention-service.ts'
 import { aiClassification } from '../src/main/attention-classifier.ts'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
-function setup(classify) {
+function setup(classify, audit, now = Date.now) {
   const directory = mkdtempSync(join(tmpdir(), 'crow-attention-'))
   const store = new Store(directory)
   const emitted = [], statuses = []
-  const settings = { enabled: true }
+  const settings = { enabled: true, model: 'auto' }
   const api = { snapshot: () => settings, configuration: () => ({ baseURL: 'http://127.0.0.1:31415/v1', model: 'auto', apiKey: 'test-key' }) }
-  const service = new AttentionService(store, api, notice => emitted.push(structuredClone(notice)), status => statuses.push(status), classify)
+  const service = new AttentionService(store, api, notice => emitted.push(structuredClone(notice)), status => statuses.push(status), classify, now, audit)
   const event = (seq, patch = {}) => ({ id: String(seq), seq, sessionId: 'terminal-a', kind: 'turn-complete', at: new Date().toISOString(), requiresAttention: false, message: '¿Me autorizás a resetear las contraseñas? private-marker', ...patch })
   return { service, store, emitted, statuses, settings, event, directory, cleanup: () => { service.stop(); rmSync(directory, { recursive: true, force: true }) } }
 }
@@ -109,4 +109,34 @@ test('test connection evaluates three fictional semantic cases and exposes failu
     assert.equal(c.emitted.length, 0)
     assert.equal((await c.service.testConnection()).state, 'error')
   } finally { c.cleanup() }
+})
+
+test('audit correlates input, reported model, timing and verdict while keeping notices private', async () => {
+  let now = Date.now()
+  const begins = [], updates = []
+  const audit = { begin: (...args) => { begins.push(args); return { id: 'ref', generation: 0 } }, update: (ref, patch) => updates.push({ ref, patch }) }
+  const c = setup(async (_config, _message, _cancel, observe) => {
+    observe({ httpStatus: 200, reportedModel: 'model-a', reasonCode: 'approval', explanation: 'private-explanation' })
+    now += 55
+    return aiClassification('actionable')
+  }, audit, () => now)
+  try {
+    const event = c.event(1)
+    c.service.receive('host', event); c.service.receive('host', event)
+    await tick()
+    assert.equal(begins.length, 1)
+    assert.equal(begins[0][1].message, event.message)
+    assert.equal(begins[0][2], 'auto')
+    assert.ok(updates.some(item => item.patch.inferenceMs === 55))
+    assert.ok(updates.some(item => item.patch.classification?.decision === 'actionable' && item.patch.finishedAt))
+    assert.ok(updates.some(item => item.patch.reportedModel === 'model-a'))
+    assert.ok(!JSON.stringify(c.emitted).includes('private-explanation'))
+    assert.ok(!readFileSync(join(c.directory, 'state.json'), 'utf8').includes('private-explanation'))
+  } finally { c.cleanup() }
+})
+
+test('broken audit storage cannot suppress an otherwise valid agent alert', async () => {
+  const c = setup(async () => aiClassification('actionable'), { begin: () => { throw Error('disk') }, update: () => { throw Error('disk') } })
+  try { c.service.receive('host', c.event(1)); await tick(); assert.equal(c.emitted.at(-1).requiresAttention, true) }
+  finally { c.cleanup() }
 })
