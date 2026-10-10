@@ -33,4 +33,4 @@ El registro `access.json` requiere revisión manual si está dañado; no se borr
 
 ## Validación pendiente en entorno real
 
-Las pruebas unitarias cubren la matriz de autorización, revocación, replay, roots, hooks, credenciales y reservas. Windows no permite comprobar PTY Linux ni enlaces simbólicos sin privilegios; esas pruebas deben ejecutarse también en Linux antes de desplegar. No se compiló, publicó ni reinició ningún host durante esta implementación.
+Las pruebas unitarias cubren la matriz de autorización, revocación, replay, roots, hooks, credenciales y reservas. El flujo de publicación ejecuta además las pruebas Go y del instalador en Linux antes de compilar el servicio. La integración real con agentes y ERPNext sigue pendiente; publicar una versión no actualiza ni reinicia tus hosts.
