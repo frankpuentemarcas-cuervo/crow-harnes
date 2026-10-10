@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Crow ERP QA</title></head><body><div id="root"></div>
+<script type="module">
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { ERPTaskKanban } from '/src/renderer/src/ERPTaskKanban.tsx'
+import '/src/renderer/src/styles.css'
+let checkCount=0, syncCount=0, fail=false, finish
+let snapshot={connection:{configured:true,url:'https://fictional.example.org',allowAIClassification:false},tasks:[],links:{}}
+window.__erpQA={counts:()=>({checkCount,syncCount}), release:()=>finish?.(), fail:()=>{fail=true}}
+window.crow={
+ erpSnapshot:async()=>structuredClone(snapshot), erpProjects:async()=>[],onAccessChanged:()=>()=>{},
+ erpTestConnection:async()=>{checkCount++;await new Promise(resolve=>{finish=resolve});if(fail)throw new Error('QA conexión rechazada');snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'}};return structuredClone(snapshot)},
+ erpSync:async()=>{syncCount++;snapshot={...snapshot,tasks:Array.from({length:2501},(_,i)=>({key:String(i),name:'TASK-'+i,subject:'Fictional '+i,description:'QA data',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10 12:00:00',stage:'review',stale:false}))};return structuredClone(snapshot)}
+}
+createRoot(document.getElementById('root')).render(React.createElement(ERPTaskKanban,{onClose:()=>{},onTerminal:()=>{throw new Error('No real dispatch')}}))
+</script></body></html>

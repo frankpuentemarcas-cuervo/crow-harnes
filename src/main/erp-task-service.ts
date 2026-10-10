@@ -36,6 +36,7 @@ export class ERPTaskService {
   private abort = new AbortController()
   private stopped = false
   private classifying = false
+  private reading = false
   private recoveryRequired = false
   private encryption: SecretEncryption
   private dependencies: ERPTaskDependencies
@@ -102,12 +103,38 @@ export class ERPTaskService {
     this.abort.abort(); this.abort = new AbortController(); this.generation++; this.approvals.clear()
     this.connection = next; if (changed) { this.cards.clear(); this.links = Object.create(null) }; this.error = undefined; this.persist(); return this.snapshot()
   }
-  async testConnection(): Promise<ERPTaskSnapshot> { return this.sync() }
-  async sync(): Promise<ERPTaskSnapshot> {
-    if (this.pending.size) throw new Error('Esperá que termine el despacho antes de sincronizar.')
+  private discardOtherIdentity(identity: string): void {
+    if (this.connection?.identity && this.connection.identity !== identity) {
+      this.cards.clear(); this.links = Object.create(null); this.approvals.clear()
+      this.connection.identity = undefined; this.persist()
+    }
+  }
+  async testConnection(): Promise<ERPTaskSnapshot> {
+    if (this.pending.size || this.reading) throw new Error('Esperá que termine la consulta o el despacho antes de probar la conexión.')
     const client = this.client(), generation = this.generation
+    this.reading = true; this.approvals.clear()
     try {
-      const identity = await client.identity(), tasks = await client.tasks()
+      const identity = await client.identity()
+      this.ensure(); if (generation !== this.generation) throw new Error('La integración cambió durante la consulta.')
+      this.discardOtherIdentity(identity)
+      await client.checkTaskAccess()
+      this.ensure(); if (generation !== this.generation || this.pending.size) throw new Error('La integración cambió durante la consulta.')
+      // This proves authentication/access, not freshness of cached Task details.
+      this.connection!.identity = identity; this.error = undefined; this.persist(); return this.snapshot()
+    } catch (error) {
+      if (generation === this.generation) { for (const card of this.cards.values()) card.stale = true; this.approvals.clear(); this.error = 'No se pudo verificar la conexión ERP. Las Tasks anteriores no autorizan ejecuciones.' }
+      throw error
+    } finally { this.reading = false }
+  }
+  async sync(): Promise<ERPTaskSnapshot> {
+    if (this.pending.size || this.reading) throw new Error('Esperá que termine la consulta o el despacho antes de sincronizar.')
+    const client = this.client(), generation = this.generation
+    this.reading = true; this.approvals.clear()
+    try {
+      const identity = await client.identity()
+      this.ensure(); if (generation !== this.generation) throw new Error('La integración cambió durante la consulta.')
+      this.discardOtherIdentity(identity)
+      const tasks = await client.tasks()
       this.ensure(); if (generation !== this.generation || this.pending.size) throw new Error('La integración cambió durante la consulta.')
       if (this.connection!.identity && this.connection!.identity !== identity) { this.cards.clear(); this.approvals.clear() }
       this.connection!.identity = identity
@@ -126,9 +153,10 @@ export class ERPTaskService {
       for (const card of this.cards.values()) if (!next.has(card.key) && card.jobId) next.set(card.key, { ...card, stale: true })
       this.cards = next; this.error = undefined; this.persist(); return this.snapshot()
     } catch (error) { if (generation === this.generation) { for (const card of this.cards.values()) card.stale = true; this.approvals.clear(); this.error = 'No se pudieron actualizar las Tasks. El estado anterior no autoriza ejecuciones.' }; throw error }
+    finally { this.reading = false }
   }
   private record(card: ERPTaskCard): ERPTaskRecord { return { name: card.name, subject: card.subject, description: card.description, project: card.erpProject, status: card.erpStatus, priority: card.priority, modified: card.modified } }
-  private card(key: string): ERPTaskCard { this.ensure(); const card = this.cards.get(key); if (!card || card.stale) throw new Error('Actualizá la Task antes de continuar.'); return card }
+  private card(key: string): ERPTaskCard { this.ensure(); if (this.reading) throw new Error('Esperá que termine la consulta ERP antes de continuar.'); const card = this.cards.get(key); if (!card || card.stale) throw new Error('Actualizá la Task antes de continuar.'); return card }
   private project(id: string, hostId?: string): ERPProjectCandidate { const project = this.dependencies.projects().find(candidate => candidate.id === id && (!hostId || candidate.hostId === hostId)); if (!project) throw new Error('Proyecto no permitido o no disponible.'); return project }
   linkProject(erpProject: string, projectId: string): ERPTaskSnapshot {
     this.ensure(); this.project(projectId); if (typeof erpProject !== 'string' || !erpProject.trim() || erpProject.length > 500) throw new Error('Proyecto ERP inválido.')
