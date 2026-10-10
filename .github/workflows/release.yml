@@ -77,6 +77,9 @@ jobs:
       - name: Test Free LLM startup after SSH unlock in isolated Electron
         run: node tests/free-llm-startup-electron.mjs
 
+      - name: Test ERP task pagination in isolated Electron
+        run: node tests/erp-kanban-pagination-electron.mjs
+
       - name: Type-check sources
         run: npm run typecheck
 

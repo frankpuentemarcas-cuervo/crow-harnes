@@ -2,6 +2,8 @@
 
 Real Capacitor/React/xterm Android client for Crow on **Windows**. Linux hosts remain behind the open, awake Windows gateway. Local web bundle and Capacitor sync passed after explicit build authorization. **Native compilation and APK generation run in CI**, not on this SDK-less workstation. No emulator or phone validation has been performed.
 
+Initial [Android CI run38074210670](https://github.com/frankpuentemarcas-cuervo/crow-harnes/actions/runs/38074210670) passed native compilation, 5 JVM policy tests and signed debug APK/manifest/local-bundle verification. The downloaded dispatch APK checksum was independently verified against its SHA256 file. Each release reruns this workflow and generates its own APK/checksum; a dispatch artifact is not automatically the release artifact.
+
 ## Debug APK CI
 
 `.github/workflows/android-validation.yml` supports manual `workflow_dispatch` and reusable `workflow_call`. It installs Java21/SDK36/build-tools36.0.0 **on the GitHub runner only**, executes package tests and native JVM tests, bundles local assets, assembles and verifies a debug APK, then uploads:
@@ -21,7 +23,7 @@ npm run typecheck
 npm test
 ```
 
-Tests execute real JS enrollment validation, terminal byte encoding/replay cursor, readonly grants, input limits, quota freshness and static native security/project checks. Static checks do **not** prove Android compilation, TLS handshakes or device behavior. Java JUnit policy tests are included under `android/app/src/test/java/dev/crow/companion`; they remain unexecuted.
+Tests execute real JS enrollment validation, terminal byte encoding/replay cursor, readonly grants, input limits, quota freshness and static native security/project checks. Static checks do **not** prove Android compilation, TLS handshakes or device behavior. Java JUnit policy tests under `android/app/src/test/java/dev/crow/companion` passed **5/5 in CI**; they were not executed locally and do not replace real-device acceptance.
 
 `npm run dev` offers a local UI development page, but native pairing/network calls deliberately have **no browser implementation or fake production data**. Camera and secure networking require Android.
 
