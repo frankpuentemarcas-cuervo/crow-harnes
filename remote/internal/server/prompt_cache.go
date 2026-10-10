@@ -214,7 +214,7 @@ func postClaudeCache(cache *PromptCache) error {
 	if err != nil {
 		return err
 	}
-	token, err := os.ReadFile(filepath.Join(home, ".local", "share", "crow-harness", "token"))
+	token, err := hookCredential(home)
 	if err != nil {
 		return err
 	}

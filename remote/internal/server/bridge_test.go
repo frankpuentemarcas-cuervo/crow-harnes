@@ -22,7 +22,7 @@ func helloFixture(t *testing.T) (*App, *http.ServeMux, string, *os.File) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { r.Close(); w.Close() })
+	t.Cleanup(func() { w.Close(); r.Close() })
 	id := strings.Repeat("a", 32)
 	a := &App{dir: t.TempDir(), token: "test-only", bridge: mailbox, sessions: map[string]*session{
 		id: {pty: w, info: SessionInfo{ID: id, Root: "/empty-probe", Agent: "claude", Mode: "normal", State: "running", AgentState: "waiting", HooksActive: true}, subs: make(map[chan Frame]struct{})},

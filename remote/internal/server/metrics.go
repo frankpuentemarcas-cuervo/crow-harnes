@@ -79,7 +79,7 @@ func parseMemInfo(data []byte) (total, available uint64, err error) {
 	return total, available, nil
 }
 
-func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	stat, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		http.Error(w, "CPU metrics unavailable", http.StatusServiceUnavailable)
@@ -119,7 +119,7 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	a.mu.RLock()
 	for id, s := range a.sessions {
 		s.mu.Lock()
-		if s.info.State == "sleeping" {
+		if s.info.State == "sleeping" && a.visible(requestPrincipal(r), s.info) {
 			sleeping[id] = struct{}{}
 		}
 		s.mu.Unlock()

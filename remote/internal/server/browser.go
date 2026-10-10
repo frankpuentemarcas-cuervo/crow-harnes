@@ -35,7 +35,8 @@ func browserURL(raw string) (string, error) {
 	return parsed.String(), nil
 }
 
-func (a *App) getBrowser(root string) (*browser, error) {
+func (a *App) getBrowser(root string) (*browser, error) { return a.getBrowserOwned(root, "") }
+func (a *App) getBrowserOwned(root, owner string) (*browser, error) {
 	canonical, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
@@ -44,7 +45,7 @@ func (a *App) getBrowser(root string) (*browser, error) {
 	if err != nil || !stat.IsDir() {
 		return nil, errors.New("project folder does not exist")
 	}
-	keyBytes := sha256.Sum256([]byte(canonical))
+	keyBytes := sha256.Sum256([]byte(owner + "\x00" + canonical))
 	key := hex.EncodeToString(keyBytes[:12])
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -76,7 +77,7 @@ func (a *App) handleBrowserOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	b, err := a.getBrowser(body.Root)
+	b, err := a.getBrowserOwned(body.Root, browserOwner(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -94,7 +95,7 @@ func (a *App) handleBrowserOpen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleBrowserFrame(w http.ResponseWriter, r *http.Request) {
-	b, err := a.getBrowser(r.URL.Query().Get("root"))
+	b, err := a.getBrowserOwned(r.URL.Query().Get("root"), browserOwner(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -141,7 +142,7 @@ func (a *App) handleBrowserInput(w http.ResponseWriter, r *http.Request) {
 	if !requestJSON(w, r, &body) {
 		return
 	}
-	b, err := a.getBrowser(body.Root)
+	b, err := a.getBrowserOwned(body.Root, browserOwner(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

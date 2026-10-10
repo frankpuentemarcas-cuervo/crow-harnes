@@ -10,6 +10,8 @@ import { promisify } from 'node:util'
 import WebSocket from 'ws'
 import type { ConnectionStatus, Host, RemoteEvent, TerminalFrame } from '../shared/types'
 import { Store } from './store'
+import { HostCredentialVault } from './host-credential-vault'
+import type { AccessStatus, AccessIdentity, AccessUserInput, AccessCredentialResult, AccessPrincipal } from '../shared/access'
 import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './encrypted-ssh'
 import { PassphraseVault } from './passphrase-vault'
 import { remoteApiError } from './remote-errors'
@@ -44,6 +46,7 @@ export class Connection {
   private pendingPassphrase?: string
   private localPort = 0
   private token = ''
+  private credentialVault: HostCredentialVault
   private currentStatus: ConnectionStatus = 'disconnected'
   private desired = false
   private connecting?: Promise<void>
@@ -53,7 +56,8 @@ export class Connection {
   private streams = new Map<string, WebSocket>()
   private polling = false
 
-  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onEvent: (hostId: string, event: RemoteEvent) => void, onPassphraseRequired: (hostId: string) => void, wantEventMessages: () => boolean) {
+  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onEvent: (hostId: string, event: RemoteEvent) => void, onPassphraseRequired: (hostId: string) => void, wantEventMessages: () => boolean, credentialVault = new HostCredentialVault()) {
+    this.credentialVault = credentialVault
     this.host = host
     this.store = store
     this.vault = vault
@@ -117,6 +121,7 @@ export class Connection {
     const wasUserSubmission = this.pendingPassphrase !== undefined
     try {
       let stdout: string
+      const individualCredential = this.credentialVault.get(this.host.id, this.credentialTarget())
       let passphrase: string | undefined
       if (this.host.identity && isEncryptedKey(this.host.identity)) {
         passphrase = this.pendingPassphrase || this.vault.get(this.host.id, this.host.identity)
@@ -126,7 +131,7 @@ export class Connection {
           let opened: EncryptedSshTunnel | undefined
           opened = await EncryptedSshTunnel.open(this.host, passphrase, () => {
             if (this.encryptedTunnel === opened) this.lost()
-          })
+          }, individualCredential || '')
           this.encryptedTunnel = opened
         } catch (error) {
           if (error instanceof PassphraseRequiredError) {
@@ -137,8 +142,7 @@ export class Connection {
         stdout = this.encryptedTunnel.token
         this.localPort = this.encryptedTunnel.port
       } else {
-        const result = await execFileAsync('ssh', [...this.sshOptions(), this.host.target, 'cat ~/.local/share/crow-harness/token'], { timeout: 15000, maxBuffer: 1024, windowsHide: true })
-        stdout = result.stdout
+        stdout = individualCredential || ''
         this.localPort = await freePort()
         const args = [...this.sshOptions(), '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-N', '-L', `127.0.0.1:${this.localPort}:127.0.0.1:${this.host.remotePort}`, this.host.target]
         const tunnel = spawn('ssh', args, { windowsHide: true, stdio: 'ignore' })
@@ -148,18 +152,28 @@ export class Connection {
       }
       if (!this.desired) throw new Error('Conexi贸n cancelada.')
       this.token = stdout.trim()
-      if (!/^[0-9a-f]{32}$/.test(this.token)) throw new Error('El servicio remoto no entreg贸 un token v谩lido.')
+      if (this.token && !/^[0-9a-f]{32}$/.test(this.token)) throw new Error('El servicio remoto no entreg贸 un token v谩lido.')
       let ready = false
       for (let attempt = 0; attempt < 25; attempt++) {
         if (this.tunnel && this.tunnel.exitCode !== null) break
         try {
-          const response = await fetch(this.baseURL('/api/health'), { headers: this.headers(), signal: AbortSignal.timeout(1000) })
-          if (response.ok) { ready = true; break }
+          const response = await fetch(this.baseURL('/api/access'), { headers: this.headers(), signal: AbortSignal.timeout(1000) })
+          if (response.ok || response.status === 404 || response.status === 401) { ready = true; break }
         } catch { /* Wait for the SSH forward. */ }
         await sleep(400)
       }
       if (!ready) throw new Error('No se pudo abrir el t煤nel SSH o el servicio remoto no responde.')
       if (!this.desired) throw new Error('Conexi贸n cancelada.')
+      const accessResponse = await fetch(this.baseURL('/api/access'), { signal: AbortSignal.timeout(2500) })
+      if (accessResponse.ok && (await accessResponse.json() as AccessStatus).enabled) {
+        if (!individualCredential) throw new AccessCredentialRequiredError()
+        const identity = await fetch(this.baseURL('/api/access/me'), { headers: this.headers(), signal: AbortSignal.timeout(2500) })
+        if (!identity.ok) throw new AccessCredentialRequiredError()
+      }
+      if (!individualCredential) {
+        this.token = this.encryptedTunnel ? await this.encryptedTunnel.readBootstrapToken() : (await execFileAsync('ssh', [...this.sshOptions(), this.host.target, 'cat ~/.local/share/crow-harness/token'], { timeout: 15000, maxBuffer: 1024, windowsHide: true })).stdout.trim()
+        if (!/^[0-9a-f]{32}$/.test(this.token)) throw new Error('Token remoto invalido.')
+      }
       if (passphrase && this.host.identity) this.vault.set(this.host.id, this.host.identity, passphrase)
       this.delay = 1000
       this.setStatus('connected')
@@ -175,7 +189,7 @@ export class Connection {
         return
       }
       this.setStatus('disconnected')
-      this.scheduleRetry()
+      if (!(error instanceof AccessCredentialRequiredError)) this.scheduleRetry()
       throw error
     }
   }
@@ -199,6 +213,24 @@ export class Connection {
       void this.connect().catch(() => undefined)
     }, wait)
   }
+
+  private credentialTarget(): string { return `${this.host.target}:${this.host.port}:${this.host.remotePort}` }
+  async setAccessCredential(credential: string): Promise<void> {
+    this.credentialVault.set(this.host.id, this.credentialTarget(), credential.trim())
+    this.stop()
+    await this.connect()
+  }
+  async accessStatus(): Promise<AccessStatus> { return this.api('GET', '/api/access') }
+  async accessIdentity(): Promise<AccessIdentity> { return this.api('GET', '/api/access/me') }
+  async enableAccess(label: string): Promise<AccessCredentialResult> {
+    const result = await this.api<AccessCredentialResult>('POST', '/api/access/enable', { label })
+    await this.setAccessCredential(result.credential)
+    return result
+  }
+  async listAccessUsers(): Promise<AccessPrincipal[]> { return this.api('GET', '/api/access/users') }
+  async createAccessUser(input: AccessUserInput): Promise<AccessCredentialResult> { return this.api('POST', '/api/access/users', input) }
+  async revokeAccessUser(id: string): Promise<void> { await this.api('DELETE', `/api/access/users/${encodeURIComponent(id)}`) }
+  async assignSessionOwner(id: string, ownerId: string): Promise<void> { await this.api('POST', `/api/access/sessions/${encodeURIComponent(id)}/owner`, { ownerId }) }
 
   private baseURL(path: string): string { return `http://127.0.0.1:${this.localPort}${path}` }
   private headers(): Record<string, string> { return { Authorization: `Bearer ${this.token}` } }
@@ -340,3 +372,5 @@ export class Connection {
     }
   }
 }
+
+export class AccessCredentialRequiredError extends Error { constructor() { super('Este host requiere una credencial individual de Crow. Ped韘ela al administrador.') } }

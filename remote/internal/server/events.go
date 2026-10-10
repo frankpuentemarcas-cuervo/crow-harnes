@@ -220,6 +220,10 @@ func (a *App) addEvent(sessionID, kind string, attention bool, messages ...event
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Value(hookContextKey{}) == nil && !a.principalCurrent(requestPrincipal(r)) {
+		http.Error(w, "access revoked", 401)
+		return
+	}
 	if r.Method == http.MethodGet {
 		after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 		a.mu.RLock()
@@ -230,7 +234,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		items := make([]eventResponse, 0)
 		for _, event := range a.events {
-			if event.Seq > after && a.sessions[event.SessionID] != nil {
+			if event.Seq > after && a.sessions[event.SessionID] != nil && a.visible(requestPrincipal(r), a.sessions[event.SessionID].snapshot()) {
 				item := eventResponse{Event: event}
 				if message, ok := a.eventMessages[event.ID]; r.URL.Query().Get("includeMessage") == "true" && ok && time.Now().Before(message.expiresAt) {
 					item.Message, item.MessageTruncated = message.text, message.truncated
@@ -338,7 +342,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := os.ReadFile(filepath.Join(home, ".local", "share", "crow-harness", "token"))
+	token, err := hookCredential(home)
 	if err != nil {
 		return err
 	}

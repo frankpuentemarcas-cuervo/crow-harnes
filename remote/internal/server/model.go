@@ -3,6 +3,8 @@ package server
 import "time"
 
 type SessionInfo struct {
+	ReadOnly        bool         `json:"readOnly,omitempty"`
+	OwnerID         string       `json:"ownerId,omitempty"`
 	ID              string       `json:"id"`
 	Agent           string       `json:"agent"`
 	Mode            string       `json:"mode"`

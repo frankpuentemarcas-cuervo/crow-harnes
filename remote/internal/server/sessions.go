@@ -17,6 +17,7 @@ import (
 )
 
 type session struct {
+	hookHash        string
 	mu              sync.Mutex
 	info            SessionInfo
 	rootAgentState  string
@@ -137,7 +138,11 @@ func (a *App) loadSessions() error {
 			info.AgentState = "unknown"
 			info.CacheExpiresAt = nil
 		}
-		a.sessions[info.ID] = &session{info: info, rootAgentState: info.AgentState, activeSubagents: make(map[string]struct{}), subs: make(map[chan Frame]struct{})}
+		hookHash := ""
+		if token, err := os.ReadFile(filepath.Join(a.dir, "hook-"+info.ID)); err == nil {
+			hookHash = tokenHash(strings.TrimSpace(string(token)))
+		}
+		a.sessions[info.ID] = &session{hookHash: hookHash, info: info, rootAgentState: info.AgentState, activeSubagents: make(map[string]struct{}), subs: make(map[chan Frame]struct{})}
 	}
 	return nil
 }
@@ -257,6 +262,31 @@ func codexCommandHookConfig(event, command string) string {
 }
 
 func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
+	return a.startSessionOwned(agent, mode, root, nil)
+}
+
+func (a *App) startSessionOwned(agent, mode, root string, principal *AccessPrincipal) (SessionInfo, error) {
+	return a.startSessionPrompt(agent, mode, root, principal, "")
+}
+func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrincipal, initialPrompt string) (SessionInfo, error) {
+	// Serialize admission with revocation: a revoked in-flight request cannot spawn.
+	a.access.mu.Lock()
+	defer a.access.mu.Unlock()
+	if a.access.data.Enabled {
+		valid := false
+		if principal != nil {
+			for _, u := range a.access.data.Users {
+				if u.ID == principal.ID && !u.Revoked {
+					valid = true
+					break
+				}
+			}
+		}
+		if !valid || !a.permittedRoot(principal, root) {
+			return SessionInfo{}, errors.New("access revoked or project not permitted")
+		}
+	}
+
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return SessionInfo{}, err
@@ -285,12 +315,27 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	if err != nil {
 		return SessionInfo{}, err
 	}
+	if initialPrompt != "" {
+		args = initialPromptArgs(args, initialPrompt)
+	}
 	if _, err := exec.LookPath(bin); err != nil {
 		return SessionInfo{}, fmt.Errorf("%s is not on the server PATH: %w", bin, err)
 	}
 	id, err := randomID()
 	if err != nil {
 		return SessionInfo{}, err
+	}
+	ownerID := ""
+	hookToken := ""
+	if principal != nil {
+		ownerID = principal.ID
+		hookToken, err = randomID()
+		if err != nil {
+			return SessionInfo{}, err
+		}
+		if err = os.WriteFile(filepath.Join(a.dir, "hook-"+id), []byte(hookToken), 0600); err != nil {
+			return SessionInfo{}, err
+		}
 	}
 	logPath := filepath.Join(a.dir, "terminal-"+id+".jsonl")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -299,7 +344,7 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "CROW_SESSION_ID="+id,
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "CROW_SESSION_ID="+id, "CROW_HOOK_TOKEN="+hookToken,
 		"CROW_EVENT_URL=http://127.0.0.1:"+a.port+"/api/events", "CROW_STATUSLINE_COMMAND="+originalStatusLine)
 	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 32, Cols: 120})
 	if err != nil {
@@ -314,8 +359,11 @@ func (a *App) startSession(agent, mode, root string) (SessionInfo, error) {
 	if (hook == "" || agent == "agy") && agent != "shell" {
 		initialAgentState = "unknown"
 	}
-	s := &session{info: SessionInfo{ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	s := &session{hookHash: tokenHash(hookToken), info: SessionInfo{OwnerID: ownerID, ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
+	if hookToken == "" {
+		s.hookHash = ""
+	}
 	a.sessions[id] = s
 	a.mu.Unlock()
 	_ = a.saveSessions()
@@ -610,3 +658,5 @@ func safeID(id string) bool {
 func decodeInput(encoded string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(encoded)
 }
+
+func initialPromptArgs(args []string, prompt string) []string { return append(args, "--", prompt) }

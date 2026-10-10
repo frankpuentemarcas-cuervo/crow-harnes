@@ -244,3 +244,12 @@ func terminateSessionProcess(pid int, id string, done <-chan struct{}) error {
 		return errors.New("session process did not terminate")
 	}
 }
+
+func syncRegistryDirectory(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}

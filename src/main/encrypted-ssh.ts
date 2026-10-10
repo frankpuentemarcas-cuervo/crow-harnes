@@ -62,7 +62,7 @@ export class EncryptedSshTunnel {
 
   private constructor(onLost: () => void) { this.onLost = onLost }
 
-  static async open(host: Host, passphrase: string, onLost: () => void): Promise<EncryptedSshTunnel> {
+  static async open(host: Host, passphrase: string, onLost: () => void, individualCredential?: string): Promise<EncryptedSshTunnel> {
     const tunnel = new EncryptedSshTunnel(onLost)
     try {
       const config = await sshConfig(host)
@@ -82,7 +82,7 @@ export class EncryptedSshTunnel {
       })
       tunnel.client.on('close', () => { if (!tunnel.closed) tunnel.onLost() })
       tunnel.client.on('error', () => { if (!tunnel.closed) tunnel.onLost() })
-      tunnel.token = await tunnel.readToken()
+      tunnel.token = individualCredential ?? await tunnel.readToken()
       tunnel.server = createServer((socket) => {
         tunnel.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, '127.0.0.1', host.remotePort, (error, channel) => {
           if (error) { socket.destroy(); return }
@@ -104,6 +104,8 @@ export class EncryptedSshTunnel {
       throw error
     }
   }
+
+  readBootstrapToken(): Promise<string> { return this.readToken() }
 
   private readToken(): Promise<string> {
     return new Promise((resolve, reject) => {

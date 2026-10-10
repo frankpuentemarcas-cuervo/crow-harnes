@@ -2,7 +2,6 @@ package server
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +22,9 @@ import (
 )
 
 type App struct {
+	access        accessState
+	accessAuditMu sync.Mutex
+	dispatchMu    sync.Mutex
 	mu            sync.RWMutex
 	saveMu        sync.Mutex
 	fileMu        sync.Mutex
@@ -87,6 +89,9 @@ func Run() error {
 	if a.token == "" {
 		return errors.New("empty token")
 	}
+	if err := a.loadAccess(); err != nil {
+		return err
+	}
 	if err := a.loadHookSettings(); err != nil {
 		return err
 	}
@@ -105,9 +110,16 @@ func Run() error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
+	mux.HandleFunc("GET /api/access/me", a.handleAccessMe)
+	mux.HandleFunc("POST /api/access/enable", a.handleAccessEnable)
+	mux.HandleFunc("GET /api/access/users", a.handleAccessUsers)
+	mux.HandleFunc("POST /api/access/users", a.handleAccessUsers)
+	mux.HandleFunc("DELETE /api/access/users/{id}", a.handleAccessRevoke)
+	mux.HandleFunc("POST /api/access/sessions/{id}/owner", a.handleAccessOwner)
 	mux.HandleFunc("GET /api/host/metrics", a.handleMetrics)
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
+	mux.HandleFunc("POST /api/task-dispatch", a.handleTaskDispatch)
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/wake", a.handleWakeSession)
 	mux.HandleFunc("POST /api/sessions/{id}/cache", a.handlePromptCache)
@@ -146,16 +158,7 @@ func Run() error {
 	return server.Serve(listener)
 }
 
-func (a *App) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if len(got) != len(a.token) || subtle.ConstantTimeCompare([]byte(got), []byte(a.token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+func (a *App) auth(next http.Handler) http.Handler { return a.accessAuth(next) }
 
 func jsonResponse(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -182,7 +185,7 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 
 func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		jsonResponse(w, http.StatusOK, a.listSessions())
+		jsonResponse(w, http.StatusOK, a.visibleSessions(r))
 		return
 	}
 	var body struct {
@@ -193,7 +196,7 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if !requestJSON(w, r, &body) {
 		return
 	}
-	info, err := a.startSession(body.Agent, body.Mode, body.Root)
+	info, err := a.startSessionOwned(body.Agent, body.Mode, body.Root, requestPrincipal(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -255,13 +258,25 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	go func() { <-r.Context().Done(); _ = conn.Close() }()
 	ch, snapshot := s.subscribe()
 	defer s.unsubscribe(ch)
-	send := func(frame Frame) error { return conn.WriteJSON(frame) }
+	send := func(frame Frame) error {
+		if !a.sessionPermission(r, id, false) {
+			return errors.New("access revoked")
+		}
+		if frame.Info != nil {
+			copy := *frame.Info
+			copy.ReadOnly = !a.operable(requestPrincipal(r), copy)
+			frame.Info = &copy
+		}
+		return conn.WriteJSON(frame)
+	}
 	if err := s.replay(filepath.Join(a.dir, "terminal-"+id+".jsonl"), from, snapshot, send); err != nil {
 		return
 	}
 	info := s.snapshot()
+	info.ReadOnly = !a.operable(requestPrincipal(r), info)
 	if err := send(Frame{Type: "state", Info: &info}); err != nil {
 		return
 	}
@@ -279,8 +294,14 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			if err := conn.ReadJSON(&msg); err != nil {
 				return
 			}
+			if !a.sessionPermission(r, id, true) {
+				continue
+			}
 			switch msg.Type {
 			case "input":
+				if !a.auditForeign(r, id, "input") {
+					return
+				}
 				data, err := decodeInput(msg.Data)
 				if err == nil {
 					_, _ = a.wakeSession(id)
@@ -291,6 +312,9 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			case "resize":
+				if !a.auditForeign(r, id, "resize") {
+					return
+				}
 				_ = s.resize(msg.Cols, msg.Rows)
 			}
 		}
