@@ -50,8 +50,21 @@ app.whenReady().then(async()=>{
  for(const [name,action] of Object.entries(actions))ipcMain.handle('qa:audit:'+name,(_event,...args)=>action(...args))
  const w=new BrowserWindow({show:false,width:1400,height:900,webPreferences:{preload:${JSON.stringify(preload)},sandbox:true,contextIsolation:true,nodeIntegration:false}})
  await w.loadURL(${JSON.stringify(url)})
- const js=code=>w.webContents.executeJavaScript(code)
- for(let i=0;i<100;i++){if(await js('Boolean(window.__audioQA?.replaceState)'))break;await delay(100)}
+ const js=async code=>{
+  const value=await w.webContents.executeJavaScript('(async()=>{try{return await eval('+JSON.stringify(code)+')}catch(error){return {__qaError:String(error)}}})()')
+  if(value?.__qaError)throw new Error(value.__qaError+' while running '+code)
+  return value
+ }
+ const openAudit=async()=>{
+  // Exercise the current settings menu; keep the historical --baseline path.
+  const legacy=await js('Boolean(document.querySelector(\\'button[title="Diagnóstico de alertas"]\\'))')
+  if(!legacy){
+   await js('document.querySelector(\\'button[aria-label="Configuración e integraciones"]\\').click()');await delay(50)
+   await js('[...document.querySelectorAll(\\'.workspace-menu-content button\\')].find(button=>button.textContent.includes("Diagnóstico de alertas")).click()')
+  }else await js('document.querySelector(\\'button[title="Diagnóstico de alertas"]\\').click()')
+  await delay(100)
+ }
+ for(let i=0;i<100;i++){if(await js('Boolean(window.__audioQA?.replaceState && document.querySelector(\\'button[title="Notificaciones"]\\'))'))break;await delay(100)}
  await js('__audioQA.openNotices()');await delay(150)
  for(let i=0;i<100;i++){if(await js('__audioQA.ready()'))break;await delay(100)}
  assert.equal(await js('__audioQA.ready()'),true)
@@ -60,7 +73,7 @@ app.whenReady().then(async()=>{
  console.log('PASS manual test resumes context and schedules custom sound')
  await js('__audioQA.reset()')
  if(!${baseline}){
- await js('document.querySelector(\\'button[title="Diagnóstico de alertas"]\\').click()');await delay(100)
+ await openAudit()
  assert.equal(audit.status().enabled,false)
  await js('document.querySelector(\\'.audit-dialog input[type="checkbox"]\\').click()');await delay(100)
  assert.equal(audit.status().enabled,true)
@@ -88,7 +101,7 @@ app.whenReady().then(async()=>{
  assert.equal(ciphertext.includes(Buffer.from('private-marker')),false)
  assert.equal(JSON.stringify(recorded).includes('secret-test-key'),false)
  assert.equal(audit.exportJSON().includes('private-marker'),true)
- await js('document.querySelector(\\'button[title="Diagnóstico de alertas"]\\').click()');await delay(100)
+ await openAudit()
  await js('document.querySelector(\\'.audit-row\\').click()');await delay(100)
  assert.equal(await js('document.querySelector(\\'.audit-detail pre\\').textContent.includes("private-marker")'),true)
  assert.equal(await js('document.querySelector(\\'.audit-detail img\\')===null && !window.__unsafe'),true)
@@ -112,7 +125,7 @@ app.whenReady().then(async()=>{
  await delay(50);assert.equal((await js('__audioQA.starts()')).length,0)
  console.log('PASS old, informational and reviewed events remain silent')
  await w.setSize(375,740)
- await js('document.querySelector(\\'button[title="Diagnóstico de alertas"]\\').click()');await delay(100)
+ await openAudit()
  assert.equal(await js('document.querySelector(\\'.audit-dialog\\').getBoundingClientRect().right<=window.innerWidth'),true)
  await js('[...document.querySelectorAll(\\'.audit-actions button\\')].find(b=>b.textContent.includes("Borrar")).click()');await delay(50)
  await js('document.querySelector(\\'.confirm-dialog .danger-button\\').click()');await delay(100)

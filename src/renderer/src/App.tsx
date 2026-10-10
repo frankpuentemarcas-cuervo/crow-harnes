@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
+import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
 import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Notice, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
@@ -11,6 +11,9 @@ import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNotices
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { AlertAuditDialog } from './AlertAuditDialog'
 import { AccountUsagePanel } from './AccountUsagePanel'
+import { AccountUsageDock } from './AccountUsageDock'
+import { useAccountUsage } from './useAccountUsage'
+import { WorkspaceMenu } from './WorkspaceMenu'
 import { AccessPanel } from './AccessPanel'
 import { ERPTaskKanban } from './ERPTaskKanban'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
@@ -50,14 +53,18 @@ function readSoundBase64(file: File): Promise<string> {
 
 export function App(): React.JSX.Element {
   const confirm = useConfirm()
+  const accountUsage = useAccountUsage()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [narrowNavigationOpen, setNarrowNavigationOpen] = useState(false)
   const sessionVersions = useRef(new RequestVersions())
   const operationKeys = useRef(new Set<string>())
   const [starting, setStarting] = useState(false)
   const dirtyEditors = useRef(new Set<string>())
   const busyEditors = useRef(new Set<string>())
   const [windowWidth, setWindowWidth] = useState(window.innerWidth)
-  const [sidebarSize, setSidebarSize] = useState(() => { try { return sidebarWidth(localStorage.getItem('crow-sidebar-width')) } catch { return 340 } })
+  const [sidebarSize, setSidebarSize] = useState(() => { try { return sidebarWidth(localStorage.getItem('crow-sidebar-width')) } catch { return 280 } })
   const actualSidebarSize = visibleSidebarWidth(sidebarSize, windowWidth)
+  const compactNavigation = sidebarCollapsed || windowWidth < 760 && !narrowNavigationOpen
   const [state, setState] = useState<SavedState>(empty)
   const stateRef = useRef(state)
   stateRef.current = state
@@ -547,7 +554,7 @@ export function App(): React.JSX.Element {
   }
 
   return <div className="app-shell" tabIndex={-1}>
-    <aside className="sidebar" style={{ width: actualSidebarSize }}>
+    <aside className="sidebar" style={{ width: actualSidebarSize }} hidden={compactNavigation}>
       <div className="brand"><span className="brand-mark"><Code2 size={18} /></span><span>CROW<span className="brand-soft"> HARNESS</span></span><button className="icon-button sidebar-action" title="Configuración" aria-label="Configuración" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Settings2 size={16} /></button></div>
       <div className="sidebar-scroll">
         <div className="section-heading"><span>HOSTS</span><button className="icon-button" title="Agregar host" aria-label="Agregar host" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Plus size={16} /></button></div>
@@ -588,26 +595,36 @@ export function App(): React.JSX.Element {
           <button className="sidebar-add-project" onClick={() => { setEditingProject(undefined); setProjectHostId(host.id); setDialog('project') }}><Plus size={13} /> Agregar proyecto</button>
         </div>)}
       </div>
+      <AccountUsageDock model={accountUsage} onManage={() => setAccountsOpen(true)} />
       <div className="sidebar-footer"><HardDrive size={14} /><span>Windows · Hosts Linux</span></div>
     </aside>
-    <SidebarResize width={actualSidebarSize} onChange={setSidebarSize} />
+    {!compactNavigation && <SidebarResize width={actualSidebarSize} onChange={setSidebarSize} />}
 
     <div className="workspace">
+      {compactNavigation && <AccountUsageDock model={accountUsage} compact onManage={() => setAccountsOpen(true)} />}
       <header className="topbar">
+        <button className="icon-button navigation-toggle" title={compactNavigation ? 'Mostrar proyectos' : 'Contraer proyectos'} aria-label={compactNavigation ? 'Mostrar proyectos' : 'Contraer proyectos'} aria-expanded={!compactNavigation} onClick={() => { if (windowWidth < 760) { setSidebarCollapsed(false); setNarrowNavigationOpen(value => !value) } else setSidebarCollapsed(value => !value) }}>{compactNavigation ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
         <div className="breadcrumb"><span>{selectedHost?.name || 'Sin host'}</span><ChevronRight size={14} /><strong>{selectedProject?.name || 'Seleccioná un proyecto'}</strong><span className={`connection-pill ${status}`}>{status === 'connected' ? 'Conectado' : status === 'connecting' ? 'Reconectando' : status === 'auth-required' ? 'Frase requerida' : 'Desconectado'}</span></div>
-        <div className="host-metrics" aria-label="Recursos de los servidores">{state.hosts.map((host) => {
+        <WorkspaceMenu label="Recursos de los servidores" className="host-metrics" trigger={<><Server size={14} /><span className="metric-trigger-text">{selectedHost?.name || 'Hosts'} · CPU {selectedHost && hostMetrics[selectedHost.id]?.cpuPercent != null && status === 'connected' ? `${Math.round(hostMetrics[selectedHost.id].cpuPercent!)}%` : '—'} · RAM {selectedHost && hostMetrics[selectedHost.id] && status === 'connected' ? percent(hostMetrics[selectedHost.id].memoryUsed, hostMetrics[selectedHost.id].memoryTotal) : '—'}</span><ChevronRight size={12} /></>}>
+          <div className="metrics-title">Recursos · {state.hosts.length} hosts</div>
+          {state.hosts.length === 0 && <p className="empty-small">Sin hosts registrados.</p>}
+          {state.hosts.map((host) => {
           if (statuses[host.id] === 'connected' && hostMetricErrors[host.id]) return <div key={host.id} className="host-metric" title={`El servicio crowd de ${host.name} está desactualizado. Actualizalo y reinicialo en Linux para ver métricas y eliminar terminales.`}><span className="host-metric-name">{host.name}</span><span className="metric-outdated">Actualizar crowd Linux</span></div>
           const sample = statuses[host.id] === 'connected' ? hostMetrics[host.id] : undefined
           return <div key={host.id} className="host-metric" title={`Servidor ${host.name}: CPU, memoria, disco raíz y terminales suspendidas. La RAM suspendida es consumo estimado, no memoria liberada.`}><span className="host-metric-name">{host.name}</span><span>CPU {sample?.cpuPercent == null ? '—' : `${Math.round(sample.cpuPercent)}%`}</span><span>RAM {sample ? percent(sample.memoryUsed, sample.memoryTotal) : '—'}</span><span>DISCO {sample ? percent(sample.diskUsed, sample.diskTotal) : '—'}</span><span className="sleeping-metric" role="status" aria-atomic="true">Suspendidas {sample?.sleepingSessions ?? '—'} · RAM ≈{sample ? memory(sample.sleepingMemory || 0) : '—'}</span></div>
-        })}</div>
+        })}
+        </WorkspaceMenu>
         <div className="top-actions">
           {activeSession && selectedHost && <CacheBadge session={activeSession} status={status} now={clockNow} onOpen={() => setCacheDetail({ hostId: selectedHost.id, sessionId: activeSession.id })} />}
-          <button className="icon-button" title="Acceso móvil en red local" aria-label="Acceso móvil en red local" onClick={() => void openMobile()}><Smartphone size={16} /></button>
-          <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
-          <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
-          <button className="secondary-button small-button" onClick={() => setAccountsOpen(true)}>Cuentas</button>
-          <button className="secondary-button small-button" onClick={() => setERPOpen(true)}>ERPNext · Tasks</button>
-          <button className="icon-button" title="Diagnóstico de alertas" aria-label="Diagnóstico de alertas" onClick={() => setAlertAuditOpen(true)}><Eye size={17} /></button>
+          <button className="secondary-button small-button" onClick={() => setERPOpen(true)}>Kanban ERP</button>
+          <WorkspaceMenu label="Configuración e integraciones" trigger={<Settings2 size={17} />}>
+            <button onClick={() => { setEditingHost(undefined); setDialog('host') }}><Server size={16} />Gestionar hosts</button>
+            <button onClick={() => setAccountsOpen(true)}><Settings2 size={16} />Cuentas</button>
+            <button onClick={() => void openMobile()}><Smartphone size={16} />Acceso móvil en red local</button>
+            <button disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} />Buscar actualizaciones</button>
+            <button onClick={() => setAlertAuditOpen(true)}><Eye size={16} />Diagnóstico de alertas</button>
+            <button onClick={() => setAlertAIOpen(true)}><Settings2 size={16} />Configurar IA · Free LLM</button>
+          </WorkspaceMenu>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
              {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div><CacheWarningSettings value={cachePreferences} onChange={setCachePreferences} />{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
           </div>
@@ -633,6 +650,7 @@ export function App(): React.JSX.Element {
         <div className="toolbar">
           <div className="path-label"><Folder size={15} /><span title={selectedProject.root}>{selectedProject.root}</span></div>
           <div className="toolbar-right">
+            <button className="secondary-button files-toggle" aria-label="Mostrar archivos" aria-pressed={filePanelOpen} onClick={() => setFilePanelOpen(value => !value)}>{filePanelOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}<span>Archivos</span></button>
             <select aria-label="Agente" value={agent} onChange={(event) => { const next = event.target.value as Agent; setAgent(next); if (next === 'shell') setMode('normal') }}><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="agy">Antigravity</option><option value="shell">Shell</option></select>
             <select aria-label="Modo de permisos" value={mode} disabled={agent === 'shell'} onChange={(event) => setMode(event.target.value as Mode)}><option value="normal">Permisos normales</option><option value="bypass">Bypass permisos</option></select>
             <button className="primary-button" disabled={status !== 'connected' || starting} onClick={() => void startSession()}><Plus size={15} /> Terminal</button>
@@ -681,7 +699,7 @@ export function App(): React.JSX.Element {
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}
-    {accountsOpen && <AccountUsagePanel onClose={() => setAccountsOpen(false)} />}
+    {accountsOpen && <AccountUsagePanel onClose={() => setAccountsOpen(false)} model={accountUsage} />}
     {accessHost && <AccessPanel key={accessHost.id} host={accessHost} sessions={sessions[accessHost.id] || []} onClose={() => setAccessHost(null)} />}
     {erpOpen && <ERPTaskKanban onClose={() => setERPOpen(false)} onTerminal={(projectId, sessionId) => { setERPOpen(false); setSelectedProjectId(projectId); openTab({ id: crypto.randomUUID(), projectId, kind: "terminal", sessionId }); const project = state.projects.find(item => item.id === projectId); if (project) void refreshSessions(project.hostId) }} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}

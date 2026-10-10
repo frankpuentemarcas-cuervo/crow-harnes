@@ -16,7 +16,7 @@ export class RequestVersions {
 
 export function sidebarWidth(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) && parsed >= 280 ? Math.min(560, Math.round(parsed)) : 340
+  return Number.isFinite(parsed) && parsed >= 280 ? Math.min(560, Math.round(parsed)) : 280
 }
 
 export function visibleSidebarWidth(preferred: number, viewport: number): number {

@@ -24,6 +24,7 @@ window.AudioContext = class {
   createBufferSource() { return { buffer: null, connect() {}, start(at) { starts.push(at) } } }
 }
 window.crow = new Proxy({
+  accountsList: async () => [],
   getAlertAuditStatus: async () => window.__auditBridge?.status(),
   setAlertAuditEnabled: async enabled => window.__auditBridge?.enable(enabled),
   listAlertAudit: async () => window.__auditBridge?.list() || [],

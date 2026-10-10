@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crow · QA cuotas persistentes (datos simulados)</title></head><body><div id="root"></div>
+<script>
+// Development-only fixture. Every IPC is simulated, no profiles, hosts or credentials are read.
+const params=new URLSearchParams(location.search), now=Date.now();
+const hosts=[{id:'ssd',name:'SSD',target:'mock',port:22,remotePort:47321},{id:'factory',name:'FACTORY',target:'mock',port:22,remotePort:47321}];
+const names=['SSOMA','TAREO','SORTER','EL BUEN GESTOR','ANALISTA-RRHH','RECLUTAMIENTO','ECOSYSTEM','DOCUMENTOS','MCP-ERP','OPT','LEGAL'];
+const projects=Array.from({length:Number(params.get('projects')||11)},(_,i)=>({id:'project-'+i,hostId:i<7?'ssd':'factory',name:names[i]||'Proyecto largo QA '+i,root:'/test/proyecto-'+i}));
+const project=projects[2], session={id:'279f39a0-test',agent:'claude',mode:'normal',root:project.root,state:'running',agentState:'working',hooksActive:true,startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),seq:1};
+const tab={id:'terminal-qa',projectId:project.id,kind:'terminal',sessionId:session.id};
+let saved={hosts,projects,notices:[],sessionNames:{},eventCursors:{},tabs:[tab],activeTabs:{[project.id]:tab.id},selectedProjectId:project.id};
+const account=(i)=>({id:'account-'+i,provider:i%2?'codex':'claude',label:i===0?'TRABAJO':'Cuenta QA '+i,status:params.has('stale')?'stale':'ready',updatedAt:params.has('stale')?now-600000:now,windows:[{id:'session',label:'Sesión · 5 h',usedPercent:0},{id:'week',label:'Semana',usedPercent:i===29?100:80,resetsAt:now+3600000}]});
+let accounts=Array.from({length:Number(params.get('accounts')??1)},(_,i)=>account(i));
+window.__qa={calls:{list:0,refresh:0,login:0,resize:0,input:0},sizes:[],saved,accounts};
+const copy=x=>structuredClone(x), mock={
+ getState:async()=>copy(saved),saveWorkspace:async(tabs,activeTabs,selectedProjectId)=>{saved={...saved,tabs,activeTabs,selectedProjectId};return copy(saved)},
+ status:async()=>'connected',sessions:async(host)=>host==='ssd'?[copy(session)]:[],hookSettings:async()=>({enabled:true}),
+ hostMetrics:async()=>({cpuPercent:14,memoryUsed:78,memoryTotal:100,diskUsed:82,diskTotal:100,sleepingSessions:10,sleepingMemory:4.3*1024**3,at:new Date().toISOString()}),
+ getAlertSound:async()=>null,getUpdateState:async()=>({status:'idle'}),getAlertAISettings:async()=>({enabled:false,baseURL:'http://127.0.0.1:31415/v1',model:'auto',keyPresent:false,secureStorageAvailable:true}),getAlertAIStatus:async()=>({state:'idle',detail:'Sin análisis todavía.'}),
+ attach:async(_host,id,_seq,listener)=>{listener({type:'state',info:copy(session)});listener({type:'output',seq:1,data:btoa('Crow Harness · QA aislado de cuotas persistentes\r\n\r\nAgente trabajando. Este texto es ficticio, no salida de tu servidor.\r\n> ')});return 'stream-'+id},
+ terminalResize:async(_id,cols,rows)=>{window.__qa.calls.resize++;window.__qa.sizes.push({cols,rows})},terminalInput:async()=>{window.__qa.calls.input++},detach:async()=>{},
+ files:async()=>['.agents','.atl','.claude','.codex','.git','apps','docs','openspec','scripts','tests'].map(name=>({name,path:name,dir:true})),
+ readFile:async()=>({content:'# QA',hash:'test'}),saveFile:async()=>({hash:'saved'}),
+ accountsList:async()=>{window.__qa.calls.list++;if(params.has('error'))throw Error('Error simulado de conexión');return copy(accounts)},
+ accountsRefresh:async(id)=>{window.__qa.calls.refresh++;return copy(accounts.find(a=>a.id===id))},
+ accountsAdd:async(input)=>{const a={...account(accounts.length),...input,status:'signed-out',windows:[],updatedAt:undefined};accounts.push(a);return copy(a)},
+ accountsLogin:async(id)=>{window.__qa.calls.login++;return copy(accounts.find(a=>a.id===id))},accountsRemove:async(id)=>{accounts=accounts.filter(a=>a.id!==id)},
+ erpSnapshot:async()=>({connection:{configured:false,url:'',allowAIClassification:false},tasks:[],jobs:[],mappings:[]}),erpProjects:async()=>[],
+ mobileAddresses:async()=>[],mobileStatus:async()=>({running:false}),markNoticeRead:async()=>copy(saved),
+ browserOpen:async(_host,_root,url)=>({url}),browserFrame:async()=>({url:'http://localhost:3000',data:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><text x="30" y="40" fill="white">Navegador QA simulado</text></svg>'})
+};
+window.crow=new Proxy(mock,{get:(target,key)=>key in target?target[key]:String(key).startsWith('on')?()=>()=>{}:async()=>{}});
+</script><script type="module" src="/src/renderer/src/main.tsx"></script></body></html>

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, safeStorage } from 'electron'
+import { workspaceWindowPlacement } from '../shared/window-layout'
+import { app, BrowserWindow, screen, clipboard, dialog, ipcMain, Notification, safeStorage } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { basename, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
@@ -410,10 +411,7 @@ function registerIPC(): void {
 
 function createWindow(): void {
   window = new BrowserWindow({
-    width: 1500,
-    height: 920,
-    minWidth: 1050,
-    minHeight: 650,
+    ...workspaceWindowPlacement(screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea),
     backgroundColor: '#0a0a0a',
     title: 'Crow Harness',
     webPreferences: {

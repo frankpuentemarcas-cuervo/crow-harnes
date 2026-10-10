@@ -104,7 +104,7 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     if (!container.current) return
     const instance = new Terminal({
       fontFamily: 'Cascadia Code, JetBrains Mono, Consolas, monospace',
-      fontSize: 13,
+      fontSize: 16,
       lineHeight: 1.35,
       cursorBlink: true,
       scrollback: 10000,

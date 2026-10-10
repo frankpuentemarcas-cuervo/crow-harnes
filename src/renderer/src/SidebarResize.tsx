@@ -8,7 +8,7 @@ export function SidebarResize({ width, onChange }: { width: number; onChange(wid
     onPointerMove={event => { if (drag.current) onChange(sidebarWidth(Math.max(280, drag.current.width + event.clientX - drag.current.start))) }}
     onPointerUp={event => { drag.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }}
     onPointerCancel={() => { drag.current = null }} onLostPointerCapture={() => { drag.current = null }}
-    onDoubleClick={() => onChange(340)} onKeyDown={event => {
+    onDoubleClick={() => onChange(280)} onKeyDown={event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
       event.preventDefault()
       onChange(event.key === 'Home' ? 280 : event.key === 'End' ? 560 : sidebarWidth(Math.max(280, width + (event.key === 'ArrowRight' ? 20 : -20))))

@@ -34,7 +34,7 @@ test('old session snapshots are rejected after refresh or deletion, host isolate
   assert.equal(versions.current('A', next), false)
 })
 test('sidebar width defaults safely and persists bounded usable sizes', () => {
-  for (const invalid of [undefined, null, '', NaN, 'broken', 50, -1]) assert.equal(sidebarWidth(invalid), 340)
+  for (const invalid of [undefined, null, '', NaN, 'broken', 50, -1]) assert.equal(sidebarWidth(invalid), 280)
   assert.equal(sidebarWidth('400'), 400)
   assert.equal(sidebarWidth(1000), 560)
   assert.equal(sidebarWidth(280), 280)
