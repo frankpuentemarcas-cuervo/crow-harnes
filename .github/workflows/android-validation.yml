@@ -1,0 +1,121 @@
+name: Crow Android validation
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/android-companion
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/android-companion/package-lock.json
+
+      - name: Set up Java 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK 36
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - name: Install package dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
+
+      - name: Type-check and test companion logic/security policy
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Bundle local app and synchronize native plugins
+        run: |
+          npm run build
+          npm run sync:android
+
+      - name: Execute native JVM tests and assemble test APK
+        working-directory: packages/android-companion/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Verify debug signature, manifest and bundled assets
+        run: |
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$apk" | tee android-signature.txt
+          grep -q 'CN=Android Debug' android-signature.txt
+          "$tools/aapt" dump badging "$apk" | tee android-badging.txt
+          grep -q "package: name='dev.crow.companion'.*versionName='0.1.0'" android-badging.txt
+          "$tools/aapt" dump xmltree "$apk" AndroidManifest.xml > android-manifest.txt
+          grep -Eq 'android:debuggable.*0xffffffff' android-manifest.txt
+          grep -Eq 'android:allowBackup.*0x0' android-manifest.txt
+          grep -Eq 'android:usesCleartextTraffic.*0x0' android-manifest.txt
+          python3 - "$apk" <<'PY'
+          import json, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              config = json.loads(archive.read('assets/capacitor.config.json'))
+              assert config['appId'] == 'dev.crow.companion'
+              assert config['server']['hostname'] == 'localhost'
+              assert config['server']['androidScheme'] == 'https'
+              assert config['server']['cleartext'] is False
+              assert config['server']['allowNavigation'] == []
+              assert 'url' not in config['server']
+              assert config['android']['allowMixedContent'] is False
+              assert config['plugins']['CapacitorHttp']['enabled'] is False
+              index = archive.read('assets/public/index.html').decode()
+              assert 'Content-Security-Policy' in index
+              assert '/assets/' in index or './assets/' in index
+              plugins = json.loads(archive.read('assets/capacitor.plugins.json'))
+              expected = {'@capacitor/app', '@capacitor/barcode-scanner', '@capacitor/clipboard', '@capacitor/keyboard'}
+              assert expected.issubset({plugin['pkg'] for plugin in plugins})
+          print('Verified local bundled assets and plugin metadata; no device tests were run.')
+          PY
+
+      - name: Package APK and checksum
+        run: |
+          mkdir -p android-dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk android-dist/Crow-Companion-0.1.0-debug.apk
+          (cd android-dist && sha256sum Crow-Companion-0.1.0-debug.apk > Crow-Companion-0.1.0-debug.apk.sha256)
+          (cd android-dist && sha256sum --check Crow-Companion-0.1.0-debug.apk.sha256)
+          echo '## Crow Android test APK' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Artifact: crow-android / Crow-Companion-0.1.0-debug.apk + SHA256. Debug-signed and debuggable, NOT a Play Store/production build. Runner debug key is ephemeral: reinstall may be needed between builds and uninstall removes pairing. No emulator/phone tests were run.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store debug test APK
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: crow-android
+          path: packages/android-companion/android-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Store native test diagnostics
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: crow-android-test-reports
+          path: |
+            packages/android-companion/android/app/build/test-results/testDebugUnitTest/
+            packages/android-companion/android/app/build/reports/tests/testDebugUnitTest/
+            packages/android-companion/android-signature.txt
+            packages/android-companion/android-badging.txt
+            packages/android-companion/android-manifest.txt
+          if-no-files-found: ignore
+          retention-days: 14
