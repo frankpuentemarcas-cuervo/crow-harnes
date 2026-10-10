@@ -1,0 +1,15 @@
+node_modules/
+dist/
+android-dist/
+android-signature.txt
+android-badging.txt
+android-manifest.txt
+*.jks
+*.keystore
+google-services.json
+android/.gradle/
+android/local.properties
+android/**/build/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json

@@ -4,6 +4,7 @@ import type { FreeLLMRuntimeStatus } from './free-llm-startup'
 import type { AccountUsageAPI } from './account-usage'
 import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage } from './erp-task'
 import type { AccessIdentity } from './access'
+import type { MobileDevice, MobileEnrollment, MobileEnrollmentInput, MobileStartInput } from './mobile-companion'
 
 export interface CrowAccessPrincipal { id: string; label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[]; revoked?: boolean }
 export interface CrowAccessStatus { enabled: boolean; credentialRequired: boolean; version?: number }
@@ -45,6 +46,9 @@ export interface MobileStatus {
   pairingCode?: string
   fingerprint?: string
   paired?: boolean
+  enrollment?: MobileEnrollment
+  devices?: MobileDevice[]
+  loopbackUrl?: string
 }
 
 export interface Project {
@@ -238,8 +242,10 @@ export interface CrowAPI extends AccountUsageAPI {
   hostMetrics(hostId: string): Promise<HostMetrics>
   mobileAddresses(): Promise<string[]>
   mobileStatus(): Promise<MobileStatus>
-  mobileStart(address: string): Promise<MobileStatus>
+  mobileStart(input: string | MobileStartInput): Promise<MobileStatus>
   mobileStop(): Promise<MobileStatus>
+  mobileInvite(input: MobileEnrollmentInput): Promise<MobileEnrollment>
+  mobileRevoke(deviceId: string): Promise<MobileStatus>
   hookSettings(hostId: string): Promise<{ enabled: boolean }>
   setHookSettings(hostId: string, enabled: boolean): Promise<{ enabled: boolean }>
   getUpdateState(): Promise<UpdateState>

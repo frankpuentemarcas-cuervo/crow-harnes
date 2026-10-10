@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import QRCode from 'qrcode'
 import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
-import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, MobileStatus, Mode, Notice, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
+import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, Mode, Notice, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
@@ -19,7 +18,7 @@ import { ERPTaskKanban } from './ERPTaskKanban'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
 import { freeLLMStartupReady, type FreeLLMRuntimeStatus } from '../../shared/free-llm-startup'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
-import { mobilePairingURL } from '../../shared/mobile-pairing'
+import { MobileDialog } from './MobileDialog'
 import { CacheWarningTracker, cacheWarningPreferences, cacheView } from '../../shared/prompt-cache'
 import { CacheBadge } from './CacheBadge'
 import { CacheDetailsDialog } from './CacheDetailsDialog'
@@ -124,12 +123,6 @@ export function App(): React.JSX.Element {
   const [passphraseBusy, setPassphraseBusy] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({ status: 'idle' })
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [mobileStatus, setMobileStatus] = useState<MobileStatus>({ running: false })
-  const [mobileAddresses, setMobileAddresses] = useState<string[]>([])
-  const [mobileAddress, setMobileAddress] = useState('')
-  const [mobileBusy, setMobileBusy] = useState(false)
-  const [mobileError, setMobileError] = useState('')
-  const [mobileQR, setMobileQR] = useState('')
 
   async function checkFreeLLM(): Promise<void> {
     try { const result = await window.crow.ensureFreeLLM(); if (freeLLMLive.current) setFreeLLMStatus(result) }
@@ -228,22 +221,6 @@ export function App(): React.JSX.Element {
     }).catch((reason) => { if (live && soundGeneration.current === generation) setSoundError(`No se pudo cargar el sonido guardado: ${String(reason)}`) })
     return () => { live = false }
   }, [])
-
-  useEffect(() => {
-    if (!mobileOpen || !mobileStatus.running || !mobileStatus.url || !mobileStatus.pairingCode) { setMobileQR(''); return }
-    let active = true
-    void QRCode.toDataURL(mobilePairingURL(mobileStatus.url, mobileStatus.pairingCode), {
-      width: 256, margin: 2, errorCorrectionLevel: 'M', color: { dark: '#111827', light: '#ffffff' }
-    }).then((url) => { if (active) setMobileQR(url) })
-      .catch((reason) => { if (active) setMobileError(`No se pudo generar el QR: ${String(reason)}`) })
-    return () => { active = false }
-  }, [mobileOpen, mobileStatus.running, mobileStatus.url, mobileStatus.pairingCode])
-
-  useEffect(() => {
-    if (!mobileOpen || !mobileStatus.running || mobileStatus.paired) return
-    const timer = setInterval(() => { void window.crow.mobileStatus().then(setMobileStatus).catch(() => undefined) }, 1500)
-    return () => clearInterval(timer)
-  }, [mobileOpen, mobileStatus.running, mobileStatus.paired])
 
   async function refreshHooks(hostId: string): Promise<void> {
     try { const next = await window.crow.hookSettings(hostId); setHookSettings((current) => ({ ...current, [hostId]: next.enabled })) }
@@ -470,32 +447,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function openMobile(): Promise<void> {
-    if (operationKeys.current.has('mobile')) return
-    operationKeys.current.add('mobile'); setMobileBusy(true)
-    setMobileOpen(true)
-    setMobileError('')
-    try {
-      const [addresses, current] = await Promise.all([window.crow.mobileAddresses(), window.crow.mobileStatus()])
-      setMobileAddresses(addresses)
-      setMobileAddress((value) => addresses.includes(value) ? value : addresses[0] || '')
-      if (!current.running && addresses.length === 1) {
-        try { setMobileStatus(await window.crow.mobileStart(addresses[0])) }
-        catch (reason) { setMobileStatus(current); setMobileError(String(reason)) }
-      } else setMobileStatus(current)
-    } catch (reason) { setMobileError(String(reason)) }
-    finally { operationKeys.current.delete('mobile'); setMobileBusy(false) }
-  }
-
-  async function toggleMobile(): Promise<void> {
-    if (operationKeys.current.has('mobile')) return
-    operationKeys.current.add('mobile')
-    setMobileBusy(true)
-    setMobileError('')
-    try { setMobileStatus(mobileStatus.running ? await window.crow.mobileStop() : await window.crow.mobileStart(mobileAddress)) }
-    catch (reason) { setMobileError(String(reason)) }
-    finally { operationKeys.current.delete('mobile'); setMobileBusy(false) }
-  }
+  async function openMobile(): Promise<void> { setMobileOpen(true) }
 
   async function unlockHost(): Promise<void> {
     if (!passphraseHostId || !passphrase) return
@@ -706,15 +658,7 @@ export function App(): React.JSX.Element {
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
       setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))
     }} onClose={() => setRenamingSession(null)} />}
-    {mobileOpen && <Modal className="mobile-dialog" titleId="mobile-title" busy={mobileBusy} onClose={() => setMobileOpen(false)}>
-      <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil · red local</h2><button className="icon-button" aria-label="Cerrar" disabled={mobileBusy} onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
-      <p>Compartí las terminales existentes con tu celular por HTTPS. La app de Windows debe seguir abierta y ambos dispositivos deben estar en la misma red.</p>
-      {!mobileStatus.running ? <><label>Dirección de este equipo<select value={mobileAddress} onChange={(event) => setMobileAddress(event.target.value)}>{mobileAddresses.map((address) => <option key={address} value={address}>{address}</option>)}</select></label>{mobileAddresses.length === 0 && <p>No se detectó una IPv4 privada. Conectá este equipo a una red local.</p>}</> : mobileStatus.paired ? <div className="mobile-qr-done" role="status">Celular conectado. Para revocar el acceso, detené el servidor móvil.</div> : <><div className="mobile-qr-panel"><strong>Escaneá el QR con la cámara del celular</strong>{mobileQR ? <img src={mobileQR} alt="QR de emparejamiento de un solo uso" width="256" height="256" /> : <span role="status">Generando QR…</span>}<small>El celular se emparejará automáticamente, sin escribir código.</small></div><details className="mobile-manual"><summary>No puedo escanear el QR</summary><div className="mobile-credentials"><div><strong>Dirección</strong><code>{mobileStatus.url}</code></div><div><strong>Código de un solo uso</strong><code>{mobileStatus.pairingCode}</code></div></div></details></>}
-      {mobileStatus.running && <div className="mobile-fingerprint"><strong>Huella SHA-256 del certificado</strong><code>{mobileStatus.fingerprint}</code></div>}
-      <p className="mobile-security-note">El certificado es autofirmado: el navegador avisará que no es de confianza. Compará su huella SHA-256 con la que aparece acá ANTES de aceptar la excepción. Usá solo una red privada confiable; no abras este puerto a Internet.</p>
-      {mobileError && <div className="inline-error" role="alert">{mobileError}</div>}
-      <div className="dialog-actions"><span /><button className="secondary-button" disabled={mobileBusy} onClick={() => setMobileOpen(false)}>Cerrar</button><button className={mobileStatus.running ? 'danger-button' : 'primary-button'} disabled={mobileBusy || (!mobileStatus.running && !mobileAddress)} onClick={() => void toggleMobile()}>{mobileBusy ? 'Aplicando…' : mobileStatus.running ? 'Detener acceso' : 'Activar acceso'}</button></div>
-    </Modal>}
+    {mobileOpen && <MobileDialog projects={state.projects} hosts={state.hosts} onClose={() => setMobileOpen(false)} />}
     {passphraseHostId && <Modal key={passphraseHostId} titleId="passphrase-title" initialFocus="input" busy={passphraseBusy} onClose={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}><form onSubmit={(event) => { event.preventDefault(); void unlockHost() }}>
       <div className="dialog-heading"><h2 id="passphrase-title">Desbloquear llave SSH</h2><button type="button" className="icon-button" aria-label="Cerrar" disabled={passphraseBusy} onClick={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}><X size={18} /></button></div>
       <p>Ingresá la frase de la llave para conectar con {state.hosts.find((host) => host.id === passphraseHostId)?.name || 'el host'}. Se recordará en este equipo hasta reiniciar Windows.</p>

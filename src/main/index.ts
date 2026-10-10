@@ -16,6 +16,7 @@ import { AccountUsageService } from './account-usage-service'
 import { ERPTaskService } from './erp-task-service'
 import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage } from '../shared/erp-task'
 import type { CrowAccessUserInput, SavedState } from '../shared/types'
+import type { MobileActorBinding, MobileEnrollmentInput, MobileNotice, MobileQuota, MobileStartInput } from '../shared/mobile-companion'
 import { projectVisibleSessions, withoutHostWorkspace } from '../shared/access-visibility'
 import { createAccountUsageAdapters } from './account-usage-adapters'
 import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
@@ -38,6 +39,8 @@ let erpTasks: ERPTaskService
 let erpProjects: ERPProjectCandidate[] = []
 let erpQueue: Promise<unknown> = Promise.resolve()
 let accessGeneration = 0
+const mobileHostGenerations = new Map<string, number>()
+const mobileActorRoots = new Map<string, string[]>()
 let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
 let mobile: MobileGateway
@@ -72,7 +75,7 @@ function connection(hostId: string): Connection {
   if (!host) throw new Error('Host desconocido.')
   let current = connections.get(hostId)
   if (!current) {
-    current = new Connection(host, store, vault, (id, status) => { erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
+    current = new Connection(host, store, vault, (id, status) => { if (status !== 'connected') invalidateMobileHost(id); erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
     connections.set(hostId, current)
   }
   return current
@@ -167,10 +170,57 @@ async function visibleState(value: SavedState): Promise<SavedState> {
   return projectVisibleSessions(value, generation === accessGeneration ? visible : new Set())
 }
 
+function invalidateMobileHost(hostId: string): void {
+  mobileActorRoots.delete(hostId)
+  mobileHostGenerations.set(hostId, (mobileHostGenerations.get(hostId) || 0) + 1)
+  mobile?.invalidateHost(hostId)
+}
+
+async function mobileAuthSnapshot(hostId: string): Promise<MobileActorBinding> {
+  const host = store.host(hostId), current = connections.get(hostId)
+  if (!host || current?.status() !== 'connected') throw new Error('Conectá el host en Windows antes de vincular Android.')
+  const revision = mobileHostGenerations.get(hostId) || 0
+  const accessRevision = accessGeneration
+  const status = await current.accessStatus(), identity = await current.accessIdentity()
+  if (revision !== (mobileHostGenerations.get(hostId) || 0) || accessRevision !== accessGeneration || connections.get(hostId) !== current || current.status() !== 'connected') throw new Error('La identidad cambió. Generá otra invitación.')
+  if (!status.enabled || identity.role === 'legacy') throw new Error('Android requiere acceso individual Crow. Activá Acceso individual e importá tu credencial en Windows.')
+  if (identity.revoked || !identity.id || !Array.isArray(identity.allowedRoots)) throw new Error('La identidad Crow no está autorizada.')
+  const principalRoots = identity.allowedRoots.filter(root => typeof root === 'string' && root.startsWith('/') && posix.normalize(root) === root)
+  const allowedRoots = [...new Set(store.snapshot().projects.filter(project => project.hostId === hostId && project.root.startsWith('/') && posix.normalize(project.root) === project.root && (identity.role === 'admin' || principalRoots.some(root => project.root === root || project.root.startsWith(root.replace(/\/$/, '') + '/')))).map(project => project.root))]
+  if (!allowedRoots.length) throw new Error('La identidad Crow no tiene proyectos permitidos.')
+  mobileActorRoots.set(hostId, allowedRoots)
+  return { actorId: identity.id, generation: JSON.stringify([revision, host.target, host.port, host.remotePort, host.identity || '']), allowedRoots, operateOthers: identity.role === 'admin' && identity.operateOthers === true }
+}
+
+function mobileWorkspaceSnapshot(): SavedState {
+  const saved = store.snapshot()
+  const projects = saved.projects.filter(project => connections.get(project.hostId)?.status() === 'connected' && mobileActorRoots.get(project.hostId)?.includes(project.root))
+  const hosts = saved.hosts.filter(host => projects.some(project => project.hostId === host.id))
+  return { ...saved, hosts, projects, notices: [], sessionNames: {}, tabs: [], activeTabs: {}, eventCursors: {} }
+}
+
+async function refreshMobileWorkspace(): Promise<void> {
+  await Promise.all(store.snapshot().hosts.map(async host => {
+    try { await mobileAuthSnapshot(host.id) } catch { mobileActorRoots.delete(host.id) }
+  }))
+}
+
+function mobileCachedQuotas(): MobileQuota[] {
+  const date = (value: number | undefined): string | null => value !== undefined && Number.isFinite(value) && Math.abs(value) <= 8.64e15 ? new Date(value).toISOString() : null
+  return accountUsage.list().map((account, index) => ({ id: `${account.provider}:${index + 1}`, label: `${account.provider === 'claude' ? 'Claude' : 'Codex'} ${index + 1}`, provider: account.provider, state: account.status,
+    sampledAt: date(account.updatedAt),
+    windows: account.windows.map((item, windowIndex) => ({ label: item.windowMinutes && Number.isFinite(item.windowMinutes) ? `${item.windowMinutes} min` : `Ventana ${windowIndex + 1}`, usedPercent: Number.isFinite(item.usedPercent) ? Math.max(0, Math.min(100, item.usedPercent)) : null,
+      resetsAt: date(item.resetsAt) })) }))
+}
+
+function mobileCachedNotices(): MobileNotice[] {
+  return store.snapshot().notices.map(({ id, hostId, sessionId, kind, at, requiresAttention }) => ({ id, hostId, sessionId, kind, at, requiresAttention }))
+}
+
 function clearHostIdentityCaches(hostId: string): void {
   accessGeneration++
   // Paired mobile/MCP clients must not silently inherit a replacement identity.
-  void mobile?.stop()
+  invalidateMobileHost(hostId)
   void bridge?.stop()
   bridge = undefined
   attention.reset()
@@ -292,11 +342,13 @@ function registerIPC(): void {
     autoUpdater.quitAndInstall(false, true)
   })
   handle('crow:save-host', (host: Omit<Host, 'id'> & { id?: string }) => {
+    if (host.id) invalidateMobileHost(host.id)
     if (host.id) { connections.get(host.id)?.stop(); connections.delete(host.id) }
     if (host.id && store.host(host.id)?.identity !== host.identity) vault.forget(host.id)
     return store.saveHost(host)
   })
   handle('crow:remove-host', (id: string) => {
+    invalidateMobileHost(id)
     connections.get(id)?.stop()
     connections.delete(id)
     vault.forget(id)
@@ -332,8 +384,10 @@ function registerIPC(): void {
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
   handle('crow:mobile-addresses', () => mobileAddresses())
   handle('crow:mobile-status', () => mobile.status())
-  handle('crow:mobile-start', (address: string) => erpOperation(() => mobile.start(address)))
+  handle('crow:mobile-start', (input: string | MobileStartInput) => erpOperation(async () => { await refreshMobileWorkspace(); return mobile.start(input) }))
   handle('crow:mobile-stop', () => mobile.stop())
+  handle('crow:mobile-invite', (input: MobileEnrollmentInput) => erpOperation(async () => { await refreshMobileWorkspace(); return mobile.invite(input) }))
+  handle('crow:mobile-revoke', (deviceId: string) => { mobile.revoke(deviceId); return mobile.status() })
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
   handle('crow:set-hook-settings', (hostId: string, enabled: boolean) => connection(hostId).api<{ enabled: boolean }>('PUT', '/api/hooks', { enabled }))
   handle('crow:start-session', (hostId: string, projectId: string, agent: Agent, mode: Mode) => {
@@ -444,7 +498,7 @@ app.whenReady().then(() => {
   auditTimer.unref()
   attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status), undefined, Date.now, alertAudit)
   vault = new PassphraseVault()
-  mobile = new MobileGateway({ snapshot: scopedWorkspaceSnapshot, connection })
+  mobile = new MobileGateway({ snapshot: mobileWorkspaceSnapshot, connection, authSnapshot: mobileAuthSnapshot, quotas: mobileCachedQuotas, notices: mobileCachedNotices })
   registerIPC()
   createWindow()
   configureUpdater()
