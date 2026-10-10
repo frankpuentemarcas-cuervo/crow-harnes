@@ -5,13 +5,22 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { ERPTaskKanban } from '/src/renderer/src/ERPTaskKanban.tsx'
 import '/src/renderer/src/styles.css'
-let checkCount=0, syncCount=0, fail=false, finish
+let checkCount=0, syncCount=0, snapshotCount=0, fail=false, identityFailure=false, snapshotUnavailable=false, finish, accessChanged, finishPreview, finishSync, holdSync=false
 let snapshot={connection:{configured:true,url:'https://fictional.example.org',allowAIClassification:false},tasks:[],links:{}}
-window.__erpQA={counts:()=>({checkCount,syncCount}), release:()=>finish?.(), fail:()=>{fail=true}}
+let projects=[{id:'qa-project',hostId:'qa-host',name:'QA project'}]
+const preview={previewId:'qa-preview',taskKey:'0',projectId:'qa-project',hostId:'qa-host',root:'/fictional',agent:'claude',initialPrompt:'OLD ACCOUNT PREVIEW',expiresAt:Date.now()+60000,jobId:'qa-job'}
+window.__erpQA={
+ counts:()=>({checkCount,syncCount}), release:()=>finish?.(), fail:()=>{fail=true},
+ identityFailure:()=>{identityFailure=true}, snapshotUnavailable:()=>{snapshotUnavailable=true},
+ ready:()=>{fail=false;identityFailure=false;snapshotUnavailable=false;projects=[{id:'qa-project',hostId:'qa-host',name:'QA project'}];snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'},tasks:[{key:'0',name:'TASK-0',subject:'Fictional old account',description:'OLD ACCOUNT DESCRIPTION',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10',stage:'ready',stale:false,projectId:'qa-project'}]};accessChanged?.()},
+ changeAccess:()=>{projects=[];snapshot={...snapshot,connection:{...snapshot.connection,identity:'new-user'},tasks:[]};accessChanged?.()},
+ releasePreview:()=>finishPreview?.(), holdSync:()=>{holdSync=true}, releaseSync:()=>finishSync?.(), snapshotCount:()=>snapshotCount
+}
 window.crow={
- erpSnapshot:async()=>structuredClone(snapshot), erpProjects:async()=>[],onAccessChanged:()=>()=>{},
- erpTestConnection:async()=>{checkCount++;await new Promise(resolve=>{finish=resolve});if(fail)throw new Error('QA conexión rechazada');snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'}};return structuredClone(snapshot)},
- erpSync:async()=>{syncCount++;snapshot={...snapshot,tasks:Array.from({length:2501},(_,i)=>({key:String(i),name:'TASK-'+i,subject:'Fictional '+i,description:'QA data',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10 12:00:00',stage:'review',stale:false}))};return structuredClone(snapshot)}
+ erpSnapshot:async()=>{snapshotCount++;if(snapshotUnavailable)throw new Error('QA snapshot unavailable');return structuredClone(snapshot)}, erpProjects:async()=>structuredClone(projects),onAccessChanged:callback=>{accessChanged=callback;return()=>{accessChanged=undefined}},
+ erpTestConnection:async()=>{checkCount++;await new Promise(resolve=>{finish=resolve});if(identityFailure){snapshot={...snapshot,connection:{...snapshot.connection,identity:undefined},tasks:[],links:{}};throw new Error('QA identity HTTP 200 then Task HTTP 403')}if(fail){snapshot={...snapshot,tasks:snapshot.tasks.map(task=>({...task,stale:true}))};throw new Error('QA conexión rechazada')}snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'}};return structuredClone(snapshot)},
+ erpSync:async()=>{syncCount++;if(holdSync){holdSync=false;const previous=structuredClone(snapshot);await new Promise(resolve=>{finishSync=resolve});return previous}fail=false;identityFailure=false;snapshot={...snapshot,tasks:Array.from({length:2501},(_,i)=>({key:String(i),name:'TASK-'+i,subject:'Fictional '+i,description:'QA data',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10 12:00:00',stage:'review',stale:false}))};return structuredClone(snapshot)},
+ erpPreview:async()=>{await new Promise(resolve=>{finishPreview=resolve});return structuredClone(preview)}
 }
 createRoot(document.getElementById('root')).render(React.createElement(ERPTaskKanban,{onClose:()=>{},onTerminal:()=>{throw new Error('No real dispatch')}}))
 </script></body></html>
