@@ -18,7 +18,7 @@ function hostRevision(host: Host): string {
 }
 
 function publicBinding(item: Orchestrator) {
-  const { hostRevision: _, ...value } = item
+  const { hostRevision: _, actorId: __, ...value } = item
   return value
 }
 
@@ -48,10 +48,35 @@ export class BridgeService {
     return { ...item, name: this.workspace.sessionName(item.hostId, item.sessionId) || 'Orquestador', location: 'Crow: host → proyecto → terminal' }
   }
 
+  private async currentActor(hostId: string): Promise<string> {
+    const conn = this.connection(hostId)
+    if (conn.status() !== 'connected') throw new Error('No se pudo validar la identidad actual de Crow.')
+    const identity = await conn.api<{ role: string; id?: string; revoked?: boolean }>('GET', '/api/access/me')
+    if (identity.role === 'legacy') return `legacy:${hostRevision(this.workspace.snapshot().hosts.find(host => host.id === hostId)!)}`
+    if (!['member', 'admin'].includes(identity.role) || !identity.id || identity.revoked) throw new Error('Identidad Crow no autorizada.')
+    return identity.id
+  }
+
+  private actorMatches(actor: string, destination: { actorId?: string }): boolean {
+    // Older unbound registry records are valid only while server is explicitly legacy.
+    return destination.actorId ? destination.actorId === actor : actor.startsWith('legacy:')
+  }
+
+  private async authorized(destination: { hostId: string; sessionId: string; root: string; actorId?: string }, writable = false): Promise<string> {
+    const actor = await this.currentActor(destination.hostId)
+    if (!this.actorMatches(actor, destination)) throw new Error('Cambió la identidad Crow del destino aprobado.')
+    const sessions = await this.connection(destination.hostId).api<SessionInfo[]>('GET', '/api/sessions')
+    const session = sessions.find(item => item.id === destination.sessionId && item.root === destination.root)
+    if (!session || (writable && session.readOnly) || actor !== await this.currentActor(destination.hostId)) throw new Error('Terminal no permitida para la identidad actual.')
+    return actor
+  }
+
   async context(client: BridgeClient) {
     const workspace = this.workspace.snapshot()
     const state = this.registry.snapshot()
     const hosts = []
+    const allowed = new Set<string>()
+    const actors = new Map<string, string>()
     for (const host of workspace.hosts) {
       const grants = client.grants.filter((grant) => grant.hostId === host.id && grant.operations.includes('discover'))
       if (!grants.length) continue
@@ -62,27 +87,32 @@ export class BridgeService {
       let sessions: SessionInfo[] = []
       if (availability === 'connected') {
         try {
+          const actor = await this.currentActor(host.id)
           sessions = await conn.api<SessionInfo[]>('GET', '/api/sessions')
+          if (actor !== await this.currentActor(host.id)) throw new Error('Identidad cambió.')
+          actors.set(host.id, actor)
+          for (const session of sessions) allowed.add(`${host.id}:${session.id}:${session.root}`)
           const health = await conn.api<{ bridgeHelloVersion?: number }>('GET', '/api/health')
           bridgeHello = health.bridgeHelloVersion === 1 ? 'available' : 'unsupported'
           observedAt = new Date().toISOString()
         }
-        catch { availability = 'unknown'; sessions = [] }
+        catch { availability = 'unknown'; sessions = []; actors.delete(host.id); for (const key of allowed) if (key.startsWith(host.id + ':')) allowed.delete(key) }
       }
-      const projects = workspace.projects.filter((project) => project.hostId === host.id && grants.some((grant) => grant.projectId === project.id)).map((project) => ({
+      const projects = workspace.projects.filter((project) => project.hostId === host.id && grants.some((grant) => grant.projectId === project.id && allowed.has(`${host.id}:${grant.sessionId}:${project.root}`))).map((project) => ({
         id: project.id, hostId: host.id, name: project.name, root: project.root,
-        terminals: grants.filter((grant) => grant.projectId === project.id).map((grant) => {
+        terminals: grants.filter((grant) => grant.projectId === project.id && allowed.has(`${host.id}:${grant.sessionId}:${project.root}`)).map((grant) => {
           const session = sessions.find((item) => item.id === grant.sessionId && item.root === project.root)
           return { ...this.terminal({ hostId: host.id, projectId: project.id, sessionId: grant.sessionId, root: project.root }), priority: grant.priority ?? 50, allowedOperations: grant.operations,
             presence: observedAt ? session ? 'present' : 'missing' : 'unknown', state: session?.state || 'unknown', agentState: session?.agentState || 'unknown', observedAt }
         })
       }))
-      const orchestrator = state.orchestrators.find((item) => item.hostId === host.id && item.hostRevision === hostRevision(host) && projects.some((project) => project.id === item.projectId && project.root === item.root && project.terminals.some((terminal) => terminal.sessionId === item.sessionId)))
+      const orchestrator = state.orchestrators.find((item) => item.hostId === host.id && this.actorMatches(actors.get(host.id) || '', item) && item.hostRevision === hostRevision(host) && projects.some((project) => project.id === item.projectId && project.root === item.root && project.terminals.some((terminal) => terminal.sessionId === item.sessionId)))
       hosts.push({ id: host.id, name: host.name, availability, bridgeHello, observedAt, projects, orchestrator: orchestrator ? publicBinding(orchestrator) : undefined })
     }
     return { schemaVersion: 1, catalogId: state.instanceId, catalogRevision: createHash('sha256').update(JSON.stringify({ hosts: workspace.hosts.map(({ id, name }) => ({ id, name })), projects: workspace.projects, orchestrators: state.orchestrators })).digest('hex'),
       at: new Date().toISOString(), hosts,
       requests: state.requests.filter((item) => item.clientId === client.id &&
+        allowed.has(`${item.hostId}:${item.sessionId}:${item.root}`) && this.actorMatches(actors.get(item.hostId) || '', item) &&
         workspace.hosts.some((host) => host.id === item.hostId && hostRevision(host) === item.hostRevision) && workspace.projects.some((project) => project.id === item.projectId && project.hostId === item.hostId && project.root === item.root) &&
         client.grants.some((grant) => grant.hostId === item.hostId && grant.projectId === item.projectId && grant.sessionId === item.sessionId && grant.operations.includes('result'))).map((item) => this.view(item, 'unknown', 'cached')),
       capabilities: { hello: true, arbitraryTasks: false, subprojects: false, pendingDecisions: false, notifications: false },
@@ -93,12 +123,14 @@ export class BridgeService {
   async register(client: BridgeClient, hostId: string, projectId: string, sessionId: string) {
     const project = this.scope(client, { hostId, projectId, sessionId }, 'register')
     const revision = hostRevision(this.workspace.snapshot().hosts.find((item) => item.id === hostId)!)
+    const actorId = await this.currentActor(hostId)
+    await this.authorized({ hostId, sessionId, root: project.root, actorId }, true)
     const sessions = await this.connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
     const session = sessions.find((item) => item.id === sessionId && item.root === project.root)
     if (!session || session.mode !== 'normal' || !session.hooksActive || !['claude', 'codex'].includes(session.agent) || !['running', 'sleeping'].includes(session.state)) throw new Error('Elegí una terminal normal de Claude/Codex con hooks dentro del proyecto aprobado.')
     // The host/project may have changed while the session lookup was in flight.
     this.scope(client, { hostId, projectId, sessionId, root: project.root, hostRevision: revision }, 'register')
-    return publicBinding(this.registry.register({ hostId, hostRevision: revision, projectId, sessionId, root: project.root }))
+    return publicBinding(this.registry.register({ hostId, hostRevision: revision, projectId, sessionId, root: project.root, actorId }))
   }
 
   private orchestrator(client: BridgeClient, orchestratorId: string, operation: BridgeOperation): Orchestrator {
@@ -110,6 +142,7 @@ export class BridgeService {
 
   async hello(client: BridgeClient, orchestratorId: string, requestId: string) {
     const destination = this.orchestrator(client, orchestratorId, 'hello')
+    await this.authorized(destination, true)
     const state = this.registry.snapshot()
     let request = state.requests.find((item) => item.clientId === client.id && item.requestId === requestId)
     if (request && request.orchestratorId !== orchestratorId) throw new Error('Conflicto de idempotencia: no cambies el destino de una solicitud.')
@@ -121,17 +154,19 @@ export class BridgeService {
       request = this.registry.snapshot().requests.find((item) => item.clientId === client.id && item.requestId === requestId)
       if (request && request.orchestratorId !== orchestratorId) throw new Error('Conflicto de idempotencia.')
       if (!request) {
-        const { hostId, hostRevision, projectId, sessionId, root } = destination
+        const { hostId, hostRevision, projectId, sessionId, root, actorId } = destination
         request = { requestId, clientId: client.id, orchestratorId,
           taskId: createHash('sha256').update(JSON.stringify([state.instanceId, client.id, requestId])).digest('hex').slice(0, 32),
-          hostId, hostRevision, projectId, sessionId, root, state: 'prepared', createdAt: new Date().toISOString() }
+          hostId, hostRevision, projectId, sessionId, root, actorId, state: 'prepared', createdAt: new Date().toISOString() }
         this.registry.prepare(request)
       }
     }
     try {
+      await this.authorized(request, true)
       const value = await this.connection(request.hostId).api('POST', '/api/bridge/hello', { taskId: request.taskId, sessionId: request.sessionId, root: request.root, message: 'Hola' })
-      return this.accept(client, request, value)
+      return await this.accept(client, request, value)
     } catch {
+      await this.authorized(request)
       this.registry.update({ ...request, state: 'uncertain' })
       return this.view(this.find(client, requestId), this.connection(request.hostId).status(), 'cached')
     }
@@ -147,13 +182,14 @@ export class BridgeService {
   async result(client: BridgeClient, requestId: string) {
     const item = this.find(client, requestId)
     const conn = this.connection(item.hostId)
-    if (conn.status() !== 'connected') return this.view(item, conn.status(), 'cached')
-    try { return this.accept(client, item, await conn.api('GET', `/api/bridge/tasks/${item.taskId}`)) }
-    catch { this.scope(client, item, 'result'); return this.view(item, 'unknown', 'cached') }
+    await this.authorized(item)
+    try { return await this.accept(client, item, await conn.api('GET', `/api/bridge/tasks/${item.taskId}`)) }
+    catch { this.scope(client, item, 'result'); await this.authorized(item); return this.view(item, 'unknown', 'cached') }
   }
 
-  private accept(client: BridgeClient, request: BridgeRequest, value: unknown) {
+  private async accept(client: BridgeClient, request: BridgeRequest, value: unknown) {
     this.scope(client, request, 'result')
+    await this.authorized(request)
     const task = remoteTaskSchema.parse(value)
     if (task.id !== request.taskId || task.sessionId !== request.sessionId || task.root !== request.root) throw new Error('Respuesta remota no correlacionada.')
     this.registry.update({ ...request, state: task.state, observedAt: new Date().toISOString(), remoteUpdatedAt: task.updatedAt, result: task.result })

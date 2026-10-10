@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { id, sessionId } from './bridge-policy.ts'
 
 const binding = z.object({
-  id, hostId: id, hostRevision: z.string().regex(/^[0-9a-f]{64}$/), projectId: id, sessionId, root: z.string().startsWith('/'), registeredAt: z.string().datetime()
+  id, hostId: id, hostRevision: z.string().regex(/^[0-9a-f]{64}$/), projectId: id, sessionId, root: z.string().startsWith('/'), actorId: z.string().max(200).optional(), registeredAt: z.string().datetime()
 }).strict()
 export const remoteTaskSchema = z.object({
   id: sessionId, sessionId, root: z.string().startsWith('/'),
@@ -17,7 +17,7 @@ export const remoteTaskSchema = z.object({
 const request = z.object({
   requestId: id, clientId: z.string(), orchestratorId: id,
   taskId: sessionId, hostId: id, hostRevision: z.string().regex(/^[0-9a-f]{64}$/), projectId: id, sessionId,
-  root: z.string().startsWith('/'), state: z.enum(['prepared', 'uncertain', 'dispatching', 'pending', 'completed', 'interrupted']),
+  root: z.string().startsWith('/'), actorId: z.string().max(200).optional(), state: z.enum(['prepared', 'uncertain', 'dispatching', 'pending', 'completed', 'interrupted']),
   createdAt: z.string().datetime(), observedAt: z.string().datetime().optional(),
   remoteUpdatedAt: z.string().datetime().optional(), result: z.literal('Hola').optional()
 }).strict().refine((item) => (item.state === 'completed') === (item.result === 'Hola'), 'Invalid stored result')
@@ -31,7 +31,7 @@ const registry = z.object({
   }
   for (const item of value.requests) {
     const owner = value.orchestrators.find((binding) => binding.id === item.orchestratorId)
-    if (!owner || owner.hostId !== item.hostId || owner.hostRevision !== item.hostRevision || owner.projectId !== item.projectId || owner.sessionId !== item.sessionId || owner.root !== item.root) {
+    if (!owner || owner.actorId !== item.actorId || owner.hostId !== item.hostId || owner.hostRevision !== item.hostRevision || owner.projectId !== item.projectId || owner.sessionId !== item.sessionId || owner.root !== item.root) {
       ctx.addIssue({ code: 'custom', message: 'Invalid task relationship' })
     }
   }
@@ -58,7 +58,7 @@ export class BridgeRegistry {
   register(input: Omit<Orchestrator, 'id' | 'registeredAt'>): Orchestrator {
     const old = this.state.orchestrators.find((item) => item.hostId === input.hostId)
     if (old) {
-      if (old.hostRevision !== input.hostRevision || old.projectId !== input.projectId || old.sessionId !== input.sessionId || old.root !== input.root) throw new Error('El host ya tiene otro orquestador; requiere cambio del propietario.')
+      if ((old.actorId && old.actorId !== input.actorId) || old.hostRevision !== input.hostRevision || old.projectId !== input.projectId || old.sessionId !== input.sessionId || old.root !== input.root) throw new Error('El host ya tiene otro orquestador; requiere cambio del propietario.')
       return structuredClone(old)
     }
     const value = binding.parse({ ...input, id: randomUUID(), registeredAt: new Date().toISOString() })

@@ -2,6 +2,12 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'au
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, NoticeSoundOutcome } from './alert-diagnostics'
 import type { FreeLLMRuntimeStatus } from './free-llm-startup'
 import type { AccountUsageAPI } from './account-usage'
+import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage } from './erp-task'
+import type { AccessIdentity } from './access'
+
+export interface CrowAccessPrincipal { id: string; label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[]; revoked?: boolean }
+export interface CrowAccessStatus { enabled: boolean; credentialRequired: boolean; version?: number }
+export interface CrowAccessUserInput { label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[] }
 
 export type Agent = 'shell' | 'claude' | 'codex' | 'agy'
 export type Mode = 'normal' | 'bypass'
@@ -49,6 +55,8 @@ export interface Project {
 }
 
 export interface SessionInfo {
+  ownerId?: string
+  readOnly?: boolean
   id: string
   agent: Agent
   mode: Mode
@@ -186,6 +194,26 @@ export interface AlertSound {
 }
 
 export interface CrowAPI extends AccountUsageAPI {
+  accessStatus(hostId: string): Promise<CrowAccessStatus>
+  accessIdentity(hostId: string): Promise<AccessIdentity>
+  accessEnable(hostId: string, label: string): Promise<{ principal: CrowAccessPrincipal; credential: string }>
+  accessImportCredential(hostId: string, credential: string): Promise<void>
+  accessUsers(hostId: string): Promise<CrowAccessPrincipal[]>
+  accessCreateUser(hostId: string, input: CrowAccessUserInput): Promise<{ principal: CrowAccessPrincipal; credential: string }>
+  accessRevokeUser(hostId: string, id: string): Promise<void>
+  accessAssignSession(hostId: string, sessionId: string, ownerId: string): Promise<void>
+  onAccessChanged(listener: (hostId: string) => void): () => void
+  erpSnapshot(): Promise<ERPTaskSnapshot>
+  erpProjects(): Promise<ERPProjectCandidate[]>
+  erpSaveConnection(input: ERPConnectionInput): Promise<ERPTaskSnapshot>
+  erpTestConnection(): Promise<ERPTaskSnapshot>
+  erpSync(): Promise<ERPTaskSnapshot>
+  erpLinkProject(erpProject: string, projectId: string): Promise<ERPTaskSnapshot>
+  erpClassify(taskKey: string): Promise<ERPTaskSnapshot>
+  erpAssign(taskKey: string, projectId: string): Promise<ERPTaskSnapshot>
+  erpPreview(input: ERPTaskPreviewInput): Promise<ERPTaskPreview>
+  erpApprove(previewId: string): Promise<ERPTaskSnapshot>
+  erpMove(taskKey: string, stage: ERPTaskStage): Promise<ERPTaskSnapshot>
   getAlertAuditStatus(): Promise<AlertAuditStatus>
   setAlertAuditEnabled(enabled: boolean): Promise<AlertAuditStatus>
   listAlertAudit(): Promise<AlertAuditSummary[]>

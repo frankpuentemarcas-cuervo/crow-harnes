@@ -12,6 +12,10 @@ import { AttentionService } from './attention-service'
 import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
 import { AccountUsageService } from './account-usage-service'
+import { ERPTaskService } from './erp-task-service'
+import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage } from '../shared/erp-task'
+import type { CrowAccessUserInput, SavedState } from '../shared/types'
+import { projectVisibleSessions, withoutHostWorkspace } from '../shared/access-visibility'
 import { createAccountUsageAdapters } from './account-usage-adapters'
 import type { NoticeSoundOutcome } from '../shared/alert-diagnostics'
 import { BridgeGateway } from './bridge-gateway'
@@ -29,6 +33,10 @@ let attention: AttentionService
 let freeLLM: FreeLLMRuntime
 let alertAudit: AlertAuditStore
 let accountUsage: AccountUsageService
+let erpTasks: ERPTaskService
+let erpProjects: ERPProjectCandidate[] = []
+let erpQueue: Promise<unknown> = Promise.resolve()
+let accessGeneration = 0
 let auditTimer: NodeJS.Timeout | undefined
 let vault: PassphraseVault
 let mobile: MobileGateway
@@ -63,7 +71,7 @@ function connection(hostId: string): Connection {
   if (!host) throw new Error('Host desconocido.')
   let current = connections.get(hostId)
   if (!current) {
-    current = new Connection(host, store, vault, (id, status) => send('crow:status', { hostId: id, status }), (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
+    current = new Connection(host, store, vault, (id, status) => { erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
     connections.set(hostId, current)
   }
   return current
@@ -107,24 +115,139 @@ async function uploadLocalFiles(hostId: string, root: string, directory: string,
   return { uploaded, failed, canceled: false }
 }
 
+async function authorizeERPProject(projectId: string, hostId: string): Promise<{ actorId: string; root: string }> {
+  const project = store.project(projectId)
+  if (!project || project.hostId !== hostId) throw new Error('Proyecto desconocido.')
+  const current = connection(hostId)
+  if (current.status() !== 'connected') throw new Error('Conectá el host antes de autorizar la Task.')
+  const status = await current.accessStatus(), identity = await current.accessIdentity()
+  if (!status.enabled && identity.role === 'legacy') return { actorId: `legacy:${hostId}`, root: posix.normalize(project.root) }
+  if (!status.enabled || identity.role === 'legacy' || identity.revoked) throw new Error('Identidad Crow no válida.')
+  const canonicalRoot = posix.normalize(project.root)
+  if (canonicalRoot !== project.root || !canonicalRoot.startsWith('/') || !identity.allowedRoots.some(root => canonicalRoot === root || canonicalRoot.startsWith(root.replace(/\/$/, '') + '/'))) throw new Error('La identidad Crow no permite este proyecto.')
+  return { actorId: identity.id, root: canonicalRoot }
+}
+
+async function refreshERPProjects(): Promise<void> {
+  erpProjects = []
+  const permitted: ERPProjectCandidate[] = []
+  for (const project of store.snapshot().projects) {
+    try { await authorizeERPProject(project.id, project.hostId); permitted.push({ id: project.id, name: project.name, hostId: project.hostId }) }
+    catch { /* Disconnected/revoked identities are never candidate projects. */ }
+  }
+  erpProjects = permitted
+}
+
+function erpOperation<T>(action: () => T | Promise<T>): Promise<T> {
+  // Serialize authorization windows: one operation cannot replace another's cache.
+  const next = erpQueue.catch(() => undefined).then(async () => { await refreshERPProjects(); return action() })
+  erpQueue = next.then(() => undefined, () => undefined)
+  return next
+}
+
+async function dispatchERPTask(job: ERPDispatchJob): Promise<{ sessionId: string }> {
+  const authorized = await authorizeERPProject(job.projectId, job.hostId)
+  if (authorized.root !== job.root || authorized.actorId !== job.actorId) throw new Error('El destino o identidad cambió; autorizá nuevamente.')
+  const result = await connection(job.hostId).api<{ sessionId?: string; session?: SessionInfo; state?: string }>('POST', '/api/task-dispatch', { jobId: job.jobId, agent: job.agent, root: job.root, prompt: job.initialPrompt })
+  const sessionId = result.sessionId || result.session?.id
+  if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Entrega incierta: revisá la terminal antes de continuar.')
+  return { sessionId }
+}
+
+async function visibleState(value: SavedState): Promise<SavedState> {
+  const generation = accessGeneration
+  const visible = new Set<string>()
+  await Promise.all(value.hosts.map(async host => {
+    const current = connections.get(host.id)
+    if (current?.status() !== 'connected') return
+    try { for (const session of await current.api<SessionInfo[]>('GET', '/api/sessions')) visible.add(`${host.id}:${session.id}`) }
+    catch { /* Fail closed on expired/revoked credential or unavailable service. */ }
+  }))
+  return projectVisibleSessions(value, generation === accessGeneration ? visible : new Set())
+}
+
+function clearHostIdentityCaches(hostId: string): void {
+  accessGeneration++
+  // Paired mobile/MCP clients must not silently inherit a replacement identity.
+  void mobile?.stop()
+  void bridge?.stop()
+  bridge = undefined
+  attention.reset()
+  erpProjects = []
+  const saved = store.snapshot()
+  const projects = new Set(saved.projects.filter(project => project.hostId === hostId).map(project => project.id))
+  const ids = new Set([...saved.notices.filter(notice => notice.hostId === hostId).map(notice => notice.sessionId), ...Object.keys(saved.sessionNames).filter(key => key.startsWith(hostId + ':')).map(key => key.slice(hostId.length + 1)), ...saved.tabs.filter(tab => projects.has(tab.projectId) && tab.sessionId).map(tab => tab.sessionId!)])
+  for (const id of ids) store.removeSession(hostId, id)
+  const cleared = withoutHostWorkspace(saved, hostId)
+  store.saveWorkspace(cleared.tabs, cleared.activeTabs, cleared.selectedProjectId)
+  send('crow:access-changed', hostId)
+}
+
+function scopedWorkspaceSnapshot(): SavedState {
+  const saved = store.snapshot(), permitted = new Set(erpProjects.map(project => project.id))
+  const projects = saved.projects.filter(project => permitted.has(project.id))
+  const hosts = saved.hosts.filter(host => projects.some(project => project.hostId === host.id))
+  return { ...saved, hosts, projects, notices: [], sessionNames: {}, tabs: [], activeTabs: {}, eventCursors: {} }
+}
+
+async function visibleAuditRecords<T extends { hostId: string; sessionId: string }>(rows: T[]): Promise<T[]> {
+  const generation = accessGeneration
+  const allowedHosts = new Set<string>(), sessions = new Set<string>()
+  await Promise.all([...new Set(rows.map(row => row.hostId))].map(async hostId => {
+    const current = connections.get(hostId)
+    if (!store.host(hostId) || current?.status() !== 'connected') return
+    try {
+      const identity = await current.accessIdentity()
+      if (identity.role === 'admin' || identity.role === 'legacy') { allowedHosts.add(hostId); return }
+      if (identity.revoked) return
+      for (const session of await current.api<SessionInfo[]>('GET', '/api/sessions')) sessions.add(`${hostId}:${session.id}`)
+    } catch { /* Historical diagnostics also require current permission. */ }
+  }))
+  return generation === accessGeneration ? rows.filter(row => /^[0-9a-f]{32}$/.test(row.sessionId) && (allowedHosts.has(row.hostId) || sessions.has(`${row.hostId}:${row.sessionId}`))) : []
+}
+
+async function scopedAuditStatus(): Promise<ReturnType<AlertAuditStore['status']>> {
+  return { ...alertAudit.status(), count: (await visibleAuditRecords(alertAudit.list())).length }
+}
+
 function registerIPC(): void {
   const handle = (channel: string, listener: (...args: any[]) => any): void => {
-    ipcMain.handle(channel, (event, ...args) => {
+    ipcMain.handle(channel, async (event, ...args) => {
       if (!window || event.sender !== window.webContents) throw new Error('Solicitud no autorizada.')
-      return listener(...args)
+      const result = await listener(...args)
+      return result && Array.isArray(result.hosts) && Array.isArray(result.notices) && Array.isArray(result.tabs) ? visibleState(result) : result
     })
   }
 
+  handle('crow:access-status', (hostId: string) => connection(hostId).accessStatus())
+  handle('crow:access-identity', (hostId: string) => connection(hostId).accessIdentity())
+  handle('crow:access-enable', (hostId: string, label: string) => erpOperation(async () => { clearHostIdentityCaches(hostId); const result = await connection(hostId).enableAccess(label); clearHostIdentityCaches(hostId); return { principal: result.principal, credential: '' } }))
+  handle('crow:access-import', (hostId: string, credential: string) => erpOperation(async () => { clearHostIdentityCaches(hostId); await connection(hostId).setAccessCredential(credential); clearHostIdentityCaches(hostId) }))
+  handle('crow:access-users', (hostId: string) => connection(hostId).listAccessUsers())
+  handle('crow:access-create-user', (hostId: string, input: CrowAccessUserInput) => connection(hostId).createAccessUser(input))
+  handle('crow:access-revoke-user', (hostId: string, id: string) => connection(hostId).revokeAccessUser(id))
+  handle('crow:access-assign-session', (hostId: string, sessionId: string, ownerId: string) => connection(hostId).assignSessionOwner(sessionId, ownerId))
+  handle('crow:erp-snapshot', () => erpOperation(() => erpTasks.snapshot()))
+  handle('crow:erp-projects', () => erpOperation(() => [...erpProjects]))
+  handle('crow:erp-save', (input: ERPConnectionInput) => erpOperation(() => erpTasks.saveConnection(input)))
+  handle('crow:erp-test', () => erpOperation(() => erpTasks.testConnection()))
+  handle('crow:erp-sync', () => erpOperation(() => erpTasks.sync()))
+  handle('crow:erp-link', (erpProject: string, projectId: string) => erpOperation(() => erpTasks.linkProject(erpProject, projectId)))
+  handle('crow:erp-classify', (taskKey: string) => erpOperation(() => erpTasks.classify(taskKey)))
+  handle('crow:erp-assign', (taskKey: string, projectId: string) => erpOperation(() => erpTasks.assign(taskKey, projectId)))
+  handle('crow:erp-preview', (input: ERPTaskPreviewInput) => erpOperation(() => erpTasks.preview(input)))
+  handle('crow:erp-approve', (previewId: string) => erpOperation(() => erpTasks.approve(previewId)))
+  handle('crow:erp-move', (taskKey: string, stage: ERPTaskStage) => erpOperation(() => erpTasks.move(taskKey, stage)))
   handle('crow:clipboard-read', () => clipboard.readText())
   handle('crow:accounts-list', () => accountUsage.list())
   handle('crow:accounts-add', (input: unknown) => accountUsage.add(input))
   handle('crow:accounts-login', (id: string) => accountUsage.login(id))
   handle('crow:accounts-refresh', (id: string) => accountUsage.refresh(id))
   handle('crow:accounts-remove', (id: string) => accountUsage.remove(id))
-  handle('crow:audit-status', () => alertAudit.status())
-  handle('crow:audit-enabled', (enabled: boolean) => alertAudit.setEnabled(enabled))
-  handle('crow:audit-list', () => alertAudit.list())
-  handle('crow:audit-detail', (id: string) => alertAudit.detail(id))
+  handle('crow:audit-status', () => scopedAuditStatus())
+  handle('crow:audit-enabled', async (enabled: boolean) => { alertAudit.setEnabled(enabled); return scopedAuditStatus() })
+  handle('crow:audit-list', () => visibleAuditRecords(alertAudit.list()))
+  handle('crow:audit-detail', async (id: string) => { const row = alertAudit.detail(id); return row ? (await visibleAuditRecords([row]))[0] : undefined })
   handle('crow:audit-clear', () => alertAudit.clear())
   handle('crow:audit-sound', (hostId: string, eventId: string, outcome: NoticeSoundOutcome) => {
     if (typeof hostId !== 'string' || typeof eventId !== 'string' || typeof outcome !== 'string') throw new Error('Diagnóstico de audio inválido.')
@@ -136,7 +259,9 @@ function registerIPC(): void {
     if (result.canceled || !result.filePath) return { canceled: true }
     const inside = relative(resolve(app.getPath('userData')), resolve(result.filePath))
     if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) throw new Error('Exportá fuera de la carpeta interna de Crow.')
-    await writeFile(result.filePath, alertAudit.exportJSON(), { encoding: 'utf8', mode: 0o600 })
+    const exportData = JSON.parse(alertAudit.exportJSON())
+    exportData.records = await visibleAuditRecords(exportData.records)
+    await writeFile(result.filePath, JSON.stringify(exportData, null, 2), { encoding: 'utf8', mode: 0o600 })
     return { canceled: false }
   })
   handle('crow:get-alert-ai-settings', () => alertAISettings.snapshot())
@@ -183,7 +308,11 @@ function registerIPC(): void {
   handle('crow:submit-passphrase', (hostId: string, passphrase: string) => connection(hostId).submitPassphrase(passphrase))
   handle('crow:status', (hostId: string) => connection(hostId).status())
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
-  handle('crow:rename-session', (hostId: string, sessionId: string, name: string) => store.renameSession(hostId, sessionId, name))
+  handle('crow:rename-session', async (hostId: string, sessionId: string, name: string) => {
+    const sessions = await connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
+    if (!sessions.some(session => session.id === sessionId && !session.readOnly)) throw new Error('Terminal no permitida para renombrar.')
+    return store.renameSession(hostId, sessionId, name)
+  })
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
   handle('crow:cache-warning', async (hostId: string, sessionId: string) => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
@@ -202,7 +331,7 @@ function registerIPC(): void {
   handle('crow:host-metrics', (hostId: string) => connection(hostId).api<HostMetrics>('GET', '/api/host/metrics'))
   handle('crow:mobile-addresses', () => mobileAddresses())
   handle('crow:mobile-status', () => mobile.status())
-  handle('crow:mobile-start', (address: string) => mobile.start(address))
+  handle('crow:mobile-start', (address: string) => erpOperation(() => mobile.start(address)))
   handle('crow:mobile-stop', () => mobile.stop())
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
   handle('crow:set-hook-settings', (hostId: string, enabled: boolean) => connection(hostId).api<{ enabled: boolean }>('PUT', '/api/hooks', { enabled }))
@@ -310,13 +439,14 @@ app.whenReady().then(() => {
   accountUsage = new AccountUsageService(app.getPath('userData'), createAccountUsageAdapters())
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
+  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask })
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)
   auditTimer.unref()
   attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status), undefined, Date.now, alertAudit)
   vault = new PassphraseVault()
-  mobile = new MobileGateway({ snapshot: () => store.snapshot(), connection })
+  mobile = new MobileGateway({ snapshot: scopedWorkspaceSnapshot, connection })
   registerIPC()
   createWindow()
   configureUpdater()
@@ -324,7 +454,7 @@ app.whenReady().then(() => {
   // the exact Connection/passphrase path already used by the desktop app.
   if (process.env.CROW_MCP_CONFIG) {
     try {
-      bridge = new BridgeGateway(readBridgePolicy(process.env.CROW_MCP_CONFIG), () => new BridgeService(new BridgeRegistry(app.getPath('userData')), store, connection))
+      bridge = new BridgeGateway(readBridgePolicy(process.env.CROW_MCP_CONFIG), () => new BridgeService(new BridgeRegistry(app.getPath('userData')), { snapshot: scopedWorkspaceSnapshot, sessionName: () => undefined }, connection))
       void bridge.start().catch(() => { console.error('Crow MCP no pudo iniciarse. Revisá el puerto/configuración local.'); bridge = undefined })
     } catch { console.error('Crow MCP deshabilitado: configuración local inválida.') }
   }
@@ -332,4 +462,4 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => { accountUsage?.stop(); if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); void bridge?.stop(); for (const item of connections.values()) item.stop() })
+app.on('before-quit', () => { erpTasks?.stop(); accountUsage?.stop(); if (auditTimer) clearInterval(auditTimer); freeLLM?.stop(); attention?.stop(); void mobile?.stop(); void bridge?.stop(); for (const item of connections.values()) item.stop() })

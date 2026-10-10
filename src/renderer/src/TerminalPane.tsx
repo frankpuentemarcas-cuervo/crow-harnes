@@ -12,7 +12,9 @@ function bytes(encoded: string): Uint8Array {
   return Uint8Array.from(raw, (character) => character.charCodeAt(0))
 }
 
-export function TerminalPane({ hostId, sessionId, status, active }: { hostId: string; sessionId: string; status: ConnectionStatus; active: boolean }): React.JSX.Element {
+export function TerminalPane({ hostId, sessionId, status, active, readOnly = false }: { hostId: string; sessionId: string; status: ConnectionStatus; active: boolean; readOnly?: boolean }): React.JSX.Element {
+  const readonlyRef = useRef(readOnly)
+  readonlyRef.current = readOnly
   const container = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
   const activeRef = useRef(active)
@@ -67,6 +69,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
   }
 
   async function pasteClipboard(): Promise<void> {
+    if (readonlyRef.current) return
     if (!subscription.current) { setClipboardError('La terminal todavía no está conectada.'); return }
     const stream = subscription.current
     const instance = terminal.current
@@ -82,12 +85,14 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
   }
 
   async function wake(): Promise<void> {
+    if (readonlyRef.current) return
     setWakeError('')
     try { setInfo(await window.crow.wakeSession(hostId, sessionId)) }
     catch (reason) { setWakeError(String(reason)) }
   }
 
   async function resizeRemote(id: string, cols: number, rows: number): Promise<void> {
+    if (readonlyRef.current) return
     const size = `${cols}x${rows}`
     if (cols < 1 || rows < 1 || lastRemoteSize.current === size) return
     lastRemoteSize.current = size
@@ -136,7 +141,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
       if (terminalClipboardAction(domEvent, Boolean(selectedText())) !== 'copy') clearCopyCandidates()
     })
     const input = instance.onData((data) => {
-      if (subscription.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined)
+      if (subscription.current && !readonlyRef.current) void window.crow.terminalInput(subscription.current, data).catch(() => undefined)
     })
     const resized = instance.onResize(({ cols, rows }) => { if (subscription.current) void resizeRemote(subscription.current, cols, rows) })
     const observer = new ResizeObserver(() => {
@@ -215,8 +220,9 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
         {status !== 'connected' ? 'Esperando reconexión' : info?.state === 'exited' ? `Finalizó (${info.exitCode ?? '?'})` : info?.state === 'interrupted' ? 'Interrumpida en el servidor' : info?.state === 'sleeping' ? 'Suspendida · conserva RAM' : info?.agentState === 'working' ? 'Agente trabajando' : info?.agentState === 'completed' ? 'Trabajo completado' : info?.agentState === 'waiting' ? 'Agente esperando' : 'En ejecución'}
       </span>
       <button className="terminal-clipboard-button" disabled={!hasSelection && !hasRemoteSelection} title="Copiar selección (Ctrl+C o Ctrl+Shift+C)" onClick={() => void copySelection()}>Copiar</button>
-      <button className="terminal-clipboard-button" disabled={status !== 'connected'} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>
-      {info?.state === 'sleeping' && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}
+      <button className="terminal-clipboard-button" disabled={status !== 'connected' || readOnly} title="Pegar (Ctrl+V o Ctrl+Shift+V)" onClick={() => void pasteClipboard()}>Pegar</button>
+      {readOnly && <span>· Sólo lectura</span>}
+      {info?.state === 'sleeping' && !readOnly && <button className="terminal-wake" onClick={() => void wake()}>Reanudar</button>}
     </div>
     {wakeError && <div className="inline-error" role="alert">{wakeError}</div>}
     {clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}
@@ -227,7 +233,7 @@ export function TerminalPane({ hostId, sessionId, status, active }: { hostId: st
         catch (reason) { event.preventDefault(); event.stopPropagation(); setClipboardError(`No se pudo copiar: ${String(reason)}`) }
       }}
       onPasteCapture={(event) => {
-        if (!subscription.current || !activeRef.current) {
+        if (readonlyRef.current || !subscription.current || !activeRef.current) {
           event.preventDefault(); event.stopPropagation()
           setClipboardError('La terminal todavía no está conectada.')
           return

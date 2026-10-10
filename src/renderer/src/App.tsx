@@ -11,6 +11,8 @@ import { mergeNotice, NoticeSoundTracker, unreadNoticesForSession, unreadNotices
 import { AlertAISettingsDialog } from './AlertAISettingsDialog'
 import { AlertAuditDialog } from './AlertAuditDialog'
 import { AccountUsagePanel } from './AccountUsagePanel'
+import { AccessPanel } from './AccessPanel'
+import { ERPTaskKanban } from './ERPTaskKanban'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
 import { freeLLMStartupReady, type FreeLLMRuntimeStatus } from '../../shared/free-llm-startup'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
@@ -57,6 +59,8 @@ export function App(): React.JSX.Element {
   const [sidebarSize, setSidebarSize] = useState(() => { try { return sidebarWidth(localStorage.getItem('crow-sidebar-width')) } catch { return 340 } })
   const actualSidebarSize = visibleSidebarWidth(sidebarSize, windowWidth)
   const [state, setState] = useState<SavedState>(empty)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const [loaded, setLoaded] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
   const [sessions, setSessions] = useState<Record<string, SessionInfo[]>>({})
@@ -89,6 +93,8 @@ export function App(): React.JSX.Element {
   const [alertAIOpen, setAlertAIOpen] = useState(false)
   const [alertAuditOpen, setAlertAuditOpen] = useState(false)
   const [accountsOpen, setAccountsOpen] = useState(false)
+  const [erpOpen, setERPOpen] = useState(false)
+  const [accessHost, setAccessHost] = useState<Host | null>(null)
   const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
   const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
   const [freeLLMStatus, setFreeLLMStatus] = useState<FreeLLMRuntimeStatus | null>(null)
@@ -265,9 +271,21 @@ export function App(): React.JSX.Element {
         setPassphraseHosts(current => [...new Set([...current, ...authHosts])])
       }
     }).catch((reason) => { if (live) setError(String(reason)) })
+    const offAccess = window.crow.onAccessChanged(hostId => {
+      sessionVersions.current.begin(hostId)
+      setSessions(current => ({ ...current, [hostId]: [] }))
+      setState(current => ({ ...current, notices: current.notices.filter(notice => notice.hostId !== hostId), sessionNames: Object.fromEntries(Object.entries(current.sessionNames).filter(([key]) => !key.startsWith(hostId + ':'))) }))
+      setTabs(current => current.filter(tab => !stateRef.current.projects.some(project => project.hostId === hostId && project.id === tab.projectId)))
+      // The initial effect has no state closure; refresh authoritative cleared workspace.
+      void window.crow.getState().then(saved => { if (live) { setTabs(saved.tabs); setState(saved) } }).catch(() => undefined)
+      setCacheDetail(null); setCacheWarning(null); setRenamingSession(null)
+      setAlertAuditOpen(false); setNoticeOpen(false)
+      if (live) void refreshSessions(hostId)
+    })
     const offStatus = window.crow.onStatus((hostId, next) => {
       setStatuses((current) => ({ ...current, [hostId]: next }))
       if (next === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
+      else { setTabs(current => current.filter(tab => !stateRef.current.projects.some(project => project.hostId === hostId && project.id === tab.projectId))); sessionVersions.current.begin(hostId); setSessions(current => ({ ...current, [hostId]: [] })); setState(current => ({ ...current, notices: current.notices.filter(notice => notice.hostId !== hostId) })) }
     })
     const offNotice = window.crow.onNotice((notice) => {
       const soundOutcome = noticeSounds.current.evaluate(noticesRef.current, notice)
@@ -285,7 +303,7 @@ export function App(): React.JSX.Element {
     })
     const offUpdate = window.crow.onUpdateState(setUpdateState)
     void window.crow.getUpdateState().then((current) => { if (live) setUpdateState(current) }).catch(() => undefined)
-    return () => { live = false; offStatus(); offNotice(); offPassphrase(); offUpdate() }
+    return () => { live = false; offAccess(); offStatus(); offNotice(); offPassphrase(); offUpdate() }
   }, [])
 
   useEffect(() => {
@@ -538,6 +556,7 @@ export function App(): React.JSX.Element {
           <div className="host-row">
             <Server size={15} className="muted-icon" /><span className={`status-dot ${statuses[host.id] || 'disconnected'}`} title={statuses[host.id] || 'Desconectado'} />
             <span className="host-name">{host.name}</span>
+            <button className="icon-button ghost-action" title="Identidad y permisos Crow" aria-label={`Acceso ${host.name}`} onClick={() => setAccessHost(host)}><Settings2 size={13} /></button>
             <button className="icon-button ghost-action" title="Conectar" aria-label={`Conectar ${host.name}`} onClick={() => void connect(host.id)}><RefreshCw size={13} /></button>
             <button className="icon-button ghost-action" title="Editar host" aria-label={`Editar ${host.name}`} onClick={() => { setEditingHost(host); setDialog('host') }}><MoreHorizontal size={15} /></button>
           </div>
@@ -560,8 +579,8 @@ export function App(): React.JSX.Element {
               </button>
               <CacheBadge session={session} status={statuses[host.id] || 'disconnected'} now={clockNow} compact onOpen={() => setCacheDetail({ hostId: host.id, sessionId: session.id })} />
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
-              <button className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
-              <button className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
+              <button disabled={session.readOnly} className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
+              <button disabled={session.readOnly} className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>
             })}
           </div>
@@ -587,6 +606,7 @@ export function App(): React.JSX.Element {
           <button className="icon-button" title="Buscar actualizaciones" aria-label="Buscar actualizaciones" disabled={['checking', 'available', 'downloading', 'downloaded'].includes(updateState.status)} onClick={() => void window.crow.checkForUpdates().catch(() => undefined)}><RefreshCw size={16} /></button>
           <button className="icon-button" title="Mostrar archivos" aria-label="Mostrar archivos" onClick={() => setFilePanelOpen((value) => !value)}>{filePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           <button className="secondary-button small-button" onClick={() => setAccountsOpen(true)}>Cuentas</button>
+          <button className="secondary-button small-button" onClick={() => setERPOpen(true)}>ERPNext · Tasks</button>
           <button className="icon-button" title="Diagnóstico de alertas" aria-label="Diagnóstico de alertas" onClick={() => setAlertAuditOpen(true)}><Eye size={17} /></button>
           <div className="notice-container"><button className="icon-button notice-button" title="Notificaciones" aria-label="Notificaciones" onClick={() => setNoticeOpen((value) => !value)}><Bell size={17} />{unread > 0 && <span className="notice-count">{unread}</span>}</button>
              {noticeOpen && <div className="notice-popover"><div className="popover-title">Actividad de agentes<button className="sound-test" onClick={() => void playCompletionSound(customSound.current).catch((reason) => setSoundError(`No se pudo reproducir el sonido: ${String(reason)}`))}>Probar sonido</button></div><div className="sound-settings"><span className="sound-name" title={soundName || 'Tono predeterminado'}>Sonido: {soundName || 'Tono predeterminado'}</span><div className="sound-actions"><input ref={soundInput} className="sound-file-input" type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void chooseAlertSound(file) }} /><button className="sound-test" disabled={soundBusy} onClick={() => soundInput.current?.click()}>Elegir archivo</button>{(soundName || soundError) && <button className="sound-test" disabled={soundBusy} onClick={() => void restoreDefaultSound()}>Restaurar original</button>}</div><small>MP3, WAV u OGG · hasta 5 MB y 30 s</small><small>La alerta suena cuando el agente necesita tu intervención; los avisos informativos quedan sin sonido.</small><div className="alert-ai-summary"><button className="sound-test" onClick={() => setAlertAIOpen(true)}>Configurar IA · Free LLM</button><small>{alertAISettings?.enabled ? 'Clasificación por IA activada' : 'IA desactivada · reglas locales'}</small>{alertAISettings?.configurationError && <small className="ai-error" role="alert">{alertAISettings.configurationError}</small>}{alertAISettings?.enabled && <small className={alertAIStatus.state === 'error' ? 'ai-error' : ''} role="status">{alertAIStatus.detail}</small>}</div>{soundError && <small className="sound-error" role="alert">{soundError}</small>}</div><CacheWarningSettings value={cachePreferences} onChange={setCachePreferences} />{state.notices.length === 0 && <p className="empty-small">Sin notificaciones.</p>}{state.notices.slice(0, 15).map((notice) => <button key={notice.id} className={`notice-item ${notice.requiresAttention && !notice.read ? 'unread' : ''}`} onClick={() => { void markNotices([notice.id]); setNoticeOpen(false) }}><span>{notice.classification?.source === 'pending' ? 'Analizando respuesta…' : notice.classification?.decision === 'uncertain' ? 'Revisión preventiva' : notice.requiresAttention ? 'Necesita tu atención' : notice.kind === 'turn-complete' ? 'Respuesta informativa' : 'Proceso finalizado'}</span><small>{notice.classification?.detail}</small><small>{state.hosts.find((host) => host.id === notice.hostId)?.name || 'Host'} · {new Date(notice.at).toLocaleString()}</small></button>)}</div>}
@@ -637,7 +657,7 @@ export function App(): React.JSX.Element {
                 const project = state.projects.find((item) => item.id === tab.projectId)
                 if (!project) return null
                 const active = activeTab?.id === tab.id && selectedProjectId === tab.projectId
-                return <div key={tab.id} className="terminal-tab-slot" hidden={!active} onPointerDownCapture={() => acknowledgeTab(tab)}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} /></div>
+                return <div key={tab.id} className="terminal-tab-slot" hidden={!active} onPointerDownCapture={() => acknowledgeTab(tab)}><TerminalPane hostId={project.hostId} sessionId={tab.sessionId!} status={statuses[project.hostId] || 'disconnected'} active={active} readOnly={sessions[project.hostId]?.some(session => session.id === tab.sessionId) ? !!sessions[project.hostId]?.find(session => session.id === tab.sessionId)?.readOnly : true} /></div>
               })}
               {tabs.filter(tab => tab.kind === 'editor' && tab.path && visitedPaneTabs.includes(tab.id)).map(tab => {
                 const project = state.projects.find(item => item.id === tab.projectId)
@@ -662,6 +682,8 @@ export function App(): React.JSX.Element {
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}
     {accountsOpen && <AccountUsagePanel onClose={() => setAccountsOpen(false)} />}
+    {accessHost && <AccessPanel key={accessHost.id} host={accessHost} sessions={sessions[accessHost.id] || []} onClose={() => setAccessHost(null)} />}
+    {erpOpen && <ERPTaskKanban onClose={() => setERPOpen(false)} onTerminal={(projectId, sessionId) => { setERPOpen(false); setSelectedProjectId(projectId); openTab({ id: crypto.randomUUID(), projectId, kind: "terminal", sessionId }); const project = state.projects.find(item => item.id === projectId); if (project) void refreshSessions(project.hostId) }} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
       setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))

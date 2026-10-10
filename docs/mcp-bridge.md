@@ -38,7 +38,7 @@ La recuperación depende de herramientas consultables, no de recursos, SSE, susc
 | `crow_send_hello` | Saludo fijo al orquestador, `requestId` UUID obligatorio. No acepta instrucciones libres. |
 | `crow_get_result` | Consulta propia por UUID y devuelve referencia exacta host/proyecto/session/carpeta/nombre para localizarla en el sidebar de Crow. No ejecuta nada. |
 
-`availability` y `freshness` son distintos de `state`: una respuesta conservada puede estar completada aunque el host esté desconectado; no significa que su terminal siga activa. `observedAt` indica cuándo se consultó y `remoteUpdatedAt` cuándo cambió la tarea. Sin observación actual, el estado del proceso es `unknown`, no terminado. `bridgeHello: unsupported` indica soporte no disponible (runtime anterior o buzón que requiere revisión); eso deshabilita el puente, no el resto de Crow.
+`availability` y `freshness` son distintos de `state`. Un resultado conservado sólo se muestra si el host permite verificar la identidad Crow y el acceso actual a esa terminal; desconectado, revocado o con otra identidad se rechaza, sin divulgar el caché. `observedAt` indica cuándo se consultó y `remoteUpdatedAt` cuándo cambió la tarea. `bridgeHello: unsupported` indica soporte no disponible (runtime anterior o buzón que requiere revisión); eso deshabilita el puente, no el resto de Crow.
 
 ## Configuración del piloto (requiere autorización antes de desplegar)
 
@@ -126,7 +126,7 @@ npm run typecheck
 
 En Linux, desde `remote/`: `go test ./...`. Sin builds de producto.
 
-- MCP HTTP real contra el gateway: inicialización protocolo `2025-11-25`, descubrimiento de herramientas y cuatro operaciones, dos identidades aisladas, reintentos/reinicio y consulta offline. **Runtime/agent simulado** en ese test; ningún SSH real.
+- MCP HTTP real contra el gateway: inicialización protocolo `2025-11-25`, descubrimiento de herramientas y cuatro operaciones, dos identidades aisladas, reintentos/reinicio y rechazo de lectura offline o con identidad cambiada. **Runtime/agent simulado** en ese test; ningún SSH real.
 - Go: buzón con ficheros temporales, reinicio/incertidumbre/fallo de persistencia; handler autenticado y escritura a pipe con hooks ficticios. Rechazo de free-text, bypass, subagentes y destinos/estados incorrectos.
 - Validación local: 69 tests JS, typecheck y `go test ./...` en Linux/WSL. La comprobación `-race` necesita CGO y un compilador C, no disponibles en este entorno; queda pendiente en CI/laboratorio.
 - Falta prueba integrada Electron instalado + SSH + agente real en un host de laboratorio autorizado; no se verificó UI MCP ni permisos empresariales. Auditoría npm detecta vulnerabilidades existentes del proyecto: no se aplicó `audit fix --force` ni se afirma auditoría completa de seguridad.

@@ -1,0 +1,17 @@
+.erp-access-dialog { width: min(1100px, 94vw); max-height: 88vh; overflow: auto; }
+.erp-access-dialog form, .erp-access-dialog section { display: grid; gap: 10px; margin: 16px 0; }
+.erp-access-dialog label { display: grid; gap: 6px; font-size: 13px; }
+.erp-access-dialog input, .erp-access-dialog textarea, .erp-access-dialog select { background: #171717; color: #fafafa; border: 1px solid #404040; border-radius: 6px; padding: 8px; }
+.erp-access-dialog input[type=checkbox] { width: auto; justify-self: start; }
+.erp-access-dialog p { color: #a3a3a3; line-height: 1.5; font-size: 13px; }
+.erp-access-dialog button:focus-visible, .erp-access-dialog select:focus-visible, .erp-access-dialog input:focus-visible, .erp-access-dialog textarea:focus-visible { outline: 2px solid #8eb7e7; outline-offset: 2px; }
+.erp-actions, .access-user-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.access-user-row span { flex: 1; }
+.erp-kanban { display: grid; grid-template-columns: repeat(5, minmax(170px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 10px; }
+.erp-column { min-width: 170px; background: #111; border: 1px solid #303030; border-radius: 8px; padding: 10px; }
+.erp-column h3 { font-size: 13px; }
+.erp-task { display: grid; gap: 8px; padding: 10px; margin: 10px 0; border: 1px solid #404040; border-radius: 6px; background: #171717; overflow-wrap: anywhere; }
+.erp-task h4, .erp-task p { margin: 0; }
+.erp-task small { color: #a3a3a3; }
+.erp-prompt { white-space: pre-wrap; max-height: 280px; overflow: auto; border: 1px solid #404040; padding: 12px; font-size: 12px; }
+@media (max-width: 800px) { .erp-kanban { grid-template-columns: repeat(5, 210px); } }

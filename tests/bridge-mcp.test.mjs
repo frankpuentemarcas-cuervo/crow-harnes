@@ -36,6 +36,7 @@ function fixture() {
     status() { return this.availability },
     async api(method, path, body) {
       if (this.availability !== 'connected') throw new Error('secret-network-error-marker')
+      if (path === '/api/access/me') return this.identity || { role: 'legacy' }
       if (path === '/api/health') return { bridgeHelloVersion: 1 }
       if (path === '/api/sessions') return [structuredClone(session)]
       if (path === '/api/bridge/hello') {
@@ -140,9 +141,10 @@ test('MCP HTTP: discover → register → Hola → correlate → disconnect/rest
     await call(client, 'crow_send_hello', { orchestratorId: orchestrator.id, requestId })
     assert.equal(f.remotes[0].sends, 1)
     f.remotes[0].availability = 'disconnected'
-    const offline = await call(client, 'crow_get_result', { requestId })
-    assert.equal(offline.availability, 'disconnected'); assert.equal(offline.freshness, 'cached')
-    assert.equal((await call(client, 'crow_context')).hosts[0].projects[0].terminals[0].state, 'unknown')
+    assert.ok((await client.callTool({ name: 'crow_get_result', arguments: { requestId } })).isError)
+    const offline = await call(client, 'crow_context')
+    assert.equal(offline.hosts[0].projects.length, 0)
+    assert.equal(offline.requests.length, 0)
     const persisted = readFileSync(join(f.dir, 'bridge.json'), 'utf8')
     for (const marker of [...f.tokens, 'private-key-marker', 'secret-network-error-marker']) assert.ok(!persisted.includes(marker))
   } finally { await client?.close(); await other?.close(); await gateway.stop(); f.cleanup() }
@@ -235,5 +237,37 @@ test('lost POST response survives restart and retries the same remote id, never 
     const task = [...remote.tasks.values()][0]
     task.state = 'completed'; task.result = 'Hola'; task.updatedAt = new Date().toISOString()
     assert.equal((await service.result(f.clients[0], requestId)).result, 'Hola')
+  } finally { f.cleanup() }
+})
+
+test('cached MCP results cannot cross Crow identities, even if the same terminal remains visible', async () => {
+  const f = fixture()
+  try {
+    const remote = f.remotes[0], client = f.clients[0]
+    remote.identity = { role: 'member', id: 'actor-a' }
+    const service = f.service(), orchestrator = await service.register(client, f.hosts[0].id, f.projects[0].id, f.sessions[0].id)
+    const requestId = randomUUID()
+    await service.hello(client, orchestrator.id, requestId)
+    const task = [...remote.tasks.values()][0]
+    task.state = 'completed'; task.result = 'Hola'; task.updatedAt = new Date().toISOString()
+    assert.equal((await service.result(client, requestId)).result, 'Hola')
+    remote.identity = { role: 'member', id: 'actor-b' }
+    const restarted = f.service()
+    await assert.rejects(restarted.result(client, requestId), /identidad Crow/)
+    await assert.rejects(restarted.hello(client, orchestrator.id, requestId), /identidad Crow/)
+    const context = await restarted.context(client)
+    assert.deepEqual(context.requests, [])
+    assert.equal(context.hosts[0].orchestrator, undefined)
+    assert.equal(remote.sends, 1)
+  } finally { f.cleanup() }
+})
+
+test('MCP refuses writable operations for admin read-only foreign terminals', async () => {
+  const f = fixture()
+  try {
+    f.remotes[0].identity = { role: 'admin', id: 'admin' }
+    f.sessions[0].readOnly = true
+    await assert.rejects(f.service().register(f.clients[0], f.hosts[0].id, f.projects[0].id, f.sessions[0].id), /Terminal no permitida/)
+    assert.equal(f.remotes[0].sends, 0)
   } finally { f.cleanup() }
 })

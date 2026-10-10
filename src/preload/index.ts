@@ -7,6 +7,30 @@ ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: Ter
 })
 
 const api: CrowAPI = {
+  accessStatus: (hostId) => ipcRenderer.invoke('crow:access-status', hostId),
+  accessIdentity: (hostId) => ipcRenderer.invoke('crow:access-identity', hostId),
+  accessEnable: (hostId, label) => ipcRenderer.invoke('crow:access-enable', hostId, label),
+  accessImportCredential: (hostId, credential) => ipcRenderer.invoke('crow:access-import', hostId, credential),
+  accessUsers: (hostId) => ipcRenderer.invoke('crow:access-users', hostId),
+  accessCreateUser: (hostId, input) => ipcRenderer.invoke('crow:access-create-user', hostId, input),
+  accessRevokeUser: (hostId, id) => ipcRenderer.invoke('crow:access-revoke-user', hostId, id),
+  accessAssignSession: (hostId, sessionId, ownerId) => ipcRenderer.invoke('crow:access-assign-session', hostId, sessionId, ownerId),
+  onAccessChanged: (listener) => {
+    const wrapped = (_event: unknown, hostId: string): void => listener(hostId)
+    ipcRenderer.on('crow:access-changed', wrapped)
+    return () => { ipcRenderer.off('crow:access-changed', wrapped) }
+  },
+  erpSnapshot: () => ipcRenderer.invoke('crow:erp-snapshot'),
+  erpProjects: () => ipcRenderer.invoke('crow:erp-projects'),
+  erpSaveConnection: (input) => ipcRenderer.invoke('crow:erp-save', input),
+  erpTestConnection: () => ipcRenderer.invoke('crow:erp-test'),
+  erpSync: () => ipcRenderer.invoke('crow:erp-sync'),
+  erpLinkProject: (erpProject, projectId) => ipcRenderer.invoke('crow:erp-link', erpProject, projectId),
+  erpClassify: (taskKey) => ipcRenderer.invoke('crow:erp-classify', taskKey),
+  erpAssign: (taskKey, projectId) => ipcRenderer.invoke('crow:erp-assign', taskKey, projectId),
+  erpPreview: (input) => ipcRenderer.invoke('crow:erp-preview', input),
+  erpApprove: (previewId) => ipcRenderer.invoke('crow:erp-approve', previewId),
+  erpMove: (taskKey, stage) => ipcRenderer.invoke('crow:erp-move', taskKey, stage),
   accountsList: () => ipcRenderer.invoke('crow:accounts-list'),
   accountsAdd: (input) => ipcRenderer.invoke('crow:accounts-add', input),
   accountsLogin: (id) => ipcRenderer.invoke('crow:accounts-login', id),
