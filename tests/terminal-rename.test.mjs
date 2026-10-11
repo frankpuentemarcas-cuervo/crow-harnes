@@ -55,3 +55,18 @@ test('invalid rename leaves the previously saved label unchanged', () => {
     assert.equal(new Store(dir).sessionName(host, session), 'QA')
   } finally { removeTestDirectory(dir) }
 })
+
+test('saving a workspace with hidden terminal views never removes durable session names', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crow-rename-'))
+  try {
+    const store = new Store(dir)
+    const host = store.saveHost({ name: 'Host', target: 'user@fictional', port: 22, remotePort: 47321 }).hosts[0].id
+    const project = store.saveProject({ hostId: host, name: 'Project', root: '/fictional' }).projects[0].id
+    const session = 'a'.repeat(32)
+    store.renameSession(host, session, 'QA durable')
+    store.saveWorkspace([], {}, project)
+    assert.equal(new Store(dir).sessionName(host, session), 'QA durable')
+    store.saveWorkspace([], {}, '')
+    assert.equal(new Store(dir).sessionName(host, session), 'QA durable')
+  } finally { removeTestDirectory(dir) }
+})

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Crow names QA</title></head><body><div id="root"></div>
+<script type="module">
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { App } from '/src/renderer/src/App.tsx'
+import { ConfirmProvider } from '/src/renderer/src/ConfirmDialog.tsx'
+import { projectVisibleSessions } from '/src/shared/access-visibility.ts'
+import '/src/renderer/src/styles.css'
+const id='a'.repeat(32), foreign='b'.repeat(32), callbacks=new Map()
+const host={id:'qa-host',name:'QA',target:'fictional',port:22,remotePort:47321}
+const project={id:'qa-project',hostId:host.id,name:'QA project',root:'/fictional'}
+const session={id,agent:'claude',mode:'normal',root:project.root,state:'interrupted',agentState:'completed',startedAt:'2026-10-10T00:00:00Z',updatedAt:'2026-10-10T00:00:00Z',seq:1}
+let saved=JSON.parse(localStorage.getItem('crow-names-qa')||'null')||{hosts:[host],projects:[project],notices:[],sessionNames:{['qa-host:'+id]:'Desarrollador QA',['qa-host:'+foreign]:'PRIVATE FOREIGN ALIAS'},eventCursors:{},tabs:[],activeTabs:{},selectedProjectId:project.id}
+let status='disconnected', allowed=[id], hold=false, release, fail=false, reads=0
+const snapshot=()=>projectVisibleSessions(structuredClone(saved),new Set(status==='connected'?allowed.map(value=>'qa-host:'+value):[]))
+const persist=()=>{localStorage.setItem('crow-names-qa',JSON.stringify(saved));return snapshot()}
+window.__namesQA={
+ reads:()=>reads, hold:()=>{hold=true}, release:()=>release?.(), fail:()=>{fail=true}, recover:()=>{fail=false},
+ status:next=>{status=next;callbacks.get('onStatus')?.(host.id,next)},
+ identity:()=>{saved.sessionNames={};callbacks.get('onAccessChanged')?.(host.id)},
+ stored:()=>saved.sessionNames['qa-host:'+id], id
+}
+window.crow=new Proxy({
+ getState:async()=>{reads++;const value=snapshot();if(hold){hold=false;await new Promise(resolve=>{release=resolve})}if(fail)throw new Error('QA unavailable');return value},
+ status:async()=>status, connect:async()=>{status='connected';callbacks.get('onStatus')?.(host.id,status)},
+ sessions:async()=>status==='connected'?allowed.map(value=>({...session,id:value})):[], hookSettings:async()=>({enabled:true}),
+ saveWorkspace:async(tabs,activeTabs,selectedProjectId)=>{saved={...saved,tabs,activeTabs,selectedProjectId};return persist()},
+ renameSession:async(_host,sessionId,name)=>{saved.sessionNames['qa-host:'+sessionId]=name.trim();return persist()},
+ accountsList:async()=>[],files:async()=>[],getAlertSound:async()=>null,getAlertAISettings:async()=>({enabled:false}),getAlertAIStatus:async()=>({state:'idle',detail:'QA'}),getUpdateState:async()=>({status:'idle'}),
+ hostMetrics:async()=>({cpuPercent:0,memoryUsed:0,memoryTotal:4096,diskUsed:0,diskTotal:100,sleepingSessions:0,sleepingMemory:0,at:new Date().toISOString()})
+},{get:(target,key)=>key in target?target[key]:String(key).startsWith('on')?callback=>{callbacks.set(key,callback);return()=>callbacks.delete(key)}:async()=>undefined})
+createRoot(document.getElementById('root')).render(React.createElement(ConfirmProvider,null,React.createElement(App)))
+</script></body></html>

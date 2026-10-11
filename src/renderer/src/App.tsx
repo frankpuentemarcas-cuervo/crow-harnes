@@ -56,6 +56,7 @@ export function App(): React.JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [narrowNavigationOpen, setNarrowNavigationOpen] = useState(false)
   const sessionVersions = useRef(new RequestVersions())
+  const metadataRevision = useRef(0)
   const operationKeys = useRef(new Set<string>())
   const [starting, setStarting] = useState(false)
   const dirtyEditors = useRef(new Set<string>())
@@ -238,6 +239,20 @@ export function App(): React.JSX.Element {
   }
 
   useEffect(() => {
+    if (!loaded || !Object.values(statuses).includes('connected')) return
+    let live = true
+    const revision = metadataRevision.current
+    // Startup snapshots hide disconnected hosts' aliases. Reload their permitted
+    // metadata after connection, without resetting tabs/projects or bypassing IPC scopes.
+    void window.crow.getState().then(saved => {
+      if (live && revision === metadataRevision.current) setState(current => revision === metadataRevision.current ? { ...current, sessionNames: saved.sessionNames } : current)
+    }).catch(() => {
+      if (live && revision === metadataRevision.current) setState(current => revision === metadataRevision.current ? { ...current, sessionNames: {} } : current)
+    })
+    return () => { live = false }
+  }, [loaded, statuses])
+
+  useEffect(() => {
     let live = true
     void window.crow.getState().then(async (saved) => {
       if (!live) return
@@ -256,20 +271,22 @@ export function App(): React.JSX.Element {
       }
     }).catch((reason) => { if (live) setError(String(reason)) })
     const offAccess = window.crow.onAccessChanged(hostId => {
+      const revision = ++metadataRevision.current
       sessionVersions.current.begin(hostId)
       setSessions(current => ({ ...current, [hostId]: [] }))
       setState(current => ({ ...current, notices: current.notices.filter(notice => notice.hostId !== hostId), sessionNames: Object.fromEntries(Object.entries(current.sessionNames).filter(([key]) => !key.startsWith(hostId + ':'))) }))
       setTabs(current => current.filter(tab => !stateRef.current.projects.some(project => project.hostId === hostId && project.id === tab.projectId)))
       // The initial effect has no state closure; refresh authoritative cleared workspace.
-      void window.crow.getState().then(saved => { if (live) { setTabs(saved.tabs); setState(saved) } }).catch(() => undefined)
+      void window.crow.getState().then(saved => { if (live && revision === metadataRevision.current) { setTabs(saved.tabs); setState(current => revision === metadataRevision.current ? saved : current) } }).catch(() => undefined)
       setCacheDetail(null); setCacheWarning(null); setRenamingSession(null)
       setAlertAuditOpen(false); setNoticeOpen(false)
       if (live) void refreshSessions(hostId)
     })
     const offStatus = window.crow.onStatus((hostId, next) => {
+      metadataRevision.current++
       setStatuses((current) => ({ ...current, [hostId]: next }))
       if (next === 'connected') { void refreshSessions(hostId); void refreshHooks(hostId) }
-      else { setTabs(current => current.filter(tab => !stateRef.current.projects.some(project => project.hostId === hostId && project.id === tab.projectId))); sessionVersions.current.begin(hostId); setSessions(current => ({ ...current, [hostId]: [] })); setState(current => ({ ...current, notices: current.notices.filter(notice => notice.hostId !== hostId) })) }
+      else { setTabs(current => current.filter(tab => !stateRef.current.projects.some(project => project.hostId === hostId && project.id === tab.projectId))); sessionVersions.current.begin(hostId); setSessions(current => ({ ...current, [hostId]: [] })); setState(current => ({ ...current, notices: current.notices.filter(notice => notice.hostId !== hostId), sessionNames: Object.fromEntries(Object.entries(current.sessionNames).filter(([key]) => !key.startsWith(hostId + ':'))) })) }
     })
     const offNotice = window.crow.onNotice((notice) => {
       const soundOutcome = noticeSounds.current.evaluate(noticesRef.current, notice)
@@ -287,7 +304,7 @@ export function App(): React.JSX.Element {
     })
     const offUpdate = window.crow.onUpdateState(setUpdateState)
     void window.crow.getUpdateState().then((current) => { if (live) setUpdateState(current) }).catch(() => undefined)
-    return () => { live = false; offAccess(); offStatus(); offNotice(); offPassphrase(); offUpdate() }
+    return () => { live = false; metadataRevision.current++; offAccess(); offStatus(); offNotice(); offPassphrase(); offUpdate() }
   }, [])
 
   useEffect(() => {
@@ -656,7 +673,9 @@ export function App(): React.JSX.Element {
     {erpOpen && <ERPTaskKanban onClose={() => setERPOpen(false)} onTerminal={(projectId, sessionId) => { setERPOpen(false); setSelectedProjectId(projectId); openTab({ id: crypto.randomUUID(), projectId, kind: "terminal", sessionId }); const project = state.projects.find(item => item.id === projectId); if (project) void refreshSessions(project.hostId) }} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {
-      setState(await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name))
+      const revision = ++metadataRevision.current
+      const saved = await window.crow.renameSession(renamingSession.hostId, renamingSession.sessionId, name)
+      if (revision === metadataRevision.current) setState(current => revision === metadataRevision.current ? saved : current)
     }} onClose={() => setRenamingSession(null)} />}
     {mobileOpen && <MobileDialog projects={state.projects} hosts={state.hosts} onClose={() => setMobileOpen(false)} />}
     {passphraseHostId && <Modal key={passphraseHostId} titleId="passphrase-title" initialFocus="input" busy={passphraseBusy} onClose={() => { setPassphraseHosts(current => current.slice(1)); setPassphrase(''); setPassphraseError(''); setPassphraseVisible(false) }}><form onSubmit={(event) => { event.preventDefault(); void unlockHost() }}>
