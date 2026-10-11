@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { X } from 'lucide-react'
 import type { Host, MobileStatus, Project } from '../../shared/types'
@@ -21,12 +21,16 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
   const [capabilities, setCapabilities] = useState(defaults)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [errorFocusRequest, setErrorFocusRequest] = useState(0)
   const [notice, setNotice] = useState('')
   const [qr, setQR] = useState('')
   const [now, setNow] = useState(Date.now())
   const working = useRef(false)
   const errorFocus = useRef<HTMLDivElement>(null)
   const confirm = useConfirm()
+  useLayoutEffect(() => {
+    if (errorFocusRequest) errorFocus.current?.focus()
+  }, [errorFocusRequest])
   useEffect(() => {
     let live = true
     void Promise.all([window.crow.mobileAddresses(), window.crow.mobileStatus()]).then(([items, current]) => {
@@ -59,7 +63,7 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
   async function run(operation: () => Promise<void>): Promise<void> {
     if (working.current) return
     working.current = true; setBusy(true); setError(''); setNotice('')
-    try { await operation() } catch (reason) { setError(String(reason)); setTimeout(() => errorFocus.current?.focus(), 0) }
+    try { await operation() } catch (reason) { setError(String(reason)); setErrorFocusRequest(current => current + 1) }
     finally { working.current = false; setBusy(false) }
   }
   async function toggle(): Promise<void> {

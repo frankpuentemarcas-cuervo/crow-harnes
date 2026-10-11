@@ -6,18 +6,19 @@ import { createRequire } from 'node:module'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-function harness(status = { running: true, url: 'https://192.168.1.3:1234', devices: [] }, startError = '') {
-  const slots = [], effects = [], calls = []
+function harness(status = { running: true, url: 'https://192.168.1.3:1234', devices: [] }, startError = '', statusError = '') {
+  const slots = [], effects = [], layouts = [], calls = [], focused = []
   let cursor = 0
-  const react = { useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef: initial => { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] }, useEffect: effect => effects.push(effect) }
-  const api = { mobileAddresses: async () => ['192.168.1.3'], mobileStatus: async () => status, mobileStart: async input => { calls.push(['start', input]); if (startError) throw new Error(startError); return { running: true } }, mobileInvite: async input => { calls.push(['invite', input]); return { invitationCode: 'once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } } }
+  const react = { useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef: initial => { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] }, useEffect: effect => effects.push(effect), useLayoutEffect: (effect, deps) => { const index = cursor++; if (!slots[index] || deps.some((value, i) => value !== slots[index][i])) layouts.push(effect); slots[index] = deps } }
+  const api = { mobileAddresses: async () => ['192.168.1.3'], mobileStatus: async () => { if (statusError) throw new Error(statusError); return status }, mobileStart: async input => { calls.push(['start', input]); if (startError) throw new Error(startError); return { running: true } }, mobileInvite: async input => { calls.push(['invite', input]); return { invitationCode: 'once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } } }
   const source = readFileSync(new URL('../src/renderer/src/MobileDialog.tsx', import.meta.url), 'utf8')
   const module = { exports: {} }
   const localRequire = id => id === 'react' ? react : id === 'react/jsx-runtime' ? require(id) : id === 'qrcode' ? { toDataURL: async () => 'data:image/png;base64,mock' } : id === './ConfirmDialog' ? { useConfirm: () => async () => false } : {}
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, { module, exports: module.exports, require: localRequire, window: { crow: api }, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, Date, URL })
   function render() { cursor = 0; return module.exports.MobileDialog({ projects: [{ id: 'project', name: 'Allowed', hostId: 'host' }], hosts: [{ id: 'host', name: 'Test' }], onClose() {} }) }
   function flatten(value) { if (Array.isArray(value)) return value.flatMap(flatten); if (!value || typeof value !== 'object') return []; return [value, ...flatten(value.props?.children)] }
-  return { calls, render, flatten, effects }
+  function commit(tree) { for (const node of flatten(tree)) if (node.props.ref) node.props.ref.current = { focus: () => focused.push(node.props.children) }; while (layouts.length) layouts.shift()() }
+  return { calls, render, flatten, effects, commit, focused }
 }
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
@@ -49,6 +50,29 @@ test('failed activation has a focusable inline error, without losing the form', 
   const nodes = h.flatten(h.render()), error = nodes.find(node => node.props.role === 'alert')
   assert.equal(error.props.tabIndex, -1); assert.match(error.props.children, /Puerto ocupado/)
   assert.ok(nodes.some(node => node.props.id === 'mobile-origin'))
+})
+
+test('failed submits focus only after commit and refocus identical immediate errors', async () => {
+  const h = harness({ running: false }, 'Puerto ocupado'); h.commit(h.render()); h.effects[0](); await settle(); h.commit(h.render())
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const tree = h.render(), activate = h.flatten(tree).find(node => node.type === 'button' && node.props.children === 'Activar gateway')
+    activate.props.onClick(); activate.props.onClick(); await settle()
+    const pending = h.render()
+    assert.equal(h.calls.length, attempt, 'busy guard prevents duplicate submission')
+    assert.equal(h.focused.length, attempt - 1, 'render/request alone cannot focus an uncommitted alert')
+    h.commit(pending)
+    assert.equal(h.focused.length, attempt)
+    assert.match(h.focused.at(-1), /Puerto ocupado/)
+    h.commit(h.render()); assert.equal(h.focused.length, attempt, 'unrelated rerender never steals focus')
+  }
+})
+
+test('initial status errors do not request focus and no timer races the React commit', async () => {
+  const h = harness({ running: false }, '', 'No disponible'); h.commit(h.render()); h.effects[0](); await settle(); h.commit(h.render())
+  assert.deepEqual(h.focused, [])
+  const source = readFileSync(new URL('../src/renderer/src/MobileDialog.tsx', import.meta.url), 'utf8')
+  assert.match(source, /useLayoutEffect\([\s\S]*?errorFocus\.current\?\.focus\(\)[\s\S]*?\[errorFocusRequest\]/)
+  assert.doesNotMatch(source, /setTimeout/)
 })
 
 test('invitation requires explicit project selection and defaults all write/quotas grants off', async () => {
