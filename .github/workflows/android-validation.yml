@@ -26,6 +26,10 @@ jobs:
           cache: npm
           cache-dependency-path: packages/android-companion/package-lock.json
 
+      - name: Read test APK version from source
+        run: |
+          node -e 'const fs=require("fs"),v=require("./package.json").version;if(!/^[0-9]+[.][0-9]+[.][0-9]+(?:-[a-z0-9.-]+)?$/.test(v))throw Error("Invalid APK version");fs.appendFileSync(process.env.GITHUB_ENV,"ANDROID_VERSION="+v+"\n")'
+
       - name: Set up Java 21
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
         with:
@@ -55,6 +59,15 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          suites = [ET.parse(p).getroot() for p in Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml')]
+          counts = {key: sum(int(s.get(key, 0)) for s in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+          assert counts == {'tests': 9, 'failures': 0, 'errors': 0, 'skipped': 0}, counts
+          assert any(s.get('name', '').endswith('PangolinAuthTest') and s.get('tests') == '4' for s in suites)
+          print('Native JVM policy tests:', counts)
+          PY
 
       - name: Verify debug signature, manifest and bundled assets
         run: |
@@ -63,7 +76,8 @@ jobs:
           "$tools/apksigner" verify --verbose --print-certs "$apk" | tee android-signature.txt
           grep -q 'CN=Android Debug' android-signature.txt
           "$tools/aapt" dump badging "$apk" | tee android-badging.txt
-          grep -q "package: name='dev.crow.companion'.*versionName='0.1.0'" android-badging.txt
+          grep -Fq "package: name='dev.crow.companion'" android-badging.txt
+          grep -Fq "versionName='$ANDROID_VERSION'" android-badging.txt
           "$tools/aapt" dump xmltree "$apk" AndroidManifest.xml > android-manifest.txt
           grep -Eq 'android:debuggable.*0xffffffff' android-manifest.txt
           grep -Eq 'android:allowBackup.*0x0' android-manifest.txt
@@ -92,11 +106,12 @@ jobs:
       - name: Package APK and checksum
         run: |
           mkdir -p android-dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk android-dist/Crow-Companion-0.1.0-debug.apk
-          (cd android-dist && sha256sum Crow-Companion-0.1.0-debug.apk > Crow-Companion-0.1.0-debug.apk.sha256)
-          (cd android-dist && sha256sum --check Crow-Companion-0.1.0-debug.apk.sha256)
+          name="Crow-Companion-$ANDROID_VERSION-debug.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "android-dist/$name"
+          (cd android-dist && sha256sum "$name" > "$name.sha256")
+          (cd android-dist && sha256sum --check "$name.sha256")
           echo '## Crow Android test APK' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Artifact: crow-android / Crow-Companion-0.1.0-debug.apk + SHA256. Debug-signed and debuggable, NOT a Play Store/production build. Runner debug key is ephemeral: reinstall may be needed between builds and uninstall removes pairing. No emulator/phone tests were run.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifact: crow-android / $name + SHA256. Debug-signed and debuggable, NOT a Play Store/production build. Runner debug key is ephemeral: reinstall may be needed between builds and uninstall removes pairing. No emulator/phone tests were run." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Store debug test APK
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

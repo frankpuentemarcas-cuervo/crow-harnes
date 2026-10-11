@@ -8,7 +8,7 @@ Initial [Android CI run38074210670](https://github.com/frankpuentemarcas-cuervo/
 
 `.github/workflows/android-validation.yml` supports manual `workflow_dispatch` and reusable `workflow_call`. It installs Java21/SDK36/build-tools36.0.0 **on the GitHub runner only**, executes package tests and native JVM tests, bundles local assets, assembles and verifies a debug APK, then uploads:
 
-- Artifact `crow-android`: `Crow-Companion-0.1.0-debug.apk` and `Crow-Companion-0.1.0-debug.apk.sha256` (standard SHA256 checksum format).
+- Artifact `crow-android`: `Crow-Companion-<package-version>-debug.apk` and its `.sha256` (standard SHA256 checksum format).
 - Artifact `crow-android-test-reports`: JVM test results, manifest/badging and public signature metadata.
 
 This APK is a **signed, debuggable TEST build**, not a production/Play Store release. No production signing identity or secrets are created. GitHub runner debug keys are ephemeral: a later APK may have a different signing certificate and require uninstall/reinstall. Uninstall removes local Keystore pairing, requiring a fresh Windows invitation. The CI signature, manifest and local asset checks do not prove camera/TLS/IME behavior on a real phone.
@@ -48,7 +48,7 @@ Profiles are separate per Windows/enrollment endpoint. Switching gateways clears
 
 Remote networking such as Tailscale Serve, public certificate issuance, Windows firewall/power policies and DNS are **manual external prerequisites**, not changed by the app. A remote endpoint must forward HTTPS/WSS to this exact Crow gateway and have its public origin configured in Windows. Local self-signed trust is scoped to the native pinned client; the WebView does not override SSL errors.
 
-### Pangolin double authentication (source; not yet packaged/device-validated)
+### Pangolin double authentication (test build; device acceptance pending)
 
 Select Pangolin explicitly in Windows, supply your exact public HTTPS domain and a free fixed loopback port. Manually configure Newt/resource routing and valid TLS; keep Pangolin authentication enabled for that resource and the panel. The QR contains only the provider/auth-required flag and the existing five-minute Crow invitation, **not a resource key**.
 
@@ -79,3 +79,5 @@ Generation and stream identity guards discard late responses/events after forget
 On a real device verify pinned SAN match/mismatch, changed/expired leaf refusal, CA/public-origin failure, forbidden redirects, revocation during pending HTTP/WSS, Keystore persistence with backups excluded, unpair/race handling, camera permission denial, background/foreground stream replay, multiline input byte limit, large font/TalkBack, Android back/modal focus, IME/safe areas, simultaneous Windows/Android resize and multiple accounts/gateways.
 
 Dependency audit: patched critical Capacitor origin-proxy advisory [GHSA-rvm3-566m-v7fv](https://github.com/advisories/GHSA-rvm3-566m-v7fv) by using8.5.3 (reported vulnerable range8.0.0–8.3.4). Remaining `npm audit` findings were3 moderate **CLI dev-only xcode/uuid** dependencies, not Android runtime dependencies; no forced dependency downgrade/major update was applied. Official references: [Capacitor environment](https://capacitorjs.com/docs/getting-started/environment-setup), [official scanner](https://github.com/ionic-team/capacitor-barcode-scanner), [OkHttp](https://github.com/square/okhttp).
+
+Pangolin test build uses companion0.1.1-beta.1/versionCode2 and desktop0.1.32-beta.1. Its manual dispatch asserts all9 native JVM tests (4 Pangolin +5 endpoint policies), and uploads only Actions test artifacts, not a release or updater feed. This branch does not authorize installing over a running Crow instance or publishing; real-device acceptance is still required.
