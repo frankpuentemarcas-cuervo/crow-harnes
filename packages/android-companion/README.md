@@ -48,6 +48,16 @@ Profiles are separate per Windows/enrollment endpoint. Switching gateways clears
 
 Remote networking such as Tailscale Serve, public certificate issuance, Windows firewall/power policies and DNS are **manual external prerequisites**, not changed by the app. A remote endpoint must forward HTTPS/WSS to this exact Crow gateway and have its public origin configured in Windows. Local self-signed trust is scoped to the native pinned client; the WebView does not override SSL errors.
 
+### Pangolin double authentication (source; not yet packaged/device-validated)
+
+Select Pangolin explicitly in Windows, supply your exact public HTTPS domain and a free fixed loopback port. Manually configure Newt/resource routing and valid TLS; keep Pangolin authentication enabled for that resource and the panel. The QR contains only the provider/auth-required flag and the existing five-minute Crow invitation, **not a resource key**.
+
+On Android confirmation, a **native** dialog displays the exact domain and asks for that resource's token ID/token once. Compare the domain with Windows before entering values; never use admin/API/site/Newt credentials. These values do not enter JavaScript, profiles, QR, logs or public status. They are sent only to the selected HTTPS origin via `P-Access-Token-Id`/`P-Access-Token`; Crow's separate device bearer remains required after pairing. Native storage encrypts both layers with Android Keystore only after successful pairing. Cancel/failure clears input; redirects, cross-origin reuse and automatic POST retry remain forbidden. Revocation/rejection requires explicit re-enrollment; there is no token refresh or silent endpoint migration.
+
+Provision a separate expiring/revocable Pangolin resource token for each phone (at most the Crow link's 12-hour lifetime). Revoke it in Pangolin too when retiring a phone: Crow revocation closes its own streams immediately, but does not call the Pangolin administration API. Changing providers/origins requires a fresh link. Neither entering configuration nor mocked tests proves remote connectivity; Windows/APK compilation and real-phone acceptance are still pending.
+
+Crow API denials carry `X-Crow-Mobile-API: 1` (including rejected WSS upgrades): a Crow scope/action `403` preserves the link and does not retry. A `401`, or an outer Pangolin `403` without that marker, invalidates the native profile. Preserve this non-secret response header in the proxy; it distinguishes errors, **not authentication**. The native dialog is scrollable/resizes for IME and clears fields on cancellation/pause; actual Android layout/lifecycle acceptance remains pending.
+
 ## Native boundary
 
 `CrowGatewayPlugin` stores device credentials in app-private AES-GCM ciphertext protected by an AndroidKeystore key. Profile ID is AEAD-associated data. Neither pair nor profile listing returns credentials to JavaScript. HTTP API/WSS Authorization headers are injected natively; no query tokens, localStorage, provider keys or plaintext token persistence. Unexpected private response fields are rejected. Android backup/device-transfer extraction is disabled and the FileProvider is not exported.

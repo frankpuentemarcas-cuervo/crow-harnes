@@ -1,10 +1,15 @@
 export function parseEnrollment(raw, now = Date.now()) {
   const value = JSON.parse(raw)
   if (value?.version !== 1 || typeof value.gatewayId !== 'string' || !value.gatewayId || typeof value.invitationCode !== 'string' || !value.invitationCode || !Array.isArray(value.endpoints) || !value.endpoints.length || value.endpoints.length > 8 || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= now) throw new Error('Invitación inválida o vencida. Generá otra desde Crow en Windows.')
+  if (Object.keys(value).some(key => !['version', 'gatewayId', 'invitationCode', 'expiresAt', 'endpoints'].includes(key))) throw new Error('La invitación no puede incluir credenciales del proxy.')
   for (const endpoint of value.endpoints) {
+    if (Object.keys(endpoint).some(key => !['kind', 'url', 'certSHA256', 'provider', 'proxyAuthRequired'].includes(key))) throw new Error('El QR no puede incluir claves del recurso.')
     const url = new URL(endpoint.url)
     if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || url.pathname !== '/' || !['lan-pinned', 'remote-public'].includes(endpoint.kind)) throw new Error('El endpoint debe ser un origen HTTPS exacto.')
     if (endpoint.kind === 'lan-pinned' && !/^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$/.test(endpoint.certSHA256 ?? '')) throw new Error('Falta la huella SHA-256 válida del certificado LAN.')
+    if ('provider' in endpoint || 'proxyAuthRequired' in endpoint) {
+      if (endpoint.provider !== 'pangolin' || endpoint.proxyAuthRequired !== true || endpoint.kind !== 'remote-public' || !/^https:\/\/[a-z0-9.-]+\/?$/.test(endpoint.url) || !url.hostname.includes('.') || !/\.[a-z]{2,63}$/.test(url.hostname) || /\.(localhost|local|internal)$/.test(url.hostname) || url.hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) throw new Error('Pangolin requiere dominio HTTPS exacto y autenticación nativa.')
+    }
   }
   return value
 }
