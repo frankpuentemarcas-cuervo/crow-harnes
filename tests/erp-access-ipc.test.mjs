@@ -73,6 +73,18 @@ test('credential switches wait for approval IPC completion rather than changing 
   release(); await approve; await change; assert.equal(imported, true)
 })
 
+test('detail IPC is sender guarded and serialized with credential switches', async () => {
+  const h = harness(); let release, entered, imported = false
+  const started = new Promise(resolve => { entered = resolve })
+  h.erp.loadDetail = async key => { assert.equal(key, 'task-key'); entered(); await new Promise(resolve => { release = resolve }); return { tasks: [] } }
+  await assert.rejects(h.handlers.get('crow:erp-detail')({ sender: {} }, 'task-key'), /no autorizada/)
+  const detail = h.invoke('crow:erp-detail', 'task-key'); await started
+  h.current.setAccessCredential = async () => { imported = true }
+  const change = h.invoke('crow:access-import', 'host', 'fictional-token')
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(imported, false)
+  release(); await detail; await change; assert.equal(imported, true)
+})
+
 test('local rename cannot modify an invisible or read-only foreign terminal', async () => {
   const h = harness(), id = 'a'.repeat(32)
   h.current.api = async () => [{ id, readOnly: true }]
@@ -81,6 +93,18 @@ test('local rename cannot modify an invisible or read-only foreign terminal', as
   h.current.api = async () => [{ id, readOnly: false }]
   await h.invoke('crow:rename-session', 'host', id, 'own')
   assert.equal(h.state.renamed, true)
+})
+
+test('reconnection returns only permitted saved aliases without deleting offline or foreign metadata', async () => {
+  const h = harness(), own = 'a'.repeat(32), foreign = 'b'.repeat(32)
+  h.state.sessionNames = { ['host:' + own]: 'QA permitted', ['host:' + foreign]: 'Private foreign' }
+  h.current.status = () => 'disconnected'
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.invoke('crow:get-state')).sessionNames)), {})
+  h.current.status = () => 'connected'; h.current.api = async () => [{ id: own }]
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.invoke('crow:get-state')).sessionNames)), { ['host:' + own]: 'QA permitted' })
+  h.current.api = async () => { throw new Error('Temporary scoped read failure') }
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.invoke('crow:get-state')).sessionNames)), {})
+  assert.equal(Object.keys(h.state.sessionNames).length, 2)
 })
 
 test('audit list/detail/export projections hide historical private session records from members', async () => {

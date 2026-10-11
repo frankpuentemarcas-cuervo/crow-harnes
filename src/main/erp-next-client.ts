@@ -3,6 +3,7 @@ export interface ERPCredentials { url: string; apiKey: string; apiSecret: string
 interface ReadBudget { remainingBytes: number }
 // Bound transfer and time, not a legitimate account's number of Tasks.
 const syncBytes = 32_000_000, syncTimeoutMs = 120_000
+const openTaskFilters = JSON.stringify([['status', '=', 'Open']])
 export function validateERPURL(value: string): string {
   let url: URL
   try { url = new URL(value) } catch { throw new Error('Ingresá una URL HTTPS válida de ERPNext.') }
@@ -17,18 +18,30 @@ export async function boundedJSON(response: Response, limit = 2_000_000, budget?
   if (!response.ok) { void response.body?.cancel(); throw new Error(response.status === 403 || response.status === 401 ? 'ERPNext rechazó las credenciales o permisos.' : response.status === 429 ? 'ERPNext limitó las consultas. Intentá más tarde.' : 'No se pudo consultar ERPNext.') }
   const reader = response.body?.getReader(); if (!reader) throw new Error('ERPNext entregó una respuesta inválida.')
   const chunks: Uint8Array[] = []; let bytes = 0
-  try { while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.byteLength; if (budget) budget.remainingBytes -= part.value.byteLength; if (bytes > limit || (budget && budget.remainingBytes < 0)) { await reader.cancel(); throw new Error() }; chunks.push(part.value) }; return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
-  catch { throw new Error('La respuesta excede el límite o tiene formato inválido.') }
+  try {
+    while (true) {
+      let part: ReadableStreamReadResult<Uint8Array>
+      try { part = await reader.read() } catch { throw new Error('La respuesta ERPNext se interrumpió durante la lectura. Reintentá la consulta.') }
+      if (part.done) break
+      bytes += part.value.byteLength; if (budget) budget.remainingBytes -= part.value.byteLength
+      if (bytes > limit || (budget && budget.remainingBytes < 0)) {
+        try { await reader.cancel() } catch { /* Preserve the bounded-read diagnostic. */ }
+        throw new Error(bytes > limit ? `La respuesta ERPNext superó el límite por respuesta de ${limit / 1_000_000} MB.` : 'La respuesta acumulada ERPNext superó el límite de 32 MB. No se publicó un catálogo parcial.')
+      }
+      chunks.push(part.value)
+    }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new Error('La respuesta ERPNext contiene JSON inválido.') }
+  }
   finally { reader.releaseLock() }
 }
-function record(value: unknown): ERPTaskRecord {
+function record(value: unknown, includeDescription = true): ERPTaskRecord {
   if (!value || typeof value !== 'object') throw new Error('Task inválida.')
   const row = value as Record<string, unknown>
-  const fields = ['name', 'subject', 'description', 'project', 'status', 'priority', 'modified'] as const
+  const fields = includeDescription ? ['name', 'subject', 'description', 'project', 'status', 'priority', 'modified'] as const : ['name', 'subject', 'project', 'status', 'priority', 'modified'] as const
   for (const field of fields) if (row[field] != null && (typeof row[field] !== 'string' || (row[field] as string).length > (field === 'description' ? 100000 : 500))) throw new Error('Task inválida.')
   if (!row.name || !row.modified || !row.subject) throw new Error('Task incompleta.')
   if (/[\x00-\x1f\x7f-\x9f]/.test(row.name as string)) throw new Error('Identificador Task inválido.')
-  return { name: row.name as string, subject: taskText(row.subject as string), description: taskText((row.description as string) || ''), project: (row.project as string) || '', status: (row.status as string) || '', priority: (row.priority as string) || '', modified: row.modified as string }
+  return { name: row.name as string, subject: taskText(row.subject as string), description: includeDescription ? taskText((row.description as string) || '') : '', project: (row.project as string) || '', status: (row.status as string) || '', priority: (row.priority as string) || '', modified: row.modified as string }
 }
 export class ERPNextClient {
   private credentials: ERPCredentials
@@ -48,7 +61,7 @@ export class ERPNextClient {
     return result.message
   }
   async checkTaskAccess(): Promise<void> {
-    const query = new URLSearchParams({ fields: JSON.stringify(['name']), limit_page_length: '1', limit_start: '0' })
+    const query = new URLSearchParams({ fields: JSON.stringify(['name']), filters: openTaskFilters, limit_page_length: '1', limit_start: '0' })
     const body = await this.get('/api/resource/Task?' + query) as { data?: unknown }
     if (!Array.isArray(body?.data) || body.data.length > 1 || body.data.some(item => !item || typeof item.name !== 'string' || !item.name || item.name.length > 500)) throw new Error('ERPNext no confirmó acceso de lectura a Task.')
   }
@@ -57,12 +70,12 @@ export class ERPNextClient {
     const budget: ReadBudget = { remainingBytes: syncBytes }, deadline = AbortSignal.timeout(syncTimeoutMs)
     for (let offset = 0; ; offset += 100) {
       if (this.cancel?.aborted || deadline.aborted) throw new Error('No se pudo completar la consulta de Tasks: cancelada o fuera de tiempo.')
-      const query = new URLSearchParams({ fields: JSON.stringify(['name', 'subject', 'description', 'project', 'status', 'priority', 'modified']), limit_page_length: '100', limit_start: String(offset), order_by: 'name asc' })
+      const query = new URLSearchParams({ fields: JSON.stringify(['name', 'subject', 'project', 'status', 'priority', 'modified']), filters: openTaskFilters, limit_page_length: '100', limit_start: String(offset), order_by: 'name asc' })
       const body = await this.get('/api/resource/Task?' + query, budget, deadline) as { data?: unknown }
       if (this.cancel?.aborted || deadline.aborted) throw new Error('No se pudo completar la consulta de Tasks: cancelada o fuera de tiempo.')
       if (!Array.isArray(body?.data) || body.data.length > 100) throw new Error('ERPNext entregó una lista Task inválida.')
       const previousSize = result.size
-      for (const value of body.data) { const task = record(value); result.set(task.name, task) }
+      for (const value of body.data) { const task = record(value, false); if (task.status !== 'Open') throw new Error('ERPNext entregó una Task fuera del filtro Open. No se publicó un catálogo parcial.'); result.set(task.name, task) }
       if (body.data.length < 100) return [...result.values()]
       if (result.size === previousSize) throw new Error('ERPNext repitió una página sin avance. No se publicó una sincronización parcial.')
     }

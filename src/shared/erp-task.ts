@@ -3,7 +3,7 @@ export interface ERPConnectionInput { url: string; apiKey?: string; apiSecret?: 
 export interface ERPConnection { url: string; configured: boolean; allowAIClassification: boolean; identity?: string; error?: string }
 export interface ERPProjectCandidate { id: string; name: string; hostId: string }
 export interface ERPTaskCard {
-  key: string; name: string; subject: string; description: string; erpProject: string; erpStatus: string; priority: string; modified: string
+  key: string; name: string; subject: string; description: string; descriptionLoaded?: boolean; erpProject: string; erpStatus: string; priority: string; modified: string
   stage: ERPTaskStage; projectId?: string; reason?: string; stale: boolean; sessionId?: string; jobId?: string; dispatchStatus?: 'pending' | 'delivered' | 'uncertain'; error?: string
 }
 export interface ERPTaskSnapshot { connection: ERPConnection; tasks: ERPTaskCard[]; links: Record<string, string> }

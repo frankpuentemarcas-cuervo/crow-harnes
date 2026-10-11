@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { ERPNextClient } from '../src/main/erp-next-client.ts'
+import { ERPNextClient, boundedJSON } from '../src/main/erp-next-client.ts'
 import { ERPTaskService } from '../src/main/erp-task-service.ts'
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status })
@@ -31,6 +31,7 @@ test('connection check validates identity and one name, without importing the Ta
     assert.equal(query.pathname, '/api/resource/Task')
     assert.equal(query.searchParams.get('limit_page_length'), '1')
     assert.deepEqual(JSON.parse(query.searchParams.get('fields')), ['name'])
+    assert.deepEqual(JSON.parse(query.searchParams.get('filters')), [['status', '=', 'Open']])
     return json({ data: [{ name: 'TASK-1' }] })
   })
   try {
@@ -53,7 +54,7 @@ test('checking a connection never turns stale cached Tasks into fresh executable
     await assert.rejects(fixture.service.sync()); allowed = true
     const result = await fixture.service.testConnection()
     assert.equal(result.tasks.length, 1); assert.equal(result.tasks[0].stale, true)
-    assert.equal(result.tasks[0].description, 'Fictitious')
+    assert.equal(result.tasks[0].description, '')
   } finally { fixture.cleanup() }
 })
 
@@ -108,6 +109,9 @@ for (const total of [2000, 2001, 2501]) test(`complete pagination loads ${total}
   const client = new ERPNextClient(credentials, async (url, options) => {
     assert.equal(options.method, 'GET')
     const offset = Number(new URL(url).searchParams.get('limit_start')); offsets.push(offset)
+    const query = new URL(url).searchParams
+    assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open']])
+    assert.ok(!JSON.parse(query.get('fields')).includes('description'))
     return json({ data: records.slice(offset, offset + 100) })
   })
   assert.equal((await client.tasks()).length, total)
@@ -126,8 +130,22 @@ test('aggregate transfer budget bounds large catalogues without exposing a parti
     calls++; const offset = Number(new URL(url).searchParams.get('limit_start'))
     return json({ data: Array.from({ length: 100 }, (_, index) => ({ ...row(offset + index), description: 'x'.repeat(18000) })) })
   })
-  await assert.rejects(client.tasks(), /límite|datos/i)
+  await assert.rejects(client.tasks(), /acumulada.*32 MB/)
   assert.ok(calls < 25, `Too many reads: ${calls}`)
+})
+
+test('catalogue ignores descriptions and rejects non-Open records returned by upstream', async () => {
+  const client = new ERPNextClient(credentials, async () => json({ data: [row(1)] }))
+  assert.equal((await client.tasks())[0].description, '')
+  const closed = new ERPNextClient(credentials, async () => json({ data: [{ ...row(1), status: 'Completed' }] }))
+  await assert.rejects(closed.tasks(), /Open/)
+})
+
+test('response diagnostics distinguish page size, accumulated size, invalid JSON and interrupted streams', async () => {
+  await assert.rejects(boundedJSON(json({ message: 'x'.repeat(2_000_000) })), /respuesta.*2 MB/)
+  await assert.rejects(boundedJSON(json({ message: '123456789' }), 100, { remainingBytes: 5 }), /acumulada.*32 MB/)
+  await assert.rejects(boundedJSON(new Response('{bad-json')), /JSON inválido/)
+  await assert.rejects(boundedJSON(new Response(new ReadableStream({ start(controller) { controller.error(new Error('private transport')) } }))), /interrumpió/)
 })
 
 test('an incomplete large refresh cannot replace a previously verified catalogue', async () => {

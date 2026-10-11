@@ -212,6 +212,7 @@ export interface CrowAPI extends AccountUsageAPI {
   erpSaveConnection(input: ERPConnectionInput): Promise<ERPTaskSnapshot>
   erpTestConnection(): Promise<ERPTaskSnapshot>
   erpSync(): Promise<ERPTaskSnapshot>
+  erpTaskDetail(taskKey: string): Promise<ERPTaskSnapshot>
   erpLinkProject(erpProject: string, projectId: string): Promise<ERPTaskSnapshot>
   erpClassify(taskKey: string): Promise<ERPTaskSnapshot>
   erpAssign(taskKey: string, projectId: string): Promise<ERPTaskSnapshot>

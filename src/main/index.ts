@@ -283,6 +283,7 @@ function registerIPC(): void {
   handle('crow:erp-save', (input: ERPConnectionInput) => erpOperation(() => erpTasks.saveConnection(input)))
   handle('crow:erp-test', () => erpOperation(() => erpTasks.testConnection()))
   handle('crow:erp-sync', () => erpOperation(() => erpTasks.sync()))
+  handle('crow:erp-detail', (taskKey: string) => erpOperation(() => erpTasks.loadDetail(taskKey)))
   handle('crow:erp-link', (erpProject: string, projectId: string) => erpOperation(() => erpTasks.linkProject(erpProject, projectId)))
   handle('crow:erp-classify', (taskKey: string) => erpOperation(() => erpTasks.classify(taskKey)))
   handle('crow:erp-assign', (taskKey: string, projectId: string) => erpOperation(() => erpTasks.assign(taskKey, projectId)))

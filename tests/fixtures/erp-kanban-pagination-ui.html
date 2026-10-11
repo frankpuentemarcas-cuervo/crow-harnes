@@ -8,9 +8,12 @@ import '/src/renderer/src/styles.css'
 let checkCount=0, syncCount=0, snapshotCount=0, fail=false, identityFailure=false, snapshotUnavailable=false, finish, accessChanged, finishPreview, finishSync, holdSync=false
 let snapshot={connection:{configured:true,url:'https://fictional.example.org',allowAIClassification:false},tasks:[],links:{}}
 let projects=[{id:'qa-project',hostId:'qa-host',name:'QA project'}]
+let saveCount=0, detailCount=0, saveFailure=false, savedInput, finishDetail, holdDetail=false
 const preview={previewId:'qa-preview',taskKey:'0',projectId:'qa-project',hostId:'qa-host',root:'/fictional',agent:'claude',initialPrompt:'OLD ACCOUNT PREVIEW',expiresAt:Date.now()+60000,jobId:'qa-job'}
 window.__erpQA={
  counts:()=>({checkCount,syncCount}), release:()=>finish?.(), fail:()=>{fail=true},
+ formCounts:()=>({saveCount,detailCount}), saveFailure:value=>{saveFailure=value}, savedInput:()=>savedInput,
+ holdDetail:()=>{holdDetail=true}, releaseDetail:()=>finishDetail?.(),
  identityFailure:()=>{identityFailure=true}, snapshotUnavailable:()=>{snapshotUnavailable=true},
  ready:()=>{fail=false;identityFailure=false;snapshotUnavailable=false;projects=[{id:'qa-project',hostId:'qa-host',name:'QA project'}];snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'},tasks:[{key:'0',name:'TASK-0',subject:'Fictional old account',description:'OLD ACCOUNT DESCRIPTION',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10',stage:'ready',stale:false,projectId:'qa-project'}]};accessChanged?.()},
  changeAccess:()=>{projects=[];snapshot={...snapshot,connection:{...snapshot.connection,identity:'new-user'},tasks:[]};accessChanged?.()},
@@ -18,8 +21,10 @@ window.__erpQA={
 }
 window.crow={
  erpSnapshot:async()=>{snapshotCount++;if(snapshotUnavailable)throw new Error('QA snapshot unavailable');return structuredClone(snapshot)}, erpProjects:async()=>structuredClone(projects),onAccessChanged:callback=>{accessChanged=callback;return()=>{accessChanged=undefined}},
+ erpSaveConnection:async input=>{saveCount++;savedInput=structuredClone(input);if(saveFailure)throw new Error('QA no se pudo guardar');snapshot={...snapshot,connection:{...snapshot.connection,url:input.url,allowAIClassification:input.allowAIClassification}};return structuredClone(snapshot)},
+ erpTaskDetail:async key=>{detailCount++;const next=structuredClone(snapshot);next.tasks=next.tasks.map(task=>task.key===key?{...task,description:'FICTIONAL LOADED DETAIL',descriptionLoaded:true}:task);if(holdDetail){holdDetail=false;await new Promise(resolve=>{finishDetail=resolve});return next}snapshot=next;return structuredClone(snapshot)},
  erpTestConnection:async()=>{checkCount++;await new Promise(resolve=>{finish=resolve});if(identityFailure){snapshot={...snapshot,connection:{...snapshot.connection,identity:undefined},tasks:[],links:{}};throw new Error('QA identity HTTP 200 then Task HTTP 403')}if(fail){snapshot={...snapshot,tasks:snapshot.tasks.map(task=>({...task,stale:true}))};throw new Error('QA conexión rechazada')}snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'}};return structuredClone(snapshot)},
- erpSync:async()=>{syncCount++;if(holdSync){holdSync=false;const previous=structuredClone(snapshot);await new Promise(resolve=>{finishSync=resolve});return previous}fail=false;identityFailure=false;snapshot={...snapshot,tasks:Array.from({length:2501},(_,i)=>({key:String(i),name:'TASK-'+i,subject:'Fictional '+i,description:'QA data',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10 12:00:00',stage:'review',stale:false}))};return structuredClone(snapshot)},
+ erpSync:async()=>{syncCount++;if(holdSync){holdSync=false;const previous=structuredClone(snapshot);await new Promise(resolve=>{finishSync=resolve});return previous}fail=false;identityFailure=false;snapshot={...snapshot,tasks:Array.from({length:2501},(_,i)=>({key:String(i),name:'TASK-'+i,subject:'Fictional '+i,description:'',descriptionLoaded:false,erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10 12:00:00',stage:'review',stale:false}))};return structuredClone(snapshot)},
  erpPreview:async()=>{await new Promise(resolve=>{finishPreview=resolve});return structuredClone(preview)}
 }
 createRoot(document.getElementById('root')).render(React.createElement(ERPTaskKanban,{onClose:()=>{},onTerminal:()=>{throw new Error('No real dispatch')}}))

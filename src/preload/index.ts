@@ -25,6 +25,7 @@ const api: CrowAPI = {
   erpSaveConnection: (input) => ipcRenderer.invoke('crow:erp-save', input),
   erpTestConnection: () => ipcRenderer.invoke('crow:erp-test'),
   erpSync: () => ipcRenderer.invoke('crow:erp-sync'),
+  erpTaskDetail: (taskKey) => ipcRenderer.invoke('crow:erp-detail', taskKey),
   erpLinkProject: (erpProject, projectId) => ipcRenderer.invoke('crow:erp-link', erpProject, projectId),
   erpClassify: (taskKey) => ipcRenderer.invoke('crow:erp-classify', taskKey),
   erpAssign: (taskKey, projectId) => ipcRenderer.invoke('crow:erp-assign', taskKey, projectId),

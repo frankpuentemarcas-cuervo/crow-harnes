@@ -20,6 +20,7 @@ interface Approval { preview: ERPTaskPreview; fingerprint: string; generation: n
 type DispatchHistory = Pick<ERPTaskCard, 'jobId' | 'sessionId' | 'dispatchStatus' | 'stage'>
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const fingerprint = (task: ERPTaskRecord): string => hash(task)
+const catalogueFingerprint = (task: ERPTaskRecord): string => fingerprint({ ...task, description: '' })
 const maximumStoreBytes = 64_000_000
 const stages: ERPTaskStage[] = ['review', 'ready', 'running', 'human-review', 'done']
 
@@ -43,7 +44,7 @@ export class ERPTaskService {
   constructor(directory: string, encryption: SecretEncryption, dependencies: ERPTaskDependencies) {
     this.encryption = encryption; this.dependencies = dependencies
     mkdirSync(directory, { recursive: true }); this.file = join(directory, 'erp-tasks.json')
-    // Entire payload is encrypted: Task descriptions are enterprise data as well.
+    // Entire ledger is encrypted; even Task titles/metadata are enterprise data.
     try {
       if (existsSync(this.file)) {
         if (statSync(this.file).size > maximumStoreBytes || !encryption.isEncryptionAvailable()) throw new Error('Unreadable ERP ledger')
@@ -61,7 +62,7 @@ export class ERPTaskService {
         if (Array.isArray(value?.tasks)) for (const row of value.tasks) {
           if (!row || typeof row.key !== 'string' || typeof row.name !== 'string' || typeof row.subject !== 'string' || typeof row.description !== 'string' || typeof row.modified !== 'string' || !stages.includes(row.stage)) throw new Error('Invalid Task ledger')
           if (row.jobId !== undefined && (typeof row.jobId !== 'string' || !row.jobId || !['pending', 'uncertain', 'delivered'].includes(row.dispatchStatus))) throw new Error('Invalid Task dispatch ledger')
-          const card: ERPTaskCard = { key: row.key, name: row.name, subject: row.subject, description: row.description, erpProject: typeof row.erpProject === 'string' ? row.erpProject : '', erpStatus: typeof row.erpStatus === 'string' ? row.erpStatus : '', priority: typeof row.priority === 'string' ? row.priority : '', modified: row.modified, stage: row.stage, stale: true }
+          const card: ERPTaskCard = { key: row.key, name: row.name, subject: row.subject, description: '', descriptionLoaded: false, erpProject: typeof row.erpProject === 'string' ? row.erpProject : '', erpStatus: typeof row.erpStatus === 'string' ? row.erpStatus : '', priority: typeof row.priority === 'string' ? row.priority : '', modified: row.modified, stage: row.stage, stale: true }
           if (typeof row.projectId === 'string') card.projectId = row.projectId
           if (typeof row.sessionId === 'string') card.sessionId = row.sessionId
           if (typeof row.jobId === 'string') card.jobId = row.jobId
@@ -75,7 +76,7 @@ export class ERPTaskService {
   }
   private persist(): void {
     if (!this.encryption.isEncryptionAvailable()) throw new Error('Almacenamiento seguro no disponible.')
-    try { for (const card of this.cards.values()) if (card.jobId) this.history.set(card.key, { jobId: card.jobId, sessionId: card.sessionId, dispatchStatus: card.dispatchStatus, stage: card.stage }); const value = JSON.stringify({ connection: this.connection, tasks: [...this.cards.values()], history: [...this.history.entries()], links: this.links }); const encrypted = this.encryption.encryptString(value).toString('base64'); if (Buffer.byteLength(encrypted) > maximumStoreBytes) throw new Error('ERP ledger limit'); writeFileSync(this.file + '.tmp', encrypted, { mode: 0o600 }); renameSync(this.file + '.tmp', this.file) }
+    try { for (const card of this.cards.values()) if (card.jobId) this.history.set(card.key, { jobId: card.jobId, sessionId: card.sessionId, dispatchStatus: card.dispatchStatus, stage: card.stage }); const value = JSON.stringify({ connection: this.connection, tasks: [...this.cards.values()].map(card => ({ ...card, description: '', descriptionLoaded: false })), history: [...this.history.entries()], links: this.links }); const encrypted = this.encryption.encryptString(value).toString('base64'); if (Buffer.byteLength(encrypted) > maximumStoreBytes) throw new Error('ERP ledger limit'); writeFileSync(this.file + '.tmp', encrypted, { mode: 0o600 }); renameSync(this.file + '.tmp', this.file) }
     catch { throw new Error('No se pudo guardar el estado ERP de forma segura.') }
   }
   private now(): number { return this.dependencies.now?.() ?? Date.now() }
@@ -88,7 +89,7 @@ export class ERPTaskService {
   }
   snapshot(): ERPTaskSnapshot {
     const candidates = this.dependencies.projects()
-    return { connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, stage: card.stage, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
+    return { connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, descriptionLoaded: card.descriptionLoaded, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, stage: card.stage, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
   }
   saveConnection(input: ERPConnectionInput): ERPTaskSnapshot {
     this.ensure()
@@ -97,11 +98,14 @@ export class ERPTaskService {
     for (const secret of [input.apiKey, input.apiSecret]) if (secret !== undefined && (typeof secret !== 'string' || !secret.trim() || secret.length > 8192 || /[\r\n:]/.test(secret))) throw new Error('Clave ERP inválida.')
     if (!this.encryption.isEncryptionAvailable()) throw new Error('Almacenamiento seguro no disponible.')
     if ((!this.connection || url !== this.connection.url) && (!input.apiKey || !input.apiSecret)) throw new Error('Ingresá ambas claves al configurar otra URL.')
+    if (!!input.apiKey !== !!input.apiSecret) throw new Error('Ingresá ambas claves juntas, o dejá ambas vacías para conservarlas.')
     const changed = !this.connection || url !== this.connection.url || !!input.apiKey || !!input.apiSecret
     const next: SavedConnection = { url, encryptedKey: input.apiKey ? this.encryption.encryptString(input.apiKey.trim()).toString('base64') : this.connection!.encryptedKey, encryptedSecret: input.apiSecret ? this.encryption.encryptString(input.apiSecret.trim()).toString('base64') : this.connection!.encryptedSecret, allowAIClassification: input.allowAIClassification, identity: changed ? undefined : this.connection?.identity }
     if (this.pending.size) throw new Error('Esperá el despacho pendiente antes de cambiar las credenciales.')
-    this.abort.abort(); this.abort = new AbortController(); this.generation++; this.approvals.clear()
-    this.connection = next; if (changed) { this.cards.clear(); this.links = Object.create(null) }; this.error = undefined; this.persist(); return this.snapshot()
+    const previous = { connection: this.connection, cards: this.cards, links: this.links, error: this.error }
+    this.connection = next; if (changed) { this.cards = new Map(); this.links = Object.create(null) }; this.error = undefined
+    try { this.persist() } catch (error) { this.connection = previous.connection; this.cards = previous.cards; this.links = previous.links; this.error = previous.error; throw error }
+    this.abort.abort(); this.abort = new AbortController(); this.generation++; this.approvals.clear(); return this.snapshot()
   }
   private discardOtherIdentity(identity: string): void {
     if (this.connection?.identity && this.connection.identity !== identity) {
@@ -142,8 +146,8 @@ export class ERPTaskService {
       for (const task of tasks) {
         const key = hash([this.connection!.url, identity, task.name]), previous = this.cards.get(key)
         const history = this.history.get(key)
-        const changed = previous && fingerprint(this.record(previous)) !== fingerprint(task)
-        const card: ERPTaskCard = { key, name: task.name, subject: task.subject, description: task.description, erpProject: task.project, erpStatus: task.status, priority: task.priority, modified: task.modified, stage: previous?.stage ?? 'review', stale: false, projectId: previous?.projectId ?? this.links[task.project], reason: previous?.reason, sessionId: previous?.sessionId, jobId: previous?.jobId, dispatchStatus: previous?.dispatchStatus, error: previous?.error }
+        const changed = previous && catalogueFingerprint(this.record(previous)) !== catalogueFingerprint(task)
+        const card: ERPTaskCard = { key, name: task.name, subject: task.subject, description: '', descriptionLoaded: false, erpProject: task.project, erpStatus: task.status, priority: task.priority, modified: task.modified, stage: previous?.stage ?? 'review', stale: false, projectId: previous?.projectId ?? this.links[task.project], reason: previous?.reason, sessionId: previous?.sessionId, jobId: previous?.jobId, dispatchStatus: previous?.dispatchStatus, error: previous?.error }
         if (!card.jobId && history) { card.jobId = history.jobId; card.sessionId = history.sessionId; card.dispatchStatus = history.dispatchStatus; card.stage = history.stage; if (history.dispatchStatus === 'uncertain') card.error = 'Entrega incierta; verificá la terminal. No se reenvía automáticamente.' }
         if (changed && !card.jobId) { card.stage = 'review'; card.reason = undefined }
         if (card.projectId && !this.dependencies.projects().some(project => project.id === card.projectId)) { card.projectId = undefined; if (!card.jobId) card.stage = 'review' }
@@ -156,6 +160,25 @@ export class ERPTaskService {
     finally { this.reading = false }
   }
   private record(card: ERPTaskCard): ERPTaskRecord { return { name: card.name, subject: card.subject, description: card.description, project: card.erpProject, status: card.erpStatus, priority: card.priority, modified: card.modified } }
+  async loadDetail(key: string): Promise<ERPTaskSnapshot> {
+    const card = this.card(key)
+    if (this.pending.size) throw new Error('Esperá el despacho pendiente antes de consultar detalles.')
+    const client = this.client(), generation = this.generation
+    this.reading = true; this.approvals.clear()
+    try {
+      const identity = await client.identity()
+      this.ensure(); if (generation !== this.generation) throw new Error('La integración cambió durante la consulta.')
+      if (identity !== this.connection?.identity) { this.discardOtherIdentity(identity); throw new Error('Cambió la identidad ERP; sincronizá nuevamente.') }
+      const fresh = await client.task(card.name)
+      this.ensure(); if (generation !== this.generation || this.cards.get(key) !== card) throw new Error('La integración cambió durante la consulta.')
+      if (fresh.status !== 'Open' || catalogueFingerprint(fresh) !== catalogueFingerprint(this.record(card))) throw new Error('La Task cambió o ya no está Open. Sincronizá nuevamente.')
+      card.description = fresh.description; card.descriptionLoaded = true; card.error = undefined
+      return this.snapshot()
+    } catch (error) {
+      if (generation === this.generation && this.cards.get(key) === card) { card.stale = true; card.description = ''; card.descriptionLoaded = false; this.approvals.clear() }
+      throw error
+    } finally { this.reading = false }
+  }
   private card(key: string): ERPTaskCard { this.ensure(); if (this.reading) throw new Error('Esperá que termine la consulta ERP antes de continuar.'); const card = this.cards.get(key); if (!card || card.stale) throw new Error('Actualizá la Task antes de continuar.'); return card }
   private project(id: string, hostId?: string): ERPProjectCandidate { const project = this.dependencies.projects().find(candidate => candidate.id === id && (!hostId || candidate.hostId === hostId)); if (!project) throw new Error('Proyecto no permitido o no disponible.'); return project }
   linkProject(erpProject: string, projectId: string): ERPTaskSnapshot {
@@ -168,6 +191,8 @@ export class ERPTaskService {
   async classify(key: string): Promise<ERPTaskSnapshot> {
     const card = this.card(key); if (!this.connection?.allowAIClassification) throw new Error('Autorizá primero el envío de Task a Free LLM.')
     if (card.jobId || this.classifying) throw new Error('La Task está en ejecución o hay otra clasificación pendiente.')
+    if (card.descriptionLoaded === false) await this.loadDetail(key)
+    if (this.card(key) !== card || !this.connection?.allowAIClassification || card.jobId || this.classifying) throw new Error('La Task o el consentimiento cambió durante la consulta.')
     const generation = this.generation, version = fingerprint(this.record(card)), projectId = card.projectId, stage = card.stage
     const unchanged = (): boolean => generation === this.generation && this.cards.get(key) === card && fingerprint(this.record(card)) === version && card.projectId === projectId && card.stage === stage && !card.jobId && !card.stale
     this.classifying = true
@@ -183,6 +208,8 @@ export class ERPTaskService {
     if (!input || !['claude', 'codex'].includes(input.agent)) throw new Error('Agente inválido.')
     const card = this.card(input.taskKey); this.project(input.projectId, input.hostId)
     if (card.jobId || card.stage !== 'ready' || card.projectId !== input.projectId) throw new Error('La Task no está lista o ya tiene despacho.')
+    if (card.descriptionLoaded === false) await this.loadDetail(card.key)
+    if (this.card(card.key) !== card || card.jobId || card.stage !== 'ready' || card.projectId !== input.projectId) throw new Error('La Task cambió durante la consulta.')
     const generation = this.generation, version = fingerprint(this.record(card))
     const authorized = await this.dependencies.authorizeProject(input.projectId, input.hostId)
     this.ensure(); this.project(input.projectId, input.hostId)

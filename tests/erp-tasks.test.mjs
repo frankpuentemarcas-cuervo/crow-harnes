@@ -28,7 +28,7 @@ test('ERP connector queries only Task with bounded paging and authenticated read
   for (const { url, opts } of calls) { assert.match(url, /\/api\/resource\/Task\?/); assert.equal(opts.method, 'GET'); assert.equal(opts.redirect, 'error'); assert.equal(opts.headers.Authorization, 'token KEY:SECRET'); assert.ok(!url.includes('owner')) }
 })
 test('connection DTO and encrypted file do not expose credentials; Tasks sanitize HTML and identity change clears cache', async () => {
-  const c = setup(); try { c.configure(false); const checked = await c.service.testConnection(); assert.equal(checked.tasks.length, 0); await c.service.sync(); const snap = c.service.snapshot(); assert.equal(snap.connection.identity, 'erp-user'); assert.equal(snap.tasks[0].description, 'Business confidential'); const dto = JSON.stringify(snap), disk = readFileSync(join(c.dir, 'erp-tasks.json'), 'utf8'); for (const text of ['ERP-KEY', 'ERP-SECRET', 'Business confidential']) assert.ok(!disk.includes(text)); assert.ok(!dto.includes('ERP-KEY')); c.service.saveConnection({ url: 'https://different.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false }); assert.equal(c.service.snapshot().tasks.length, 0) } finally { c.cleanup() }
+  const c = setup(); try { c.configure(false); const checked = await c.service.testConnection(); assert.equal(checked.tasks.length, 0); await c.service.sync(); assert.equal(c.service.snapshot().tasks[0].description, ''); const snap = await c.service.loadDetail(c.service.snapshot().tasks[0].key); assert.equal(snap.connection.identity, 'erp-user'); assert.equal(snap.tasks[0].description, 'Business confidential'); const dto = JSON.stringify(snap), disk = readFileSync(join(c.dir, 'erp-tasks.json'), 'utf8'); for (const text of ['ERP-KEY', 'ERP-SECRET', 'Business confidential']) assert.ok(!disk.includes(text)); assert.ok(!dto.includes('ERP-KEY')); const ledger = JSON.parse(encryption.decryptString(Buffer.from(disk, 'base64'))); assert.equal(ledger.tasks[0].description, ''); c.service.saveConnection({ url: 'https://different.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false }); assert.equal(c.service.snapshot().tasks.length, 0) } finally { c.cleanup() }
 })
 test('AI requires consent, uses minimal candidate DTO and cannot authorize dispatch', async () => {
   const c = setup(); try { const key = await c.ready(); await assert.rejects(c.service.classify(key), /Autorizá/); c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true }); await c.service.classify(key); const request = c.calls.find(call => call.url.includes('/chat/completions')); assert.ok(request); const prompt = request.options.body; assert.ok(!prompt.includes('ERP-SECRET')); assert.ok(!prompt.includes('hostId')); assert.equal(c.dispatched.length, 0); assert.equal(c.service.snapshot().tasks[0].stage, 'ready') } finally { c.cleanup() }
@@ -106,7 +106,7 @@ test('approval binds canonical project root and actor through the dispatch trans
   } finally { c.cleanup() }
 })
 
-test('large supported Task cache retains dispatch history after restart beyond former 8MB cap', async () => {
+test('lightweight Task cache omits descriptions and retains dispatch history after restart', async () => {
   const c = setup()
   try {
     const records = Array.from({ length: 600 }, (_, index) => ({ ...row(), name: 'TASK-' + String(index).padStart(4, '0'), description: 'x'.repeat(12000) }))
@@ -117,11 +117,89 @@ test('large supported Task cache retains dispatch history after restart beyond f
     }
     c.configure(false); await c.service.sync(); const key = c.service.snapshot().tasks[0].key
     c.service.assign(key, 'p1'); const preview = await c.preview(key); await c.service.approve(preview.previewId)
+    assert.ok(statSync(join(c.dir, 'erp-tasks.json')).size < 1_000_000)
+    // Import the former large encrypted format without losing spent-job safety.
+    const legacy = JSON.parse(encryption.decryptString(Buffer.from(readFileSync(join(c.dir, 'erp-tasks.json'), 'utf8'), 'base64')))
+    legacy.tasks.forEach(card => { card.description = 'x'.repeat(12000); delete card.descriptionLoaded })
+    writeFileSync(join(c.dir, 'erp-tasks.json'), encryption.encryptString(JSON.stringify(legacy)).toString('base64'))
     assert.ok(statSync(join(c.dir, 'erp-tasks.json')).size > 8_000_000)
     const reloaded = new ERPTaskService(c.dir, encryption, c.deps)
     assert.equal(reloaded.snapshot().tasks.length, 600); assert.equal(reloaded.snapshot().tasks[0].jobId, preview.jobId)
+    assert.ok(reloaded.snapshot().tasks.every(card => card.description === '' && card.descriptionLoaded === false))
     await reloaded.sync(); await assert.rejects(reloaded.preview({ taskKey: key, projectId: 'p1', hostId: 'h1', agent: 'codex' }))
     reloaded.stop()
+  } finally { c.cleanup() }
+})
+
+test('detail is read on demand before classification and preview, never for catalogue sync', async () => {
+  const c = setup()
+  try {
+    const key = await c.ready(); assert.ok(!c.calls.some(call => call.url.includes('/Task/')))
+    const preview = await c.preview(key); assert.match(preview.initialPrompt, /Business confidential/)
+    assert.equal(c.service.snapshot().tasks[0].descriptionLoaded, true)
+    await c.service.sync(); c.service.assign(key, 'p1')
+    c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true })
+    await c.service.classify(key)
+    assert.match(c.calls.find(call => call.url.includes('chat/completions')).options.body, /Business confidential/)
+  } finally { c.cleanup() }
+})
+
+test('changed, closed, mismatched or inaccessible Task detail blocks classification and dispatch', async () => {
+  for (const kind of ['changed', 'closed', 'mismatched', 'denied']) {
+    const c = setup()
+    try {
+      const key = await c.ready()
+      if (kind === 'changed') c.task.modified = '2026-10-11 12:00:00'
+      if (kind === 'closed') c.task.status = 'Completed'
+      if (kind === 'mismatched') c.task.name = 'OTHER-TASK'
+      if (kind === 'denied') c.task = null
+      await assert.rejects(c.preview(key)); assert.equal(c.dispatched.length, 0)
+      assert.equal(c.service.snapshot().tasks[0].stale, true)
+      assert.equal(c.service.snapshot().tasks[0].description, '')
+    } finally { c.cleanup() }
+  }
+})
+
+test('late detail cannot restore old credentials or leak another identity', async () => {
+  const c = setup(); let release
+  try {
+    const key = await c.ready(), original = c.deps.request
+    c.deps.request = async (url, opts) => url.includes('/Task/') ? new Promise(resolve => { release = resolve }) : original(url, opts)
+    const detail = c.service.loadDetail(key)
+    while (!release) await new Promise(resolve => setImmediate(resolve))
+    c.service.saveConnection({ url: 'https://another.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false })
+    release(json({ data: row() })); await assert.rejects(detail)
+    assert.equal(c.service.snapshot().tasks.length, 0)
+    await c.service.sync(); const newKey = c.service.snapshot().tasks[0].key
+    c.deps.request = async (url, opts) => url.includes('get_logged_user') ? json({ message: 'other-user' }) : original(url, opts)
+    await assert.rejects(c.service.loadDetail(newKey), /identidad/)
+    assert.equal(c.service.snapshot().tasks.length, 0)
+  } finally { release?.(json({ data: row() })); c.cleanup() }
+})
+
+test('detail locks concurrent reads and assignment, and a description-only change invalidates approval', async () => {
+  const c = setup(); let release
+  try {
+    const key = await c.ready(), original = c.deps.request
+    c.deps.request = async (url, opts) => url.includes('/Task/') ? new Promise(resolve => { release = resolve }) : original(url, opts)
+    const detail = c.service.loadDetail(key)
+    while (!release) await new Promise(resolve => setImmediate(resolve))
+    await assert.rejects(c.service.sync(), /consulta/); await assert.rejects(c.service.testConnection(), /consulta/)
+    assert.throws(() => c.service.assign(key, 'p1'), /consulta/)
+    release(json({ data: row() })); await detail; c.deps.request = original
+    const preview = await c.preview(key); c.task.description = 'Changed after preview'
+    await assert.rejects(c.service.approve(preview.previewId), /cambió/); assert.equal(c.dispatched.length, 0)
+  } finally { release?.(json({ data: row() })); c.cleanup() }
+})
+
+test('failed credential persistence keeps the previous saved connection and partial key pairs are rejected', async () => {
+  const c = setup()
+  try {
+    await c.ready(); const before = c.service.snapshot()
+    assert.throws(() => c.service.saveConnection({ url: 'https://erp.example.org', apiKey: 'NEW', allowAIClassification: false }), /ambas/)
+    mkdirSync(join(c.dir, 'erp-tasks.json.tmp'))
+    assert.throws(() => c.service.saveConnection({ url: 'https://other.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false }), /guardar/)
+    assert.deepEqual(c.service.snapshot(), before)
   } finally { c.cleanup() }
 })
 
