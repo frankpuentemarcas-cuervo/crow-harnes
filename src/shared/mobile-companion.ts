@@ -1,7 +1,8 @@
 import type { ConnectionStatus, SessionInfo } from './types'
 
-export interface MobileStartInput { address: string; publicOrigin?: string }
-export interface MobileEndpoint { kind: 'lan-pinned' | 'remote-public'; url: string; certSHA256?: string }
+export type MobileRemoteProvider = 'tailscale' | 'pangolin'
+export interface MobileStartInput { address: string; publicOrigin?: string; remoteProvider?: MobileRemoteProvider; loopbackPort?: number }
+export interface MobileEndpoint { kind: 'lan-pinned' | 'remote-public'; url: string; certSHA256?: string; provider?: 'pangolin'; proxyAuthRequired?: true }
 export interface MobileCapabilities { input: boolean; create: boolean; close: boolean; quotas: boolean }
 export interface MobileEnrollmentInput { projectIds: string[]; capabilities?: Partial<MobileCapabilities> }
 /** No reusable credential in this desktop-only, single-use invitation. */

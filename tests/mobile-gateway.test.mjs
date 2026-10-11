@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { createServer } from 'node:http'
 
 const ts = path => stripTypeScriptTypes(readFileSync(new URL(path, import.meta.url), 'utf8'), { mode: 'transform' })
 const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64')
@@ -23,7 +24,7 @@ const source = ts('../src/main/mobile-gateway.ts')
   .replace("import { isPrivateLanIPv4 } from './mobile-network';", 'const isPrivateLanIPv4 = () => true;')
   .replace("import { networkInterfaces } from 'node:os';", "const networkInterfaces = () => ({ lan: [{ family: 'IPv4', internal: false, address: '192.168.1.8' }] });")
   .replace("from './mobile-device-auth'", `from '${registryURL}'`)
-const { MobileGateway } = await import(dataURL(source))
+const { MobileGateway, mobileRemoteConfig, listenMobileLoopback } = await import(dataURL(source))
 const SESSION = 'a'.repeat(32), FOREIGN = 'b'.repeat(32), OUTSIDE = 'c'.repeat(32)
 function fixture() {
   const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: {}, notices: [] }
@@ -80,6 +81,7 @@ test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or
   assert.equal(boot.body.devices[0].id, paired.device.id)
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, undefined, { cookie: 'crow_mobile=cookie' })).status, 401)
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).status, 403)
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).headers['X-Crow-Mobile-API'], '1')
   assert.equal((await c.request('/api/state', 'GET', undefined, paired.credential, {}, true)).status, 404)
 })
 test('read-only enrollment denies create/wake/close/quotas and returns foreign sessions readonly', async () => {
@@ -223,4 +225,44 @@ test('remote access cannot bind publicly or trust arbitrary proxy origins', asyn
   const paired = await c.pair()
   assert.equal(paired.endpoints[0].kind, 'lan-pinned'); assert.equal(paired.endpoints[0].certSHA256, 'pin')
   assert.equal(paired.endpoints.some(endpoint => endpoint.url.startsWith('http:')), false)
+})
+
+test('Pangolin is explicit, requires a stable port and a pure public HTTPS FQDN', () => {
+  const valid = { address: '192.168.1.8', remoteProvider: 'pangolin', publicOrigin: 'https://crow.example.com', loopbackPort: 47323 }
+  assert.deepEqual(mobileRemoteConfig(valid), { provider: 'pangolin', origin: valid.publicOrigin, port: 47323 })
+  assert.equal(mobileRemoteConfig({ address: valid.address, publicOrigin: 'https://host.ts.net' }).provider, 'tailscale')
+  assert.equal(mobileRemoteConfig(valid.address), undefined)
+  for (const publicOrigin of ['http://crow.example.com', 'https://localhost', 'https://foo.localhost', 'https://127.0.0.1', 'https://[::1]', 'https://a.123', 'https://*.example.com', 'https://crow.example.com:443', 'https://crow.example.com/path', 'https://user@crow.example.com', 'https://crow.example.com?x=1', 'https://crow.example.com#x', 'https://crow.example.com/../']) assert.throws(() => mobileRemoteConfig({ ...valid, publicOrigin }))
+  for (const loopbackPort of [undefined, 0, 1023, 65536, 47323.5, '47323']) assert.throws(() => mobileRemoteConfig({ ...valid, loopbackPort }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, remoteProvider: 'unknown' }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, publicOrigin: undefined }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, remoteProvider: undefined }))
+})
+
+test('stable loopback bind is exclusive and never silently retries a different port', async () => {
+  const server = new EventEmitter(), calls = []
+  server.listen = (options) => { calls.push(options); server.emit('error', Object.assign(new Error('occupied'), { code: 'EADDRINUSE' })) }
+  await assert.rejects(listenMobileLoopback(server, 47323), /47323.*ocupado/)
+  assert.deepEqual(calls, [{ port: 47323, host: '127.0.0.1', exclusive: true }])
+  server.listen = (options, ready) => { calls.push(options); ready() }
+  await listenMobileLoopback(server, 47324)
+  assert.deepEqual(calls[1], { port: 47324, host: '127.0.0.1', exclusive: true })
+})
+
+test('real local bind stays loopback and an occupied port is never replaced', async t => {
+  const owner = createServer(), other = createServer()
+  t.after(async () => { if (owner.listening) await new Promise(ok => owner.close(ok)); if (other.listening) await new Promise(ok => other.close(ok)) })
+  await listenMobileLoopback(owner, 0)
+  const address = owner.address()
+  assert.equal(address.address, '127.0.0.1')
+  await assert.rejects(listenMobileLoopback(other, address.port), /ocupado/)
+  assert.equal(other.listening, false)
+})
+
+test('Pangolin invitation contains only provider flags, never proxy credentials', async () => {
+  const c = fixture()
+  c.gateway.endpoints.push({ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true })
+  const invite = await c.gateway.invite({ projectIds: ['p1'] })
+  assert.equal(invite.endpoints[1].proxyAuthRequired, true)
+  assert.doesNotMatch(JSON.stringify(c.gateway.status()), /tokenId|proxyAuth"|P-Access-Token|credential/)
 })

@@ -26,6 +26,35 @@ export type MobileGatewayDependencies = {
 interface StreamRecord { client: WebSocket; connection: Connection; streamId: string; hostId: string; sessionId: string; device?: DeviceRecord; browser: boolean }
 type Certificate = { address: string; key: string; cert: string; fingerprint: string }
 
+/** Provider selection is explicit; forwarded headers never choose the trusted origin. */
+export function mobileRemoteConfig(input: string | MobileStartInput): { provider: 'tailscale' | 'pangolin'; origin: string; port: number } | undefined {
+  if (typeof input === 'string') return
+  const provider = input.remoteProvider === undefined ? 'tailscale' : input.remoteProvider
+  if (provider !== 'tailscale' && provider !== 'pangolin') throw new Error('Proveedor remoto inválido.')
+  if (!input.publicOrigin) {
+    if (provider === 'pangolin' || input.loopbackPort !== undefined) throw new Error('Pangolin requiere un dominio HTTPS y un puerto backend fijo.')
+    return
+  }
+  const message = provider === 'tailscale' ? 'Configurá una URL HTTPS explícita de Tailscale Serve (*.ts.net).' : 'Configurá un dominio HTTPS público exacto, sin puerto, ruta, usuario ni parámetros.'
+  const match = /^https:\/\/([a-z0-9.-]+)\/?$/i.exec(input.publicOrigin)
+  const hostname = match?.[1].toLowerCase() || ''
+  if (!hostname || hostname.length > 253 || !hostname.includes('.') || hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part)) || !/\.[a-z]{2,63}$/.test(hostname) || /\.(localhost|local|internal)$/.test(hostname)) throw new Error(message)
+  const url = new URL(input.publicOrigin)
+  if (url.protocol !== 'https:' || url.hostname !== hostname || url.port || (provider === 'tailscale' && !hostname.endsWith('.ts.net'))) throw new Error(message)
+  if (provider === 'pangolin') {
+    if (!Number.isInteger(input.loopbackPort) || Number(input.loopbackPort) < 1024 || Number(input.loopbackPort) > 65535) throw new Error('Elegí un puerto backend fijo entre 1024 y 65535 para Newt.')
+  } else if (input.loopbackPort !== undefined) throw new Error('El puerto fijo requiere seleccionar Pangolin.')
+  return { provider, origin: url.origin, port: input.loopbackPort || 0 }
+}
+
+export function listenMobileLoopback(server: HttpServer, port: number): Promise<void> {
+  return new Promise((ok, fail) => {
+    const error = (reason: NodeJS.ErrnoException): void => { server.off('error', error); fail(reason.code === 'EADDRINUSE' ? new Error(`El puerto backend ${port} está ocupado. Elegí otro y actualizá Newt; no se cambia automáticamente.`) : new Error('No se pudo abrir el backend solo loopback.')) }
+    server.once('error', error)
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => { server.off('error', error); ok() })
+  })
+}
+
 export function mobileAddresses(): string[] {
   return [...new Set(Object.values(networkInterfaces()).flatMap((entries) => (entries || [])
     .filter((entry) => entry.family === 'IPv4' && !entry.internal && isPrivateLanIPv4(entry.address))
@@ -119,13 +148,14 @@ export class MobileGateway {
   private fingerprint = ''
   private endpoints: MobileEndpoint[] = []
   private loopbackUrl = ''
+  private remoteProvider?: 'tailscale' | 'pangolin'
   private failures = new Map<string, { count: number; until: number }>()
   private monitor?: NodeJS.Timeout
 
   constructor(private deps: MobileGatewayDependencies) {}
 
   status(): MobileStatus {
-    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined } : { running: false }
+    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined, remoteProvider: this.remoteProvider } : { running: false }
   }
   devices(): MobileDevice[] { return this.registry.list() }
   revoke(id: string): void {
@@ -161,13 +191,9 @@ export class MobileGateway {
 
   async start(input: string | MobileStartInput): Promise<MobileStatus> {
     const address = typeof input === 'string' ? input : input.address
-    const publicOrigin = typeof input === 'string' ? undefined : input.publicOrigin
+    const remote = mobileRemoteConfig(input)
     if (!mobileAddresses().includes(address)) throw new Error('Elegí una dirección IPv4 privada de este equipo.')
     if (!app.isPackaged) throw new Error('La vista móvil estará disponible en el instalador; no se expone el servidor de desarrollo.')
-    if (publicOrigin) {
-      const parsed = new URL(publicOrigin)
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || !/^[a-z0-9][a-z0-9.-]*\.ts\.net$/i.test(parsed.hostname) || parsed.port) throw new Error('Configurá una URL HTTPS explícita de Tailscale Serve (*.ts.net).')
-    }
     if (this.server) await this.stop()
     const tls = certificate(address)
     this.gatewayId = randomUUID()
@@ -189,12 +215,13 @@ export class MobileGateway {
     this.origin = `https://${address}:${info.port}`
     this.endpoints = [{ kind: 'lan-pinned', url: this.origin, certSHA256: tls.fingerprint }]
     try {
-      if (publicOrigin) {
-        this.endpoints.push({ kind: 'remote-public', url: new URL(publicOrigin).origin })
+      this.remoteProvider = remote?.provider
+      if (remote) {
+        this.endpoints.push({ kind: 'remote-public', url: remote.origin, ...(remote.provider === 'pangolin' ? { provider: 'pangolin', proxyAuthRequired: true } as const : {}) })
         const loopback = createHttpServer((req, res) => { void this.handle(req, res, true) })
         loopback.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head, true) })
         loopback.headersTimeout = 10_000; loopback.requestTimeout = 30_000
-        await new Promise<void>((ok, fail) => { loopback.once('error', fail); loopback.listen(0, '127.0.0.1', () => { loopback.off('error', fail); ok() }) })
+        await listenMobileLoopback(loopback, remote.port)
         this.loopback = loopback
         loopback.on('error', () => { void this.stop() })
         const info = loopback.address()
@@ -214,6 +241,7 @@ export class MobileGateway {
     this.clients.clear()
     const servers = [this.server, this.loopback]
     this.server = undefined; this.loopback = undefined
+    this.remoteProvider = undefined
     this.cookieToken = ''; this.pairingCode = ''; this.origin = ''; this.loopbackUrl = ''; this.endpoints = []; this.browserScopes = []
     this.registry.clear(); this.failures.clear()
     await Promise.all(servers.map(server => server && new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections() })))
@@ -311,7 +339,7 @@ export class MobileGateway {
     res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ${this.origin.replace('https:', 'wss:')}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`)
     try {
       const url = new URL(req.url || '/', this.origin)
-      if (url.pathname.startsWith('/api/v1/')) { await this.nativeHandle(req, res, url); return }
+      if (url.pathname.startsWith('/api/v1/')) { res.setHeader('X-Crow-Mobile-API', '1'); await this.nativeHandle(req, res, url); return }
       if (proxy) { json(res, 404, { error: 'Ruta no encontrada.' }); return }
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/mobile.html' || url.pathname.startsWith('/assets/'))) { this.staticFile(url.pathname, res); return }
       if (req.method === 'POST' && url.pathname === '/api/pair') {
@@ -515,6 +543,6 @@ export class MobileGateway {
           else connection.detach(streamId)
         }).catch(() => { client.close(); connection.detach(streamId) })
       })
-    } catch { socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); socket.destroy() }
+    } catch { socket.write('HTTP/1.1 403 Forbidden\r\nX-Crow-Mobile-API: 1\r\nConnection: close\r\n\r\n'); socket.destroy() }
   }
 }
