@@ -27,6 +27,20 @@ test('uses OpenAI-compatible local API and treats the assistant reply only as da
   assert.equal(result.source, 'ai')
 })
 
+test('prompt prioritizes current human requests across sessions over report framing', async () => {
+  const message = 'Desde esta sesión no necesito nada más. Autorizá en la otra sesión la limpieza y decidí si queda así.'
+  await classifyAttention(config, message, async (_url, init) => {
+    const body = JSON.parse(init.body)
+    const prompt = body.messages[0].content
+    assert.match(prompt, /otra sesión.*actionable/i)
+    assert.match(prompt, /no necesito nada más/i)
+    assert.match(prompt, /petición actual.*prioridad/i)
+    assert.match(prompt, /cuando.*termine/i)
+    assert.equal(body.messages[1].content, message)
+    return reply('actionable')
+  })
+})
+
 test('accepts only validated decisions, not arbitrary model instructions or reasons', async () => {
   for (const decision of ['actionable', 'informational', 'uncertain']) {
     const result = await classifyAttention(config, 'Respuesta', async () => reply(decision))

@@ -13,6 +13,7 @@ interface Settings {
 interface Job { hostId: string; event: RemoteEvent; generation: number; controller: AbortController; auditRef?: AuditRef; receivedAt: number }
 type Classifier = (config: AIConfiguration, message: string, cancel?: AbortSignal, observe?: (diagnostic: ClassifierDiagnostic) => void) => Promise<AttentionClassification>
 const rules = (event: RemoteEvent): AttentionClassification => ({ source: 'rules', decision: event.requiresAttention ? 'actionable' : 'informational', detail: 'Clasificación local por reglas; IA desactivada.' })
+const MAX_ANALYSIS_AGE_MS = 90000
 
 // One bounded queue shared by every host. Never block SSH polling or PTYs on AI.
 export class AttentionService {
@@ -44,10 +45,17 @@ export class AttentionService {
   snapshot(): AlertAIStatus { return { ...this.status } }
 
   receive(hostId: string, event: RemoteEvent): void {
+    const receivedAt = this.now()
     const enabled = this.enabled() && event.kind === 'turn-complete'
+    const eventAt = Date.parse(event.at)
+    const timingCause: ClassifierDiagnostic['timingCause'] = !enabled ? undefined
+      : !Number.isFinite(eventAt) ? 'invalid_event_time'
+      : receivedAt - eventAt > MAX_ANALYSIS_AGE_MS ? 'event_delayed' : undefined
     let initial = rules(event)
     if (enabled) {
-      initial = !event.message?.trim() ? fallbackClassification('No llegó el texto final. Actualizá crowd Linux y verificá los hooks del agente.')
+      initial = timingCause === 'invalid_event_time' ? fallbackClassification('La fecha del evento remoto no es válida; no se pudo analizar esta respuesta.')
+        : timingCause === 'event_delayed' ? fallbackClassification('El evento llegó atrasado (más de 90 segundos). No se analizó con IA; revisá esta terminal. El texto histórico puede haber expirado.')
+        : !event.message?.trim() ? fallbackClassification('No llegó el texto final; no se pudo analizar esta respuesta. Revisá el diagnóstico y los hooks del agente.')
         : event.messageTruncated ? fallbackClassification('La respuesta supera el límite de análisis; revisá esta terminal.')
         : this.now() < this.cooldownUntil ? fallbackClassification('Free LLM está temporalmente en pausa tras un error. Revisá esta terminal.')
         : this.jobs.length + this.active.size >= 40 ? fallbackClassification('La cola de IA está llena; revisá esta terminal.')
@@ -57,11 +65,11 @@ export class AttentionService {
     if (!notice) return // Cursor dedupe also prevents duplicate model calls/sounds.
     let auditRef: AuditRef | undefined
     try { auditRef = this.audit?.begin(hostId, event, enabled ? this.settings.snapshot().model : '(reglas locales)') } catch { /* Never block agents on diagnostic I/O. */ }
-    this.auditUpdate(auditRef, { classification: initial, noticeEmitted: true, finishedAt: initial.source === 'pending' ? undefined : new Date(this.now()).toISOString() })
+    this.auditUpdate(auditRef, { classification: initial, timingCause, noticeEmitted: true, finishedAt: initial.source === 'pending' ? undefined : new Date(this.now()).toISOString() })
     this.emit(notice)
     if (initial.source === 'fallback') this.setStatus({ state: 'error', detail: initial.detail })
     if (initial.source !== 'pending') return
-    this.jobs.push({ hostId, event, generation: this.generation, controller: new AbortController(), auditRef, receivedAt: this.now() })
+    this.jobs.push({ hostId, event, generation: this.generation, controller: new AbortController(), auditRef, receivedAt })
     this.drain()
   }
 
@@ -92,13 +100,16 @@ export class AttentionService {
     if (this.active.size || this.testController) throw new Error('Esperá a que termine el análisis actual antes de probar la conexión.')
     const controller = new AbortController()
     this.testController = controller
-    this.setStatus({ state: 'working', detail: 'Probando tres respuestas ficticias; no se envían conversaciones reales.' })
+    this.setStatus({ state: 'working', detail: 'Probando 6 respuestas ficticias; no se envían conversaciones reales.' })
     try {
       const config = this.settings.configuration()
       const cases = [
         ['¿Me autorizás a resetear las contraseñas de los usuarios de prueba? No puedo continuar sin tu aprobación.', 'actionable'],
         ['Los tests pasaron y el trabajo terminó. No necesito ninguna acción tuya.', 'informational'],
-        ['Ya lancé el subagente de QA. Sigue trabajando y voy a continuar automáticamente.', 'informational']
+        ['Ya lancé el subagente de QA. Sigue trabajando y voy a continuar automáticamente.', 'informational'],
+        ['Desde esta sesión no necesito nada más. Autorizá en la otra sesión la limpieza del contenedor de prueba, cerrá esa terminal y decidí si el cambio queda en QA.', 'actionable'],
+        ['La otra sesión preguntó si autorizabas la limpieza del contenedor de prueba. Ya la autorizaste y terminó; no hay acciones pendientes.', 'informational'],
+        ['Cuando termine el subagente te pediré autorización en la otra sesión. Todavía sigo trabajando y no necesito ninguna acción ahora.', 'informational']
       ] as const
       for (const [text, expected] of cases) {
         const result = await this.classify(config, text, controller.signal)
@@ -106,7 +117,7 @@ export class AttentionService {
         if (result.decision !== expected) throw new Error('El modelo no clasificó correctamente los ejemplos de prueba. Revisá tu cadena de Free LLM.')
       }
       this.cooldownUntil = 0
-      this.setStatus({ state: 'ok', detail: 'Conexión y clasificación verificadas con 3 ejemplos ficticios.' })
+      this.setStatus({ state: 'ok', detail: `Conexión y clasificación verificadas con ${cases.length} ejemplos ficticios.` })
     } catch (error) {
       if (!controller.signal.aborted) this.setStatus({ state: 'error', detail: error instanceof Error ? error.message : 'No se pudo probar Free LLM.' })
     } finally { this.testController = undefined; this.drain() }
@@ -139,9 +150,16 @@ export class AttentionService {
   private async run(job: Job): Promise<void> {
     let startedAt: number | undefined
     try {
-      this.auditUpdate(job.auditRef, { queueMs: Math.max(0, this.now() - job.receivedAt) })
-      if (this.now() - Date.parse(job.event.at) > 90000) {
-        const detail = 'El análisis esperó demasiado en la cola. Revisá esta terminal.'
+      const now = this.now()
+      const queueMs = Math.max(0, now - job.receivedAt)
+      this.auditUpdate(job.auditRef, { queueMs })
+      const timingCause = queueMs > MAX_ANALYSIS_AGE_MS ? 'queue_expired'
+        : now - Date.parse(job.event.at) > MAX_ANALYSIS_AGE_MS ? 'event_expired' : undefined
+      if (timingCause) {
+        const detail = timingCause === 'queue_expired'
+          ? 'El análisis esperó más de 90 segundos en la cola local. Revisá esta terminal.'
+          : 'El evento superó 90 segundos de antigüedad mientras esperaba el análisis. Revisá esta terminal.'
+        this.auditUpdate(job.auditRef, { timingCause })
         this.finish(job, fallbackClassification(detail))
         this.setStatus({ state: 'error', detail })
         return // Local backlog is not a provider outage; do not pause fresh jobs.

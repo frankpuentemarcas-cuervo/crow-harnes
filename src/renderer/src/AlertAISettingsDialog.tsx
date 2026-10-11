@@ -64,7 +64,7 @@ export function AlertAISettingsDialog({ onClose, onSaved }: { onClose: () => voi
         <p>Si falla la API, se agota el cupo o la clasificación es incierta, se muestra una alerta preventiva con el motivo. Desactivada, Crow conserva las reglas locales.</p>
         {status && <p className="alert-ai-result" role="status">{status.detail}</p>}
         <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy || removeKey || (!apiKey.trim() && !settings.keyPresent)} onClick={() => void save(true)}>{busy ? 'Procesando…' : 'Guardar y probar'}</button><span /><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cerrar</button><button type="submit" className="primary-button" disabled={busy}>Guardar</button></div>
-        <small>La prueba envía 3 ejemplos ficticios, no conversaciones reales. Free LLM debe tener modelos disponibles en su cadena.</small>
+        <small>La prueba envía 6 ejemplos ficticios, incluyendo pedidos de acción en otra sesión; no envía conversaciones reales. Free LLM debe tener modelos disponibles en su cadena.</small>
       </>}
     </form>
   </Modal>

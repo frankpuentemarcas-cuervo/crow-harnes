@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SecretEncryption } from './alert-ai-settings'
-import { classifierStages, classifierErrorCodes, finishReasons, transportCauses } from '../shared/alert-diagnostics.ts'
+import { ATTENTION_PROMPT_VERSION, classifierStages, classifierErrorCodes, finishReasons, transportCauses, timingCauses } from '../shared/alert-diagnostics.ts'
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, AttentionAudit, AuditRef, NoticeSoundOutcome } from '../shared/alert-diagnostics'
 
 const TTL = 7 * 86400000
@@ -50,10 +50,12 @@ export class AlertAuditStore implements AttentionAudit {
     try {
       this.prune()
       const key = JSON.stringify([hostId, event.id])
-      const id = `${this.now()}-${createHash('sha256').update(key).digest('hex')}.bin`
+      const receivedAt = this.now()
+      const id = `${receivedAt}-${createHash('sha256').update(key).digest('hex')}.bin`
       const ref = { id, generation: this.generation }
       const input = (event.message || '').slice(0, 24000)
-      this.write({ id, hostId, eventId: event.id, sessionId: event.sessionId, eventAt: event.at, receivedAt: new Date(this.now()).toISOString(), input, inputChars: event.message?.length || 0, inputTruncated: !!event.messageTruncated || input.length < (event.message?.length || 0), requestedModel: model, promptVersion: 'attention-v2', sound: [] })
+      const age = receivedAt - Date.parse(event.at)
+      this.write({ id, hostId, eventId: event.id, sessionId: event.sessionId, eventAt: event.at, receivedAt: new Date(receivedAt).toISOString(), eventAgeAtReceiptMs: Number.isSafeInteger(age) ? age : undefined, input, inputChars: event.message?.length || 0, inputTruncated: !!event.messageTruncated || input.length < (event.message?.length || 0), requestedModel: model, promptVersion: ATTENTION_PROMPT_VERSION, sound: [] })
       this.active.set(key, ref)
       if (this.active.size > 500) this.active.delete(this.active.keys().next().value!)
       this.prune()
@@ -69,8 +71,8 @@ export class AlertAuditStore implements AttentionAudit {
     for (const field of ['classification', 'reasonCode', 'explanation', 'reportedModel', 'httpStatus', 'queueMs', 'inferenceMs', 'finishedAt', 'noticeEmitted'] as const) {
       if (patch[field] !== undefined) Object.assign(row, { [field]: patch[field] })
     }
-    const allowed = { stage: classifierStages, errorCode: classifierErrorCodes, finishReason: finishReasons, transportCause: transportCauses }
-    for (const field of ['stage', 'errorCode', 'finishReason', 'transportCause'] as const) {
+    const allowed = { stage: classifierStages, errorCode: classifierErrorCodes, finishReason: finishReasons, transportCause: transportCauses, timingCause: timingCauses }
+    for (const field of ['stage', 'errorCode', 'finishReason', 'transportCause', 'timingCause'] as const) {
       const value = patch[field]
       if (typeof value === 'string' && (allowed[field] as readonly string[]).includes(value)) Object.assign(row, { [field]: value })
     }

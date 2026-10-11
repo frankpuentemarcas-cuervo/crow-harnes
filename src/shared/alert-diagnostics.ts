@@ -1,5 +1,14 @@
 import type { AttentionClassification } from './types'
 
+export const ATTENTION_PROMPT_VERSION = 'attention-v3'
+export const timingCauses = ['event_delayed', 'queue_expired', 'event_expired', 'invalid_event_time'] as const
+export const timingLabels: Record<typeof timingCauses[number], string> = {
+  event_delayed: 'El evento llegó atrasado; no es una demora de la cola local.',
+  queue_expired: 'El análisis superó el tiempo máximo en la cola local.',
+  event_expired: 'El evento perdió vigencia mientras esperaba el análisis.',
+  invalid_event_time: 'La fecha del evento remoto no es válida.'
+}
+
 export const auditReasons = {
   approval: 'Pide autorización.', choice: 'Pide una decisión.', missing_information: 'Necesita datos del usuario.', blocked: 'Está bloqueado esperando al usuario.',
   progress: 'Informa progreso.', background_work: 'Hay trabajo en segundo plano.', completed_no_action: 'Terminó sin pedir intervención.', quoted_or_resolved: 'La petición está citada o ya resuelta.',
@@ -12,6 +21,7 @@ export const classifierErrorCodes = ['invalid_url', 'empty_input', 'input_too_la
 export const finishReasons = ['stop', 'length', 'content_filter', 'tool_calls', 'function_call'] as const
 export const transportCauses = ['timeout', 'cancelled', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'unknown'] as const
 export interface ClassifierDiagnostic {
+  timingCause?: typeof timingCauses[number]
   httpStatus?: number; reportedModel?: string; reasonCode?: AuditReason; explanation?: string
   stage?: typeof classifierStages[number]; errorCode?: typeof classifierErrorCodes[number]
   finishReason?: typeof finishReasons[number]; transportCause?: typeof transportCauses[number]
@@ -21,7 +31,7 @@ export interface AlertAuditRecord extends ClassifierDiagnostic {
   id: string; hostId: string; sessionId: string; eventId: string; eventAt: string; receivedAt: string
   input: string; inputChars: number; inputTruncated: boolean; inputRedacted?: boolean; requestedModel: string; promptVersion: string
   classification?: AttentionClassification
-  queueMs?: number; inferenceMs?: number; finishedAt?: string; noticeEmitted?: boolean
+  eventAgeAtReceiptMs?: number; queueMs?: number; inferenceMs?: number; finishedAt?: string; noticeEmitted?: boolean
   sound: { at: string; outcome: NoticeSoundOutcome }[]
 }
 export type AlertAuditSummary = Omit<AlertAuditRecord, 'input' | 'explanation'>

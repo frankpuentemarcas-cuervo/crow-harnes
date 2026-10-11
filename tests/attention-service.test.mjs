@@ -99,15 +99,105 @@ test('disabled AI keeps existing rules, and a restart converts unfinished analys
   } finally { c.cleanup() }
 })
 
-test('test connection evaluates three fictional semantic cases and exposes failures', async () => {
-  const decisions = ['actionable', 'informational', 'informational'], texts = []
+test('test connection evaluates six fictional semantic cases and exposes failures', async () => {
+  const decisions = ['actionable', 'informational', 'informational', 'actionable', 'informational', 'informational'], texts = []
   const c = setup(async (_config, text) => { texts.push(text); return aiClassification(decisions.shift()) })
   try {
     assert.equal((await c.service.testConnection()).state, 'ok')
-    assert.equal(texts.length, 3)
+    assert.equal(texts.length, 6)
+    assert.match(texts[3], /otra sesión/)
     assert.ok(!texts.join('').includes('private-marker'))
     assert.equal(c.emitted.length, 0)
     assert.equal((await c.service.testConnection()).state, 'error')
+  } finally { c.cleanup() }
+})
+
+test('connection self-test rejects a model that silences a current cross-session request', async () => {
+  let calls = 0
+  const c = setup(async () => aiClassification(['actionable', 'informational', 'informational', 'informational'][calls++]))
+  try {
+    assert.equal((await c.service.testConnection()).state, 'error')
+    assert.equal(calls, 4)
+    assert.equal(c.emitted.length, 0)
+  } finally { c.cleanup() }
+})
+
+test('late events are not mislabeled as local queue delays or missing hooks', async () => {
+  const now = Date.now(), updates = []
+  let calls = 0
+  const c = setup(async () => { calls++; return aiClassification('actionable') }, {
+    begin: () => ({ id: 'ref', generation: 0 }), update: (_ref, patch) => updates.push(patch)
+  }, () => now)
+  try {
+    for (const [seq, message] of [[1, '¿Me autorizás?'], [2, undefined]]) {
+      c.service.receive('host', c.event(seq, { at: new Date(now - 6 * 3600000).toISOString(), message }))
+      await tick()
+      assert.match(c.emitted.at(-1).classification.detail, /llegó atrasado/i)
+      assert.doesNotMatch(c.emitted.at(-1).classification.detail, /cola|Actualizá|hooks/i)
+    }
+    assert.equal(calls, 0)
+    assert.ok(updates.some(p => p.timingCause === 'event_delayed'))
+    c.service.receive('host', c.event(3, { at: new Date(now).toISOString() }))
+    await tick()
+    assert.equal(calls, 1, 'historical events must not activate provider cooldown')
+    assert.equal(c.emitted.at(-1).classification.source, 'ai')
+  } finally { c.cleanup() }
+})
+
+test('actual queue expiry is diagnosed separately and does not pause fresh jobs', async () => {
+  let now = Date.now(), calls = 0
+  const releases = [], updates = []
+  const c = setup(async () => { calls++; return new Promise(resolve => releases.push(resolve)) }, {
+    begin: (_host, event) => ({ id: event.id, generation: 0 }), update: (ref, patch) => updates.push({ id: ref.id, ...patch })
+  }, () => now)
+  try {
+    for (let i = 1; i <= 3; i++) c.service.receive('host', c.event(i, { at: new Date(now).toISOString() }))
+    now += 90001
+    releases[0](aiClassification('informational')); await tick(); await tick()
+    const expired = c.store.snapshot().notices.find(n => n.id === '3')
+    assert.match(expired.classification.detail, /cola/i)
+    assert.ok(updates.some(p => p.id === '3' && p.timingCause === 'queue_expired'))
+    assert.ok(updates.some(p => p.id === '3' && p.queueMs === 90001))
+    c.service.receive('host', c.event(4, { at: new Date(now).toISOString() }))
+    assert.equal(calls, 3)
+    releases.forEach(release => release(aiClassification('informational'))); await tick()
+  } finally { c.cleanup() }
+})
+
+test('event expiry with a short queue reports remote age, not queue timeout', async () => {
+  let now = Date.now()
+  const releases = [], updates = []
+  const c = setup(async () => new Promise(resolve => releases.push(resolve)), {
+    begin: (_host, event) => ({ id: event.id, generation: 0 }), update: (ref, patch) => updates.push({ id: ref.id, ...patch })
+  }, () => now)
+  try {
+    for (let i = 1; i <= 3; i++) c.service.receive('host', c.event(i, { at: new Date(now - 85000).toISOString() }))
+    now += 6000
+    releases[0](aiClassification('informational')); await tick(); await tick()
+    assert.equal(releases.length, 2)
+    const expired = c.store.snapshot().notices.find(n => n.id === '3')
+    assert.match(expired.classification.detail, /antigüedad/i)
+    assert.doesNotMatch(expired.classification.detail, /cola/i)
+    assert.ok(updates.some(p => p.id === '3' && p.timingCause === 'event_expired'))
+    assert.ok(updates.some(p => p.id === '3' && p.queueMs === 6000))
+    releases[1](aiClassification('informational')); await tick()
+  } finally { c.cleanup() }
+})
+
+test('invalid timestamps and fresh missing input have precise, non-upgrade diagnostics', async () => {
+  let calls = 0
+  const updates = []
+  const c = setup(async () => { calls++; return aiClassification('actionable') }, {
+    begin: () => ({ id: 'ref', generation: 0 }), update: (_ref, patch) => updates.push(patch)
+  })
+  try {
+    c.service.receive('host', c.event(1, { at: 'not-a-date' }))
+    assert.ok(updates.some(p => p.timingCause === 'invalid_event_time'))
+    assert.match(c.emitted.at(-1).classification.detail, /fecha/i)
+    c.service.receive('host', c.event(2, { message: undefined }))
+    assert.match(c.emitted.at(-1).classification.detail, /No llegó el texto final/i)
+    assert.doesNotMatch(c.emitted.at(-1).classification.detail, /Actualizá|atrasado|cola/i)
+    assert.equal(calls, 0)
   } finally { c.cleanup() }
 })
 

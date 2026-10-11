@@ -33,10 +33,44 @@ test('opt-in encrypted audit preserves text, redacts configured keys and correla
     assert.ok(!JSON.stringify(row).includes('secret-key'))
     assert.equal(row.inputRedacted, true)
     assert.equal(row.reasonCode, 'approval')
+    assert.equal(row.promptVersion, 'attention-v3')
     assert.equal(row.sound[0].outcome, 'scheduled')
     assert.ok(!readFileSync(join(c.dir, 'alert-audit', row.id), 'utf8').includes('private-marker'))
     assert.equal(c.create().detail(row.id).input, row.input)
     assert.equal(store.detail('../state.json'), undefined)
+  } finally { c.cleanup() }
+})
+
+test('audit retains event age independently from queue duration and allowlists timing causes', () => {
+  const c = setup()
+  try {
+    const store = c.create(); store.setEnabled(true); c.advance(6 * 3600000)
+    const ref = store.begin('host', event, 'auto')
+    store.update(ref, { queueMs: 0, timingCause: 'event_delayed' })
+    const row = store.detail(ref.id)
+    assert.equal(row.eventAgeAtReceiptMs, 6 * 3600000)
+    assert.equal(row.queueMs, 0)
+    assert.equal(row.timingCause, 'event_delayed')
+    store.update(ref, { timingCause: 'secret-test-key' })
+    assert.equal(store.detail(ref.id).timingCause, 'event_delayed')
+    assert.ok(!store.exportJSON().includes('secret-test-key'))
+  } finally { c.cleanup() }
+})
+
+test('old prompt records stay readable; invalid dates omit age and clock skew stays explicit', () => {
+  const c = setup()
+  try {
+    const store = c.create(); store.setEnabled(true)
+    const ref = store.begin('host', event, 'auto')
+    const row = store.detail(ref.id)
+    row.promptVersion = 'attention-v2'; delete row.eventAgeAtReceiptMs
+    writeFileSync(join(c.dir, 'alert-audit', row.id), encryption.encryptString(JSON.stringify(row)))
+    assert.equal(c.create().detail(row.id).promptVersion, 'attention-v2')
+    assert.equal(c.create().detail(row.id).eventAgeAtReceiptMs, undefined)
+    const bad = store.begin('host', { ...event, id: 'bad', at: 'not-a-date' }, 'auto')
+    assert.equal(store.detail(bad.id).eventAgeAtReceiptMs, undefined)
+    const skew = store.begin('host', { ...event, id: 'skew', at: new Date(Date.parse(event.at) + 1000).toISOString() }, 'auto')
+    assert.equal(store.detail(skew.id).eventAgeAtReceiptMs, -1000)
   } finally { c.cleanup() }
 })
 
