@@ -17,6 +17,7 @@ window.__erpQA={
  identityFailure:()=>{identityFailure=true}, snapshotUnavailable:()=>{snapshotUnavailable=true},
  ready:()=>{fail=false;identityFailure=false;snapshotUnavailable=false;projects=[{id:'qa-project',hostId:'qa-host',name:'QA project'}];snapshot={...snapshot,connection:{...snapshot.connection,identity:'qa-user'},tasks:[{key:'0',name:'TASK-0',subject:'Fictional old account',description:'OLD ACCOUNT DESCRIPTION',erpProject:'',erpStatus:'Open',priority:'Low',modified:'2026-10-10',stage:'ready',stale:false,projectId:'qa-project'}]};accessChanged?.()},
  changeAccess:()=>{projects=[];snapshot={...snapshot,connection:{...snapshot.connection,identity:'new-user'},tasks:[]};accessChanged?.()},
+ noProjects:()=>{projects=[];accessChanged?.()},
  releasePreview:()=>finishPreview?.(), holdSync:()=>{holdSync=true}, releaseSync:()=>finishSync?.(), snapshotCount:()=>snapshotCount
 }
 window.crow={
