@@ -56,11 +56,31 @@ export class EncryptedSshTunnel {
   private client = new Client()
   private server?: Server
   private closed = false
+  private published = false
+  private failure?: Error
+  private rejectOpening?: (error: Error) => void
+  private readyListener?: () => void
   private onLost: () => void
   port = 0
   token = ''
 
-  private constructor(onLost: () => void) { this.onLost = onLost }
+  private constructor(onLost: () => void) {
+    this.onLost = onLost
+    // Keep error listeners for the entire client lifetime, including teardown.
+    this.client.on('error', error => this.transportLost(error))
+    this.client.on('end', () => this.transportLost(new Error('La conexión SSH se cerró.')))
+    this.client.on('close', () => this.transportLost(new Error('La conexión SSH se cerró.')))
+  }
+
+  private transportLost(error: Error): void {
+    if (this.closed) return
+    this.failure = error
+    this.rejectOpening?.(error)
+    this.close()
+    if (this.published) this.onLost()
+  }
+
+  private ensureOpen(): void { if (this.closed) throw this.failure ?? new Error('Conexión SSH cancelada.') }
 
   static async open(host: Host, passphrase: string, onLost: () => void, individualCredential?: string): Promise<EncryptedSshTunnel> {
     const tunnel = new EncryptedSshTunnel(onLost)
@@ -70,39 +90,49 @@ export class EncryptedSshTunnel {
       const privateKey = readFileSync(host.identity!)
       const parsed = utils.parseKey(privateKey, passphrase)
       if (parsed instanceof Error) throw new PassphraseRequiredError()
-      await new Promise<void>((resolve, reject) => {
-        tunnel.client.once('ready', resolve)
-        tunnel.client.once('error', reject)
-        tunnel.client.connect({
-          host: config.hostname, port: config.port, username: config.username,
-          privateKey, passphrase, readyTimeout: 15000,
-          keepaliveInterval: 15000, keepaliveCountMax: 3,
-          hostVerifier: (key: Buffer) => trusted.some((item) => item.equals(key))
+      const failed = new Promise<never>((_resolve, reject) => { tunnel.rejectOpening = reject })
+      await Promise.race([failed, (async () => {
+        await new Promise<void>((resolve) => {
+          tunnel.readyListener = () => { tunnel.readyListener = undefined; resolve() }
+          tunnel.client.once('ready', tunnel.readyListener)
+          tunnel.client.connect({
+            host: config.hostname, port: config.port, username: config.username,
+            privateKey, passphrase, readyTimeout: 15000,
+            keepaliveInterval: 15000, keepaliveCountMax: 3,
+            hostVerifier: (key: Buffer) => trusted.some((item) => item.equals(key))
+          })
         })
-      })
-      tunnel.client.on('close', () => { if (!tunnel.closed) tunnel.onLost() })
-      tunnel.client.on('error', () => { if (!tunnel.closed) tunnel.onLost() })
-      tunnel.token = individualCredential ?? await tunnel.readToken()
-      tunnel.server = createServer((socket) => {
-        tunnel.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, '127.0.0.1', host.remotePort, (error, channel) => {
-          if (error) { socket.destroy(); return }
-          socket.on('error', () => channel.destroy())
-          channel.on('error', () => socket.destroy())
-          socket.pipe(channel).pipe(socket)
+        tunnel.ensureOpen()
+        tunnel.token = individualCredential ?? await tunnel.readToken()
+        tunnel.ensureOpen()
+        tunnel.server = createServer((socket) => {
+          tunnel.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, '127.0.0.1', host.remotePort, (error, channel) => {
+            if (error) { socket.destroy(); return }
+            socket.on('error', () => channel.destroy())
+            channel.on('error', () => socket.destroy())
+            socket.pipe(channel).pipe(socket)
+          })
         })
-      })
-      await new Promise<void>((resolve, reject) => {
-        tunnel.server!.once('error', reject)
-        tunnel.server!.listen(0, '127.0.0.1', resolve)
-      })
-      const address = tunnel.server.address()
-      if (!address || typeof address === 'string') throw new Error('No se pudo abrir el túnel local.')
-      tunnel.port = address.port
+        tunnel.server.on('error', error => tunnel.transportLost(error))
+        await new Promise<void>((resolve) => {
+          tunnel.server!.listen(0, '127.0.0.1', () => {
+            // A cancelled bind can still complete after the SSH transport closed.
+            if (tunnel.closed) tunnel.server!.close(() => {})
+            resolve()
+          })
+        })
+        tunnel.ensureOpen()
+        const address = tunnel.server.address()
+        if (!address || typeof address === 'string') throw new Error('No se pudo abrir el túnel local.')
+        tunnel.port = address.port
+      })()])
+      tunnel.ensureOpen()
+      tunnel.published = true
       return tunnel
     } catch (error) {
       tunnel.close()
       throw error
-    }
+    } finally { tunnel.rejectOpening = undefined }
   }
 
   readBootstrapToken(): Promise<string> { return this.readToken() }
@@ -125,7 +155,11 @@ export class EncryptedSshTunnel {
   close(): void {
     if (this.closed) return
     this.closed = true
-    this.server?.close()
-    this.client.end()
+    this.rejectOpening?.(this.failure ?? new Error('Conexión SSH cancelada.'))
+    if (this.readyListener) this.client.removeListener('ready', this.readyListener)
+    this.readyListener = undefined
+    this.server?.close(() => {})
+    try { this.client.end() } catch { /* A half-initialized protocol still needs force cleanup. */ }
+    this.client.destroy()
   }
 }

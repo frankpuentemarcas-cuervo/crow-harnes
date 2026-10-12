@@ -88,6 +88,8 @@ export class Connection {
     this.desired = false
     if (this.retryTimer) clearTimeout(this.retryTimer)
     if (this.pollTimer) clearInterval(this.pollTimer)
+    this.retryTimer = undefined
+    this.pollTimer = undefined
     for (const stream of this.streams.values()) stream.close()
     this.streams.clear()
     this.closeTransport()
@@ -129,9 +131,12 @@ export class Connection {
         if (!passphrase) throw new PassphraseRequiredError()
         try {
           let opened: EncryptedSshTunnel | undefined
+          let lostDuringOpening = false
           opened = await EncryptedSshTunnel.open(this.host, passphrase, () => {
-            if (this.encryptedTunnel === opened) this.lost()
+            lostDuringOpening = true
+            if (opened && this.encryptedTunnel === opened) this.lost()
           }, individualCredential || '')
+          if (lostDuringOpening) { opened.close(); throw new Error('La conexión SSH se cerró antes de completar la apertura.') }
           this.encryptedTunnel = opened
         } catch (error) {
           if (error instanceof PassphraseRequiredError) {
@@ -150,6 +155,7 @@ export class Connection {
         tunnel.once('exit', () => { if (this.tunnel === tunnel) this.lost() })
         tunnel.once('error', () => { if (this.tunnel === tunnel) this.lost() })
       }
+      const transport = this.encryptedTunnel ?? this.tunnel
       if (!this.desired) throw new Error('Conexión cancelada.')
       this.token = stdout.trim()
       if (this.token && !/^[0-9a-f]{32}$/.test(this.token)) throw new Error('El servicio remoto no entregó un token válido.')
@@ -174,6 +180,7 @@ export class Connection {
         this.token = this.encryptedTunnel ? await this.encryptedTunnel.readBootstrapToken() : (await execFileAsync('ssh', [...this.sshOptions(), this.host.target, 'cat ~/.local/share/crow-harness/token'], { timeout: 15000, maxBuffer: 1024, windowsHide: true })).stdout.trim()
         if (!/^[0-9a-f]{32}$/.test(this.token)) throw new Error('Token remoto invalido.')
       }
+      if (!this.desired || transport !== (this.encryptedTunnel ?? this.tunnel)) throw new Error('Conexión cancelada o perdida durante la apertura.')
       if (passphrase && this.host.identity) this.vault.set(this.host.id, this.host.identity, passphrase)
       this.delay = 1000
       this.setStatus('connected')
