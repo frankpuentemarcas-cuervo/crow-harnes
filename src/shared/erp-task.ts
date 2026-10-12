@@ -1,7 +1,7 @@
 export type ERPTaskStage = 'review' | 'ready' | 'running' | 'human-review' | 'done'
-export interface ERPConnectionInput { url: string; apiKey?: string; apiSecret?: string; allowAIClassification: boolean }
-export interface ERPConnection { url: string; configured: boolean; allowAIClassification: boolean; identity?: string; error?: string }
-export interface ERPProjectCandidate { id: string; name: string; hostId: string }
+export interface ERPConnectionInput { url: string; apiKey?: string; apiSecret?: string; allowAIClassification: boolean; allowProjectContext?: boolean }
+export interface ERPConnection { url: string; configured: boolean; allowAIClassification: boolean; allowProjectContext: boolean; identity?: string; error?: string }
+export interface ERPProjectCandidate { id: string; name: string; hostId: string; hostConnected?: boolean; summary?: string; tags?: string[]; repository?: string; repositoryReadable?: boolean }
 export interface ERPTaskCard {
   key: string; name: string; subject: string; description: string; descriptionLoaded?: boolean; erpProject: string; erpStatus: string; priority: string; modified: string
   stage: ERPTaskStage; projectId?: string; reason?: string; stale: boolean; sessionId?: string; jobId?: string; dispatchStatus?: 'pending' | 'delivered' | 'uncertain'; error?: string

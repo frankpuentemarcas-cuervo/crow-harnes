@@ -60,11 +60,11 @@ export class EncryptedSshTunnel {
   private failure?: Error
   private rejectOpening?: (error: Error) => void
   private readyListener?: () => void
-  private onLost: () => void
+  private onLost: (error: Error) => void
   port = 0
   token = ''
 
-  private constructor(onLost: () => void) {
+  private constructor(onLost: (error: Error) => void) {
     this.onLost = onLost
     // Keep error listeners for the entire client lifetime, including teardown.
     this.client.on('error', error => this.transportLost(error))
@@ -77,12 +77,12 @@ export class EncryptedSshTunnel {
     this.failure = error
     this.rejectOpening?.(error)
     this.close()
-    if (this.published) this.onLost()
+    if (this.published) this.onLost(error)
   }
 
   private ensureOpen(): void { if (this.closed) throw this.failure ?? new Error('Conexión SSH cancelada.') }
 
-  static async open(host: Host, passphrase: string, onLost: () => void, individualCredential?: string): Promise<EncryptedSshTunnel> {
+  static async open(host: Host, passphrase: string, onLost: (error: Error) => void, individualCredential?: string): Promise<EncryptedSshTunnel> {
     const tunnel = new EncryptedSshTunnel(onLost)
     try {
       const config = await sshConfig(host)

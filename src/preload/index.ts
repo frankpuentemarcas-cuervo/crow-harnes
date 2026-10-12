@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Agent, AlertAIStatus, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, Project, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
+import type { Agent, AlertAIStatus, AlertSound, ConnectionStatus, CrowAPI, Host, Mode, Notice, ProjectInput, TerminalFrame, UpdateState, WorkspaceTab } from '../shared/types'
 
 const terminalListeners = new Map<string, (frame: TerminalFrame) => void>()
 ipcRenderer.on('crow:terminal-frame', (_event, payload: { id: string; frame: TerminalFrame }) => {
@@ -27,7 +27,7 @@ const api: CrowAPI = {
   erpSync: () => ipcRenderer.invoke('crow:erp-sync'),
   erpTaskDetail: (taskKey) => ipcRenderer.invoke('crow:erp-detail', taskKey),
   erpLinkProject: (erpProject, projectId) => ipcRenderer.invoke('crow:erp-link', erpProject, projectId),
-  erpClassify: (taskKey) => ipcRenderer.invoke('crow:erp-classify', taskKey),
+  erpClassify: (taskKey, repositoryContext) => ipcRenderer.invoke('crow:erp-classify', taskKey, repositoryContext),
   erpAssign: (taskKey, projectId) => ipcRenderer.invoke('crow:erp-assign', taskKey, projectId),
   erpPreview: (input) => ipcRenderer.invoke('crow:erp-preview', input),
   erpApprove: (previewId) => ipcRenderer.invoke('crow:erp-approve', previewId),
@@ -90,7 +90,11 @@ const api: CrowAPI = {
   getState: () => ipcRenderer.invoke('crow:get-state'),
   saveHost: (host: Omit<Host, 'id'> & { id?: string }) => ipcRenderer.invoke('crow:save-host', host),
   removeHost: (id: string) => ipcRenderer.invoke('crow:remove-host', id),
-  saveProject: (project: Omit<Project, 'id'> & { id?: string }) => ipcRenderer.invoke('crow:save-project', project),
+  exportConnectionDiagnostics: (hostId: string) => ipcRenderer.invoke('crow:connection-diagnostics-export', hostId),
+  saveProject: (project: ProjectInput) => ipcRenderer.invoke('crow:save-project', project),
+  openProjectRepository: (projectId) => ipcRenderer.invoke('crow:open-project-repository', projectId),
+  listGitLabProjectFiles: (projectId) => ipcRenderer.invoke('crow:list-gitlab-project-files', projectId),
+  readGitLabProjectFiles: (projectId, files) => ipcRenderer.invoke('crow:read-gitlab-project-files', projectId, files),
   removeProject: (id: string) => ipcRenderer.invoke('crow:remove-project', id),
   saveWorkspace: (tabs: WorkspaceTab[], activeTabs: Record<string, string>, selectedProjectId: string) => ipcRenderer.invoke('crow:save-workspace', tabs, activeTabs, selectedProjectId),
   connect: (hostId: string) => ipcRenderer.invoke('crow:connect', hostId),
@@ -128,6 +132,9 @@ const api: CrowAPI = {
       throw error
     }
   },
+  loadTerminalCheckpoint: (hostId, sessionId) => ipcRenderer.invoke('crow:terminal-checkpoint-load', hostId, sessionId),
+  saveTerminalCheckpoint: (hostId, sessionId, checkpoint) => ipcRenderer.invoke('crow:terminal-checkpoint-save', hostId, sessionId, checkpoint),
+  removeTerminalCheckpoint: (hostId, sessionId) => ipcRenderer.invoke('crow:terminal-checkpoint-remove', hostId, sessionId),
   detach: async (id: string) => {
     terminalListeners.delete(id)
     await ipcRenderer.invoke('crow:detach', id)

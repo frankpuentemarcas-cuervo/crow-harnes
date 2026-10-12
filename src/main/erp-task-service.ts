@@ -6,6 +6,7 @@ import type { AIConfiguration } from './attention-classifier'
 import { ERPNextClient, validateERPURL, type ERPTaskRecord } from './erp-next-client.ts'
 import { classifyERPTask } from './erp-task-classifier.ts'
 import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskCard, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage } from '../shared/erp-task'
+import type { GitLabRepositoryContext } from '../shared/types'
 
 export interface ERPTaskDependencies {
   projects(): ERPProjectCandidate[]
@@ -15,7 +16,7 @@ export interface ERPTaskDependencies {
   request?: typeof fetch
   now?: () => number
 }
-interface SavedConnection { url: string; encryptedKey: string; encryptedSecret: string; allowAIClassification: boolean; identity?: string }
+interface SavedConnection { url: string; encryptedKey: string; encryptedSecret: string; allowAIClassification: boolean; allowProjectContext: boolean; identity?: string }
 interface Approval { preview: ERPTaskPreview; fingerprint: string; generation: number; actorId: string }
 type DispatchHistory = Pick<ERPTaskCard, 'jobId' | 'sessionId' | 'dispatchStatus' | 'stage'>
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -57,7 +58,7 @@ export class ERPTaskService {
           if (!row || typeof row.jobId !== 'string' || !row.jobId || !stages.includes(row.stage) || !['pending', 'uncertain', 'delivered'].includes(row.dispatchStatus) || (row.sessionId !== undefined && typeof row.sessionId !== 'string')) throw new Error('Invalid dispatch ledger')
           this.history.set(entry[0], { jobId: row.jobId, sessionId: row.sessionId, dispatchStatus: row.dispatchStatus === 'delivered' ? 'delivered' : 'uncertain', stage: row.dispatchStatus === 'delivered' ? row.stage : 'human-review' })
         }
-        if (value?.connection && typeof value.connection.encryptedKey === 'string' && typeof value.connection.encryptedSecret === 'string' && typeof value.connection.allowAIClassification === 'boolean') this.connection = { url: validateERPURL(value.connection.url), encryptedKey: value.connection.encryptedKey, encryptedSecret: value.connection.encryptedSecret, allowAIClassification: value.connection.allowAIClassification, identity: typeof value.connection.identity === 'string' ? value.connection.identity.slice(0, 200) : undefined }
+        if (value?.connection && typeof value.connection.encryptedKey === 'string' && typeof value.connection.encryptedSecret === 'string' && typeof value.connection.allowAIClassification === 'boolean') this.connection = { url: validateERPURL(value.connection.url), encryptedKey: value.connection.encryptedKey, encryptedSecret: value.connection.encryptedSecret, allowAIClassification: value.connection.allowAIClassification, allowProjectContext: value.connection.allowProjectContext === true, identity: typeof value.connection.identity === 'string' ? value.connection.identity.slice(0, 200) : undefined }
         if (value?.links && typeof value.links === 'object') for (const [key, target] of Object.entries(value.links)) if (key.length <= 500 && typeof target === 'string' && target.length <= 200) this.links[key] = target
         if (Array.isArray(value?.tasks)) for (const row of value.tasks) {
           if (!row || typeof row.key !== 'string' || typeof row.name !== 'string' || typeof row.subject !== 'string' || typeof row.description !== 'string' || typeof row.modified !== 'string' || !stages.includes(row.stage)) throw new Error('Invalid Task ledger')
@@ -89,18 +90,19 @@ export class ERPTaskService {
   }
   snapshot(): ERPTaskSnapshot {
     const candidates = this.dependencies.projects()
-    return { connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, descriptionLoaded: card.descriptionLoaded, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, stage: card.stage, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
+    return { connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, allowProjectContext: this.connection?.allowProjectContext ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, descriptionLoaded: card.descriptionLoaded, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, stage: card.stage, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
   }
   saveConnection(input: ERPConnectionInput): ERPTaskSnapshot {
     this.ensure()
-    if (!input || typeof input.allowAIClassification !== 'boolean') throw new Error('Configuración ERP inválida.')
+    if (!input || typeof input.allowAIClassification !== 'boolean' || (input.allowProjectContext !== undefined && typeof input.allowProjectContext !== 'boolean')) throw new Error('Configuración ERP inválida.')
+    if (input.allowProjectContext && !input.allowAIClassification) throw new Error('El contexto de proyectos requiere habilitar la clasificación de Tasks.')
     const url = validateERPURL(input.url)
     for (const secret of [input.apiKey, input.apiSecret]) if (secret !== undefined && (typeof secret !== 'string' || !secret.trim() || secret.length > 8192 || /[\r\n:]/.test(secret))) throw new Error('Clave ERP inválida.')
     if (!this.encryption.isEncryptionAvailable()) throw new Error('Almacenamiento seguro no disponible.')
     if ((!this.connection || url !== this.connection.url) && (!input.apiKey || !input.apiSecret)) throw new Error('Ingresá ambas claves al configurar otra URL.')
     if (!!input.apiKey !== !!input.apiSecret) throw new Error('Ingresá ambas claves juntas, o dejá ambas vacías para conservarlas.')
     const changed = !this.connection || url !== this.connection.url || !!input.apiKey || !!input.apiSecret
-    const next: SavedConnection = { url, encryptedKey: input.apiKey ? this.encryption.encryptString(input.apiKey.trim()).toString('base64') : this.connection!.encryptedKey, encryptedSecret: input.apiSecret ? this.encryption.encryptString(input.apiSecret.trim()).toString('base64') : this.connection!.encryptedSecret, allowAIClassification: input.allowAIClassification, identity: changed ? undefined : this.connection?.identity }
+    const next: SavedConnection = { url, encryptedKey: input.apiKey ? this.encryption.encryptString(input.apiKey.trim()).toString('base64') : this.connection!.encryptedKey, encryptedSecret: input.apiSecret ? this.encryption.encryptString(input.apiSecret.trim()).toString('base64') : this.connection!.encryptedSecret, allowAIClassification: input.allowAIClassification, allowProjectContext: input.allowProjectContext ?? this.connection?.allowProjectContext ?? false, identity: changed ? undefined : this.connection?.identity }
     if (this.pending.size) throw new Error('Esperá el despacho pendiente antes de cambiar las credenciales.')
     const previous = { connection: this.connection, cards: this.cards, links: this.links, error: this.error }
     this.connection = next; if (changed) { this.cards = new Map(); this.links = Object.create(null) }; this.error = undefined
@@ -188,16 +190,17 @@ export class ERPTaskService {
     this.approvals.clear(); this.persist(); return this.snapshot()
   }
   assign(key: string, projectId: string): ERPTaskSnapshot { const card = this.card(key); this.project(projectId); if (card.jobId) throw new Error('La Task ya tiene un despacho.'); card.projectId = projectId; card.stage = 'ready'; this.approvals.clear(); this.persist(); return this.snapshot() }
-  async classify(key: string): Promise<ERPTaskSnapshot> {
+  async classify(key: string, repositoryContext?: GitLabRepositoryContext[]): Promise<ERPTaskSnapshot> {
     const card = this.card(key); if (!this.connection?.allowAIClassification) throw new Error('Autorizá primero el envío de Task a Free LLM.')
     if (card.jobId || this.classifying) throw new Error('La Task está en ejecución o hay otra clasificación pendiente.')
     if (card.descriptionLoaded === false) await this.loadDetail(key)
+    if (repositoryContext && (!Array.isArray(repositoryContext) || repositoryContext.length < 1 || repositoryContext.length > 5 || repositoryContext.some(file => !this.dependencies.projects().some(project => project.id === file.projectId && project.repositoryReadable) || typeof file.fileName !== 'string' || file.fileName.length > 300 || file.fileName.startsWith('/') || file.fileName.includes('..') || typeof file.content !== 'string' || file.content.length > 4000) || repositoryContext.reduce((sum, file) => sum + file.content.length, 0) > 12000)) throw new Error('Los fragmentos GitLab no están autorizados para esta clasificación o superan el límite permitido.')
     if (this.card(key) !== card || !this.connection?.allowAIClassification || card.jobId || this.classifying) throw new Error('La Task o el consentimiento cambió durante la consulta.')
     const generation = this.generation, version = fingerprint(this.record(card)), projectId = card.projectId, stage = card.stage
     const unchanged = (): boolean => generation === this.generation && this.cards.get(key) === card && fingerprint(this.record(card)) === version && card.projectId === projectId && card.stage === stage && !card.jobId && !card.stale
     this.classifying = true
     try {
-      const result = await classifyERPTask(this.dependencies.aiConfiguration(), this.record(card), this.dependencies.projects(), this.dependencies.request, this.abort.signal)
+      const result = await classifyERPTask(this.dependencies.aiConfiguration(), this.record(card), this.dependencies.projects(), this.dependencies.request, this.abort.signal, this.connection.allowProjectContext, repositoryContext)
       this.ensure(); if (!unchanged()) throw new Error('La Task cambió durante el análisis.')
       if (result.projectId) this.project(result.projectId)
       card.projectId = result.projectId ?? undefined; card.reason = result.reason; card.stage = result.projectId ? 'ready' : 'review'; card.error = undefined; this.approvals.clear(); this.persist(); return this.snapshot()

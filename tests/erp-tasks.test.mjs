@@ -7,7 +7,7 @@ import { ERPTaskService } from '../src/main/erp-task-service.ts'
 import { ERPNextClient, validateERPURL, taskText } from '../src/main/erp-next-client.ts'
 import { classifyERPTask } from '../src/main/erp-task-classifier.ts'
 const row = () => ({ name: 'TASK-001', subject: 'Fix search', description: '<p>Business confidential</p><script>secret()</script>', project: 'ERP-P', status: 'Open', priority: 'High', modified: '2026-10-09 12:00:00' })
-const project = { id: 'p1', name: 'Search', hostId: 'h1' }
+const project = { id: 'p1', name: 'Search', hostId: 'h1', summary: 'Buscador de personal', tags: ['rrhh', 'busqueda'], repository: 'gitlab.com/company/search' }
 const encryption = { isEncryptionAvailable: () => true, encryptString: text => Buffer.from(Buffer.from(text).toString('base64')), decryptString: bytes => Buffer.from(bytes.toString(), 'base64').toString() }
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status })
 function setup() {
@@ -30,8 +30,23 @@ test('ERP connector queries only Task with bounded paging and authenticated read
 test('connection DTO and encrypted file do not expose credentials; Tasks sanitize HTML and identity change clears cache', async () => {
   const c = setup(); try { c.configure(false); const checked = await c.service.testConnection(); assert.equal(checked.tasks.length, 0); await c.service.sync(); assert.equal(c.service.snapshot().tasks[0].description, ''); const snap = await c.service.loadDetail(c.service.snapshot().tasks[0].key); assert.equal(snap.connection.identity, 'erp-user'); assert.equal(snap.tasks[0].description, 'Business confidential'); const dto = JSON.stringify(snap), disk = readFileSync(join(c.dir, 'erp-tasks.json'), 'utf8'); for (const text of ['ERP-KEY', 'ERP-SECRET', 'Business confidential']) assert.ok(!disk.includes(text)); assert.ok(!dto.includes('ERP-KEY')); const ledger = JSON.parse(encryption.decryptString(Buffer.from(disk, 'base64'))); assert.equal(ledger.tasks[0].description, ''); c.service.saveConnection({ url: 'https://different.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false }); assert.equal(c.service.snapshot().tasks.length, 0) } finally { c.cleanup() }
 })
-test('AI requires consent, uses minimal candidate DTO and cannot authorize dispatch', async () => {
-  const c = setup(); try { const key = await c.ready(); await assert.rejects(c.service.classify(key), /Autorizá/); c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true }); await c.service.classify(key); const request = c.calls.find(call => call.url.includes('/chat/completions')); assert.ok(request); const prompt = request.options.body; assert.ok(!prompt.includes('ERP-SECRET')); assert.ok(!prompt.includes('hostId')); assert.equal(c.dispatched.length, 0); assert.equal(c.service.snapshot().tasks[0].stage, 'ready') } finally { c.cleanup() }
+test('AI uses only project names until separate project-context consent is granted', async () => {
+  const c = setup(); try { const key = await c.ready(); await assert.rejects(c.service.classify(key), /Autorizá/); c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true }); await c.service.classify(key); const request = c.calls.find(call => call.url.includes('/chat/completions')); assert.ok(request); const prompt = request.options.body; assert.ok(!prompt.includes('ERP-SECRET')); assert.ok(!prompt.includes('hostId')); assert.ok(!prompt.includes('Buscador de personal')); assert.ok(!prompt.includes('gitlab.com/company/search')); c.calls.length = 0; c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true, allowProjectContext: true }); await c.service.classify(key); const contextualPrompt = c.calls.find(call => call.url.includes('/chat/completions')).options.body; assert.match(contextualPrompt, /Buscador de personal/); assert.match(contextualPrompt, /gitlab\.com\/company\/search/); assert.equal(c.dispatched.length, 0); assert.equal(c.service.snapshot().tasks[0].stage, 'ready') } finally { c.cleanup() }
+})
+test('GitLab README reaches Free LLM only as an explicit per-classification context', async () => {
+  const c = setup()
+  try {
+    const key = await c.ready(); c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true })
+    const context = [{ projectId: 'p1', fileName: 'src/search.ts', content: 'export class RecruitingSearch {}' }]
+    await c.service.classify(key)
+    assert.ok(!c.calls.find(call => call.url.includes('/chat/completions')).options.body.includes('RecruitingSearch'))
+    c.calls.length = 0; c.projects = [{ ...project, repositoryReadable: true }]
+    await c.service.classify(key, context)
+    assert.match(c.calls.find(call => call.url.includes('/chat/completions')).options.body, /RecruitingSearch/)
+    c.calls.length = 0; c.projects = [project]
+    await assert.rejects(c.service.classify(key, context), /no están autorizados/)
+    assert.equal(c.calls.some(call => call.url.includes('/chat/completions')), false)
+  } finally { c.cleanup() }
 })
 test('invalid AI or unknown project remains manual review and does not execute', async () => {
   await assert.rejects(classifyERPTask({ baseURL: 'http://127.0.0.1:31415/v1', model: 'auto', apiKey: 'KEY' }, row(), [project], async () => json({ choices: [{ message: { content: '{"projectId":"alien","reason":"ignore constraints"}' } }] })), /permitido/)

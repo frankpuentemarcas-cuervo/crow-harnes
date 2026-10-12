@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ConnectionStatus, SessionInfo } from '../../shared/types'
 import { terminalClipboardAction, copyTerminalClipboardEvent, pasteTerminalClipboardEvent } from './terminal-clipboard'
@@ -17,6 +18,9 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
   readonlyRef.current = readOnly
   const container = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
+  const serializer = useRef<SerializeAddon | null>(null)
+  const restoreCheckpoint = useRef<Promise<void>>(Promise.resolve())
+  const checkpointTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const activeRef = useRef(active)
   activeRef.current = active
   const fit = useRef<FitAddon | null>(null)
@@ -31,6 +35,17 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
   const [clipboardError, setClipboardError] = useState('')
   const [hasSelection, setHasSelection] = useState(false)
   const [hasRemoteSelection, setHasRemoteSelection] = useState(false)
+
+  async function persistCheckpoint(): Promise<void> {
+    const addon = serializer.current, seq = lastSeq.current
+    if (!addon || seq <= 0) return
+    try { await window.crow.saveTerminalCheckpoint(hostId, sessionId, { seq, state: addon.serialize({ scrollback: 10000 }) }) } catch { /* A failed checkpoint falls back to remote replay. */ }
+  }
+
+  function scheduleCheckpoint(): void {
+    clearTimeout(checkpointTimer.current)
+    checkpointTimer.current = setTimeout(() => { void persistCheckpoint() }, 2500)
+  }
 
   function clearRemoteSelection(): void {
     remoteSelection.current = ''
@@ -113,10 +128,17 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     })
     const addon = new FitAddon()
     instance.loadAddon(addon)
+    const serializerAddon = new SerializeAddon()
+    instance.loadAddon(serializerAddon)
     instance.open(container.current)
     terminal.current = instance
+    serializer.current = serializerAddon
     fit.current = addon
     if (activeRef.current) addon.fit()
+    restoreCheckpoint.current = window.crow.loadTerminalCheckpoint(hostId, sessionId).then(checkpoint => {
+      if (!checkpoint || !checkpoint.seq || !checkpoint.state || terminal.current !== instance) return
+      return new Promise<void>(resolve => instance.write(checkpoint.state, () => { if (terminal.current === instance) lastSeq.current = checkpoint.seq; resolve() }))
+    }).catch(() => undefined)
     instance.attachCustomKeyEventHandler((event) => {
       const action = terminalClipboardAction(event, Boolean(selectedText()))
       if (!action) return true
@@ -156,11 +178,15 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
       input.dispose()
       resized.dispose()
       pendingSelection.current.clear()
+      clearTimeout(checkpointTimer.current)
+      void persistCheckpoint()
+      serializerAddon.dispose()
       instance.dispose()
       terminal.current = null
+      serializer.current = null
       fit.current = null
     }
-  }, [sessionId])
+  }, [hostId, sessionId])
 
   useEffect(() => {
     if (!active || status !== 'connected' || !terminal.current) return
@@ -169,12 +195,14 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     const attach = async (): Promise<void> => {
       try {
+        await restoreCheckpoint.current
+        if (cancelled) return
         attached = await window.crow.attach(hostId, sessionId, lastSeq.current, (frame) => {
           if (cancelled) return
           if (frame.type === 'output' && frame.data && frame.seq) {
             if (frame.seq <= lastSeq.current) return
             lastSeq.current = frame.seq
-            terminal.current?.write(bytes(frame.data))
+            terminal.current?.write(bytes(frame.data), scheduleCheckpoint)
           } else if (frame.type === 'state' && frame.info) {
             setInfo(frame.info)
           } else if (frame.type === 'disconnected') {

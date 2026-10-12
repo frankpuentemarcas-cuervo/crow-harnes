@@ -1,9 +1,11 @@
 import { workspaceWindowPlacement } from '../shared/window-layout'
-import { app, BrowserWindow, screen, clipboard, dialog, ipcMain, Notification, safeStorage } from 'electron'
+import { app, BrowserWindow, screen, clipboard, dialog, ipcMain, Notification, safeStorage, shell } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { basename, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
 import { Connection } from './connection'
+import { ConnectionDiagnosticsStore } from './connection-diagnostics'
+import { TerminalCheckpointStore } from './terminal-checkpoint-store'
 import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
 import { Store } from './store'
@@ -14,8 +16,9 @@ import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
 import { AccountUsageService } from './account-usage-service'
 import { ERPTaskService } from './erp-task-service'
+import { GitLabTokenStore, listGitLabProjectFiles, readGitLabProjectFiles } from './gitlab-repository'
 import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage } from '../shared/erp-task'
-import type { CrowAccessUserInput, SavedState } from '../shared/types'
+import type { CrowAccessUserInput, GitLabRepositoryContext, ProjectInput, SavedState } from '../shared/types'
 import type { MobileActorBinding, MobileEnrollmentInput, MobileNotice, MobileQuota, MobileStartInput } from '../shared/mobile-companion'
 import { projectVisibleSessions, withoutHostWorkspace } from '../shared/access-visibility'
 import { createAccountUsageAdapters } from './account-usage-adapters'
@@ -29,6 +32,8 @@ import type { Agent, AlertAIInput, AlertSound, Host, HostMetrics, Mode, Notice, 
 
 let window: BrowserWindow | undefined
 let store: Store
+let connectionDiagnostics: ConnectionDiagnosticsStore
+let terminalCheckpoints: TerminalCheckpointStore
 let alertSoundStore: AlertSoundStore
 let alertAISettings: AlertAISettingsStore
 let attention: AttentionService
@@ -36,6 +41,7 @@ let freeLLM: FreeLLMRuntime
 let alertAudit: AlertAuditStore
 let accountUsage: AccountUsageService
 let erpTasks: ERPTaskService
+let gitLabTokens: GitLabTokenStore
 let erpProjects: ERPProjectCandidate[] = []
 let erpQueue: Promise<unknown> = Promise.resolve()
 let accessGeneration = 0
@@ -75,7 +81,7 @@ function connection(hostId: string): Connection {
   if (!host) throw new Error('Host desconocido.')
   let current = connections.get(hostId)
   if (!current) {
-    current = new Connection(host, store, vault, (id, status) => { if (status !== 'connected') invalidateMobileHost(id); erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled())
+    current = new Connection(host, store, vault, (id, status) => { if (status !== 'connected') invalidateMobileHost(id); erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled(), undefined, entry => connectionDiagnostics.record({ ...entry, hostId }))
     connections.set(hostId, current)
   }
   return current
@@ -133,13 +139,13 @@ async function authorizeERPProject(projectId: string, hostId: string): Promise<{
 }
 
 async function refreshERPProjects(): Promise<void> {
-  erpProjects = []
-  const permitted: ERPProjectCandidate[] = []
-  for (const project of store.snapshot().projects) {
-    try { await authorizeERPProject(project.id, project.hostId); permitted.push({ id: project.id, name: project.name, hostId: project.hostId }) }
-    catch { /* Disconnected/revoked identities are never candidate projects. */ }
-  }
-  erpProjects = permitted
+  // Keep local project suggestions available offline; dispatch reauthorizes the
+  // selected host and project immediately before any remote operation.
+  erpProjects = store.snapshot().projects.map(project => {
+    let repository: string | undefined
+    try { const parsed = project.gitlabUrl ? new URL(project.gitlabUrl) : undefined; repository = parsed ? `${parsed.hostname}${parsed.pathname.replace(/\.git$/i, '')}`.slice(0, 240) : undefined } catch { /* Ignore malformed legacy metadata. */ }
+    return { id: project.id, name: project.name, hostId: project.hostId, hostConnected: connections.get(project.hostId)?.status() === 'connected', summary: project.summary?.slice(0, 1000), tags: project.tags?.slice(0, 12), repository, repositoryReadable: project.allowGitLabRead === true }
+  })
 }
 
 function erpOperation<T>(action: () => T | Promise<T>): Promise<T> {
@@ -285,7 +291,7 @@ function registerIPC(): void {
   handle('crow:erp-sync', () => erpOperation(() => erpTasks.sync()))
   handle('crow:erp-detail', (taskKey: string) => erpOperation(() => erpTasks.loadDetail(taskKey)))
   handle('crow:erp-link', (erpProject: string, projectId: string) => erpOperation(() => erpTasks.linkProject(erpProject, projectId)))
-  handle('crow:erp-classify', (taskKey: string) => erpOperation(() => erpTasks.classify(taskKey)))
+  handle('crow:erp-classify', (taskKey: string, repositoryContext?: GitLabRepositoryContext[]) => erpOperation(() => erpTasks.classify(taskKey, repositoryContext)))
   handle('crow:erp-assign', (taskKey: string, projectId: string) => erpOperation(() => erpTasks.assign(taskKey, projectId)))
   handle('crow:erp-preview', (input: ERPTaskPreviewInput) => erpOperation(() => erpTasks.preview(input)))
   handle('crow:erp-approve', (previewId: string) => erpOperation(() => erpTasks.approve(previewId)))
@@ -316,6 +322,14 @@ function registerIPC(): void {
     await writeFile(result.filePath, JSON.stringify(exportData, null, 2), { encoding: 'utf8', mode: 0o600 })
     return { canceled: false }
   })
+  handle('crow:connection-diagnostics-export', async (hostId: string) => {
+    if (!window) return { canceled: true }
+    if (!store.host(hostId)) throw new Error('Host desconocido.')
+    const result = await dialog.showSaveDialog(window, { title: 'Exportar diagnóstico seguro de conexión', defaultPath: join(app.getPath('downloads'), `crow-conexion-${new Date().toISOString().slice(0, 10)}.json`), filters: [{ name: 'JSON de diagnóstico', extensions: ['json'] }] })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    await writeFile(result.filePath, connectionDiagnostics.exportJSON(hostId), { encoding: 'utf8', mode: 0o600 })
+    return { canceled: false }
+  })
   handle('crow:get-alert-ai-settings', () => alertAISettings.snapshot())
   handle('crow:ensure-free-llm', () => freeLLM.ensure())
   handle('crow:save-alert-ai-settings', (input: AlertAIInput) => {
@@ -344,6 +358,7 @@ function registerIPC(): void {
   })
   handle('crow:save-host', (host: Omit<Host, 'id'> & { id?: string }) => {
     if (host.id) invalidateMobileHost(host.id)
+    if (host.id) for (const project of store.snapshot().projects.filter(item => item.hostId === host.id)) gitLabTokens?.remove(project.id)
     if (host.id) { connections.get(host.id)?.stop(); connections.delete(host.id) }
     if (host.id && store.host(host.id)?.identity !== host.identity) vault.forget(host.id)
     return store.saveHost(host)
@@ -355,8 +370,37 @@ function registerIPC(): void {
     vault.forget(id)
     return store.removeHost(id)
   })
-  handle('crow:save-project', (project: Omit<Project, 'id'> & { id?: string }) => store.saveProject(project))
-  handle('crow:remove-project', (id: string) => store.removeProject(id))
+  handle('crow:save-project', (project: ProjectInput) => {
+    const previous = project.id ? store.project(project.id) : undefined
+    const saved = store.saveProject(project)
+    const stored = saved.projects.find(item => item.id === project.id) || saved.projects.find(item => item.name === project.name.trim() && item.hostId === project.hostId && item.root === (project.root.replace(/\/$/, '') || '/'))
+    if (stored) {
+      if (!stored.gitlabUrl || !stored.allowGitLabRead || (previous?.gitlabUrl && previous.gitlabUrl !== stored.gitlabUrl)) gitLabTokens.remove(stored.id)
+      if (project.gitlabToken?.trim()) {
+        if (!stored.gitlabUrl || !stored.allowGitLabRead) throw new Error('Activá el permiso de lectura GitLab antes de guardar el token.')
+        gitLabTokens.save(stored.id, project.gitlabToken)
+      }
+    }
+    return saved
+  })
+  handle('crow:open-project-repository', (projectId: string) => {
+    const url = store.project(projectId)?.gitlabUrl
+    if (!url) throw new Error('Este proyecto no tiene un repositorio GitLab vinculado.')
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.hostname) throw new Error('La URL GitLab guardada no es válida.')
+    return shell.openExternal(url)
+  })
+  handle('crow:list-gitlab-project-files', async (projectId: string) => {
+    const project = store.project(projectId)
+    if (!project?.allowGitLabRead || !project.gitlabUrl) throw new Error('Primero habilitá el permiso de lectura GitLab en la configuración del proyecto.')
+    return listGitLabProjectFiles(project, gitLabTokens.get(project.id))
+  })
+  handle('crow:read-gitlab-project-files', async (projectId: string, files: string[]) => {
+    const project = store.project(projectId)
+    if (!project?.allowGitLabRead || !project.gitlabUrl) throw new Error('Primero habilitá el permiso de lectura GitLab en la configuración del proyecto.')
+    return readGitLabProjectFiles(project, files, gitLabTokens.get(project.id))
+  })
+  handle('crow:remove-project', (id: string) => { gitLabTokens?.remove(id); return store.removeProject(id) })
   handle('crow:save-workspace', (tabs: WorkspaceTab[], activeTabs: Record<string, string>, selectedProjectId: string) => store.saveWorkspace(tabs, activeTabs, selectedProjectId))
   handle('crow:connect', (hostId: string) => connection(hostId).connect())
   handle('crow:submit-passphrase', (hostId: string, passphrase: string) => connection(hostId).submitPassphrase(passphrase))
@@ -399,6 +443,7 @@ function registerIPC(): void {
   handle('crow:delete-session', async (hostId: string, sessionId: string) => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
     await connection(hostId).api('DELETE', `/api/sessions/${sessionId}`)
+    terminalCheckpoints.remove(hostId, sessionId)
     return store.removeSession(hostId, sessionId)
   })
   handle('crow:wake-session', (hostId: string, sessionId: string) => {
@@ -410,6 +455,9 @@ function registerIPC(): void {
     await connection(hostId).attach(id, sessionId, from, (frame) => send('crow:terminal-frame', { id, frame }))
     return id
   })
+  handle('crow:terminal-checkpoint-load', (hostId: string, sessionId: string) => terminalCheckpoints.load(hostId, sessionId))
+  handle('crow:terminal-checkpoint-save', (hostId: string, sessionId: string, checkpoint: { seq: number; state: string }) => terminalCheckpoints.save(hostId, sessionId, checkpoint))
+  handle('crow:terminal-checkpoint-remove', (hostId: string, sessionId: string) => terminalCheckpoints.remove(hostId, sessionId))
   handle('crow:detach', (id: string) => { byStream(id).detach(id) })
   handle('crow:terminal-input', (id: string, data: string) => byStream(id).send(id, { type: 'input', data: Buffer.from(data, 'utf8').toString('base64') }))
   handle('crow:terminal-resize', (id: string, cols: number, rows: number) => byStream(id).send(id, { type: 'resize', cols, rows }))
@@ -489,10 +537,13 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   store = new Store(app.getPath('userData'))
+  connectionDiagnostics = new ConnectionDiagnosticsStore(app.getPath('userData'))
+  terminalCheckpoints = new TerminalCheckpointStore(app.getPath('userData'), safeStorage)
   accountUsage = new AccountUsageService(app.getPath('userData'), createAccountUsageAdapters())
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
   erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask })
+  gitLabTokens = new GitLabTokenStore(app.getPath('userData'), safeStorage)
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)

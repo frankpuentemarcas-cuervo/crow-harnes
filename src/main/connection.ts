@@ -16,6 +16,7 @@ import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './e
 import { PassphraseVault } from './passphrase-vault'
 import { remoteApiError } from './remote-errors'
 import { isTransportFailure } from './transport-failure'
+import { safeConnectionCode, safeFailureReason, type ConnectionDiagnostic, type ConnectionTransport } from './connection-diagnostics'
 
 const execFileAsync = promisify(execFile)
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -55,8 +56,10 @@ export class Connection {
   private delay = 1000
   private streams = new Map<string, WebSocket>()
   private polling = false
+  private diagnosticTransport: ConnectionTransport = 'openssh'
+  private onDiagnostic?: (entry: Omit<ConnectionDiagnostic, 'at' | 'hostId'>) => void
 
-  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onEvent: (hostId: string, event: RemoteEvent) => void, onPassphraseRequired: (hostId: string) => void, wantEventMessages: () => boolean, credentialVault = new HostCredentialVault()) {
+  constructor(host: Host, store: Store, vault: PassphraseVault, onStatus: (hostId: string, status: ConnectionStatus) => void, onEvent: (hostId: string, event: RemoteEvent) => void, onPassphraseRequired: (hostId: string) => void, wantEventMessages: () => boolean, credentialVault = new HostCredentialVault(), onDiagnostic?: (entry: Omit<ConnectionDiagnostic, 'at' | 'hostId'>) => void) {
     this.credentialVault = credentialVault
     this.host = host
     this.store = store
@@ -65,6 +68,7 @@ export class Connection {
     this.onEvent = onEvent
     this.wantEventMessages = wantEventMessages
     this.onPassphraseRequired = onPassphraseRequired
+    this.onDiagnostic = onDiagnostic
   }
 
   status(): ConnectionStatus { return this.currentStatus }
@@ -108,8 +112,13 @@ export class Connection {
   private setStatus(status: ConnectionStatus): void {
     if (this.currentStatus !== status) {
       this.currentStatus = status
+      this.diagnose({ event: 'status-change', state: status })
       this.onStatus(this.host.id, status)
     }
+  }
+
+  private diagnose(entry: Omit<ConnectionDiagnostic, 'at' | 'hostId' | 'transport'> & { transport?: ConnectionTransport }): void {
+    try { this.onDiagnostic?.({ ...entry, transport: entry.transport || this.diagnosticTransport }) } catch { /* Diagnostics must not affect connection handling. */ }
   }
 
   private sshOptions(): string[] {
@@ -119,6 +128,7 @@ export class Connection {
   }
 
   private async establish(): Promise<void> {
+    this.diagnose({ event: 'connect-start' })
     this.setStatus('connecting')
     const wasUserSubmission = this.pendingPassphrase !== undefined
     try {
@@ -126,15 +136,16 @@ export class Connection {
       const individualCredential = this.credentialVault.get(this.host.id, this.credentialTarget())
       let passphrase: string | undefined
       if (this.host.identity && isEncryptedKey(this.host.identity)) {
+        this.diagnosticTransport = 'ssh2'
         passphrase = this.pendingPassphrase || this.vault.get(this.host.id, this.host.identity)
         this.pendingPassphrase = undefined
         if (!passphrase) throw new PassphraseRequiredError()
         try {
           let opened: EncryptedSshTunnel | undefined
           let lostDuringOpening = false
-          opened = await EncryptedSshTunnel.open(this.host, passphrase, () => {
+          opened = await EncryptedSshTunnel.open(this.host, passphrase, error => {
             lostDuringOpening = true
-            if (opened && this.encryptedTunnel === opened) this.lost()
+            if (opened && this.encryptedTunnel === opened) this.lost(error)
           }, individualCredential || '')
           if (lostDuringOpening) { opened.close(); throw new Error('La conexión SSH se cerró antes de completar la apertura.') }
           this.encryptedTunnel = opened
@@ -147,13 +158,23 @@ export class Connection {
         stdout = this.encryptedTunnel.token
         this.localPort = this.encryptedTunnel.port
       } else {
+        this.diagnosticTransport = 'openssh'
         stdout = individualCredential || ''
         this.localPort = await freePort()
         const args = [...this.sshOptions(), '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-N', '-L', `127.0.0.1:${this.localPort}:127.0.0.1:${this.host.remotePort}`, this.host.target]
-        const tunnel = spawn('ssh', args, { windowsHide: true, stdio: 'ignore' })
+        const tunnel = spawn('ssh', args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
         this.tunnel = tunnel
-        tunnel.once('exit', () => { if (this.tunnel === tunnel) this.lost() })
-        tunnel.once('error', () => { if (this.tunnel === tunnel) this.lost() })
+        tunnel.stderr?.on('data', (chunk: Buffer) => {
+          const reason = safeFailureReason({ message: chunk.toString('utf8').toLowerCase() })
+          if (reason !== 'unknown') this.diagnose({ event: 'tunnel-error', reason })
+        })
+        tunnel.once('exit', (code) => {
+          if (this.tunnel === tunnel) {
+            this.diagnose({ event: 'tunnel-exit', exitCode: code, ...(code === 0 ? {} : { reason: 'connection-closed' as const }) })
+            this.lost({ message: code === 0 ? 'connection closed' : 'ssh tunnel exited' })
+          }
+        })
+        tunnel.once('error', error => { if (this.tunnel === tunnel) this.lost(error, 'tunnel-error') })
       }
       const transport = this.encryptedTunnel ?? this.tunnel
       if (!this.desired) throw new Error('Conexión cancelada.')
@@ -184,10 +205,12 @@ export class Connection {
       if (passphrase && this.host.identity) this.vault.set(this.host.id, this.host.identity, passphrase)
       this.delay = 1000
       this.setStatus('connected')
+      this.diagnose({ event: 'connect-success' })
       this.pollTimer = setInterval(() => void this.pollEvents(), 3000)
       void this.pollEvents()
     } catch (error) {
       this.pendingPassphrase = undefined
+      this.diagnose({ event: 'connect-failed', reason: error instanceof PassphraseRequiredError ? 'authentication-failed' : safeFailureReason(error), code: safeConnectionCode(error) })
       this.closeTransport()
       if (error instanceof PassphraseRequiredError) {
         this.setStatus('auth-required')
@@ -201,8 +224,9 @@ export class Connection {
     }
   }
 
-  private lost(): void {
+  private lost(error?: unknown, event: 'transport-lost' | 'tunnel-error' = 'transport-lost'): void {
     if (this.currentStatus === 'disconnected') return
+    this.diagnose({ event, reason: error ? safeFailureReason(error) : 'connection-closed', code: safeConnectionCode(error) })
     this.closeTransport()
     if (this.pollTimer) clearInterval(this.pollTimer)
     for (const stream of this.streams.values()) stream.close()
@@ -214,6 +238,7 @@ export class Connection {
   private scheduleRetry(): void {
     if (!this.desired || this.retryTimer) return
     const wait = this.delay + Math.floor(Math.random() * 400)
+    this.diagnose({ event: 'reconnect-scheduled', retryMs: wait })
     this.delay = Math.min(30000, this.delay * 2)
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined
@@ -244,14 +269,21 @@ export class Connection {
 
   private async recoverTransport(error: unknown): Promise<void> {
     if (!isTransportFailure(error) || this.currentStatus !== 'connected' || !this.desired) return
+    this.diagnose({ event: 'request-transport-error', reason: safeFailureReason(error), code: safeConnectionCode(error) })
     const port = this.localPort
     try {
       const response = await fetch(this.baseURL('/api/health'), {
         headers: this.headers(), signal: AbortSignal.timeout(2500)
       })
-      if (!response.ok && this.localPort === port) this.lost()
+      if (!response.ok && this.localPort === port) {
+        this.diagnose({ event: 'health-check-failed', status: response.status, reason: 'service-unavailable' })
+        this.lost({ message: 'service unavailable' })
+      }
     } catch {
-      if (this.localPort === port) this.lost()
+      if (this.localPort === port) {
+        this.diagnose({ event: 'health-check-failed', reason: 'connection-closed' })
+        this.lost({ message: 'connection closed' })
+      }
     }
   }
 
@@ -266,7 +298,10 @@ export class Connection {
       })
       if (!response.ok) {
         const detail = await response.text()
-        if (response.status === 401) this.lost()
+        if (response.status === 401) {
+          this.diagnose({ event: 'api-unauthorized', status: 401, reason: 'authentication-failed' })
+          this.lost({ message: 'authentication failed' })
+        }
         throw remoteApiError(response.status, detail, method, path)
       }
       return response.json() as Promise<T>
@@ -380,4 +415,4 @@ export class Connection {
   }
 }
 
-export class AccessCredentialRequiredError extends Error { constructor() { super('Este host requiere una credencial individual de Crow. Ped�sela al administrador.') } }
+export class AccessCredentialRequiredError extends Error { constructor() { super('Este host requiere una credencial individual de Crow. Pedísela al administrador.') } }

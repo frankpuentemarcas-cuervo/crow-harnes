@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../src/main/connection.ts', import.meta.url
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 const tick = () => new Promise(resolve => setImmediate(resolve))
 function fixture(mode = 'healthy') {
-  const state = { mode, attempts: [], timers: [], statuses: [], fetches: 0, cached: 0 }
+  const state = { mode, attempts: [], timers: [], statuses: [], diagnostics: [], fetches: 0, cached: 0 }
   const module = { exports: {} }
   class PassphraseRequiredError extends Error {}
   const localRequire = id => {
@@ -20,6 +20,7 @@ function fixture(mode = 'healthy') {
       return handle
     } } }
     if (id === './transport-failure') return { isTransportFailure: () => false }
+    if (id === './connection-diagnostics') return { safeFailureReason: value => /ECONNRESET/.test(value?.message || '') ? 'network-reset' : 'unknown', safeConnectionCode: () => undefined }
     if (id === 'node:child_process') return { spawn() { throw new Error('External SSH forbidden') }, execFile() {} }
     if (id.startsWith('node:')) return require(id)
     return {}
@@ -34,7 +35,7 @@ function fixture(mode = 'healthy') {
     }
   }
   vm.runInNewContext(compiled, globals)
-  const connection = new module.exports.Connection({ id: 'fictional', target: 'fictional@host', identity: 'memory-key', port: 22, remotePort: 47321 }, { eventCursor: () => 0 }, { get: () => 'fictional', set: () => { state.cached++ } }, (_host, status) => state.statuses.push(status), () => {}, () => {}, () => false, { get: () => 'a'.repeat(32) })
+  const connection = new module.exports.Connection({ id: 'fictional', target: 'fictional@host', identity: 'memory-key', port: 22, remotePort: 47321 }, { eventCursor: () => 0 }, { get: () => 'fictional', set: () => { state.cached++ } }, (_host, status) => state.statuses.push(status), () => {}, () => {}, () => false, { get: () => 'a'.repeat(32) }, entry => state.diagnostics.push(entry))
   const retries = () => state.timers.filter(timer => !timer.cancelled && !timer.fired)
   return { state, connection, retries, retry: () => { const timer = retries()[0]; timer.fired = true; timer.callback() } }
 }
@@ -43,9 +44,12 @@ test('failed opening retries automatically; duplicate loss notifications schedul
   const f = fixture('fail')
   try {
     await assert.rejects(f.connection.connect(), /ECONNRESET/); assert.equal(f.retries().length, 1)
+    assert.ok(f.state.diagnostics.some(row => row.event === 'connect-failed' && row.reason === 'network-reset'))
+    assert.ok(f.state.diagnostics.some(row => row.event === 'reconnect-scheduled' && row.retryMs >= 1000))
     f.state.mode = 'healthy'; f.retry(); await tick(); assert.equal(f.connection.status(), 'connected')
     assert.equal(f.state.attempts.length, 2)
     f.state.attempts[1].lost(); f.state.attempts[1].lost(); assert.equal(f.retries().length, 1)
+    assert.equal(f.state.diagnostics.filter(row => row.event === 'transport-lost').length, 1)
     assert.equal(f.state.attempts[1].closed, true)
     f.retry(); await tick(); assert.equal(f.connection.status(), 'connected'); assert.equal(f.state.attempts.length, 3)
   } finally { f.connection.stop() }

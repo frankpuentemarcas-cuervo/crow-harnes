@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, Globe2, HardDrive, MoreHorizontal, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
-import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, Mode, Notice, Project, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
+import { Bell, ChevronRight, CirclePlus, Clock3, Code2, Download, Eye, EyeOff, FileCode2, Folder, FolderOpen, GitBranch, Globe2, HardDrive, MoreHorizontal, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Server, Settings2, Smartphone, TerminalSquare, Trash2, X } from 'lucide-react'
+import type { Agent, AlertAISettings, AlertAIStatus, ConnectionStatus, Host, HostMetrics, Mode, Notice, Project, ProjectInput, SavedState, SessionInfo, UpdateState, WorkspaceTab } from '../../shared/types'
 import { TerminalPane } from './TerminalPane'
 import { EditorPane } from './EditorPane'
 import { BrowserPane } from './BrowserPane'
@@ -440,7 +440,7 @@ export function App(): React.JSX.Element {
     await refreshSessions(hostId)
   }
 
-  async function saveProject(input: Omit<Project, 'id'> & { id?: string }): Promise<void> {
+  async function saveProject(input: ProjectInput): Promise<void> {
     const saved = await window.crow.saveProject(input)
     setState(saved)
     setSelectedProjectId(input.id || saved.projects.at(-1)?.id || '')
@@ -619,6 +619,7 @@ export function App(): React.JSX.Element {
         <div className="toolbar">
           <div className="path-label"><Folder size={15} /><span title={selectedProject.root}>{selectedProject.root}</span></div>
           <div className="toolbar-right">
+            {selectedProject.gitlabUrl && <button className="secondary-button" title="Abrir el repositorio GitLab vinculado" onClick={() => void window.crow.openProjectRepository(selectedProject.id).catch(reason => setError(String(reason)))}><GitBranch size={15} /> GitLab</button>}
             <button className="secondary-button files-toggle" aria-label="Mostrar archivos" aria-pressed={filePanelOpen} onClick={() => setFilePanelOpen(value => !value)}>{filePanelOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}<span>Archivos</span></button>
             <select aria-label="Agente" value={agent} onChange={(event) => { const next = event.target.value as Agent; setAgent(next); if (next === 'shell') setMode('normal') }}><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="agy">Antigravity</option><option value="shell">Shell</option></select>
             <select aria-label="Modo de permisos" value={mode} disabled={agent === 'shell'} onChange={(event) => setMode(event.target.value as Mode)}><option value="normal">Permisos normales</option><option value="bypass">Bypass permisos</option></select>
@@ -664,7 +665,7 @@ export function App(): React.JSX.Element {
       </> : <div className="welcome"><div className="welcome-symbol"><Code2 size={36} /></div><h1>Un espacio para tus agentes</h1><p>Conectá un host Linux y agregá una carpeta de proyecto para empezar.</p><button className="primary-button" onClick={() => { setEditingHost(undefined); setDialog('host') }}><Plus size={16} /> Agregar host</button></div>}
       <footer className="statusbar"><span><span className={`status-dot ${status}`} /> {selectedHost?.name || 'Sin conexión'}</span><span>{selectedProject?.root || 'Crow Harness v0.1'}</span></footer>
     </div>
-    {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onDelete={editingHost ? async () => { if (operationKeys.current.has(`start-host:${editingHost.id}`)) throw new Error('Esperá a que termine la creación de la terminal antes de quitar el host.'); if (tabs.some(tab => state.projects.some(project => project.id === tab.projectId && project.hostId === editingHost.id) && busyEditors.current.has(tab.id))) throw new Error('Esperá a que termine el guardado de archivos antes de quitar el host.'); const saved = await window.crow.removeHost(editingHost.id); sessionVersions.current.begin(editingHost.id); setState(saved); setTabs(current => current.filter(tab => saved.projects.some(project => project.id === tab.projectId))); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId(saved.projects[0]?.id || '') } : undefined} />}
+    {dialog === 'host' && <HostDialog host={editingHost} hostConnected={!!editingHost && statuses[editingHost.id] === 'connected'} hooksEnabled={editingHost ? hookSettings[editingHost.id] : undefined} onToggleHooks={editingHost ? (enabled) => toggleHooks(editingHost.id, enabled) : undefined} onClose={() => setDialog(null)} onSave={saveHost} onExportDiagnostics={editingHost ? async () => { await window.crow.exportConnectionDiagnostics(editingHost.id) } : undefined} onDelete={editingHost ? async () => { if (operationKeys.current.has(`start-host:${editingHost.id}`)) throw new Error('Esperá a que termine la creación de la terminal antes de quitar el host.'); if (tabs.some(tab => state.projects.some(project => project.id === tab.projectId && project.hostId === editingHost.id) && busyEditors.current.has(tab.id))) throw new Error('Esperá a que termine el guardado de archivos antes de quitar el host.'); const saved = await window.crow.removeHost(editingHost.id); sessionVersions.current.begin(editingHost.id); setState(saved); setTabs(current => current.filter(tab => saved.projects.some(project => project.id === tab.projectId))); setDialog(null); if (selectedHost?.id === editingHost.id) setSelectedProjectId(saved.projects[0]?.id || '') } : undefined} />}
     {dialog === 'project' && <ProjectDialog project={editingProject} hosts={state.hosts} defaultHostId={projectHostId || selectedHost?.id || state.hosts[0]?.id || ''} onClose={() => setDialog(null)} onSave={saveProject} />}
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}

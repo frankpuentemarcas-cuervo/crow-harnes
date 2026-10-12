@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { AttentionClassification, Host, Notice, Project, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
+import type { AttentionClassification, Host, Notice, Project, ProjectInput, RemoteEvent, SavedState, WorkspaceTab } from '../shared/types'
 import { normalizeSessionName, sessionNameKey } from '../shared/session-list.ts'
 
 const initialState = (): SavedState => ({ hosts: [], projects: [], notices: [], sessionNames: {}, eventCursors: {}, tabs: [], activeTabs: {}, selectedProjectId: '' })
@@ -61,11 +61,22 @@ export class Store {
     return this.snapshot()
   }
 
-  saveProject(input: Omit<Project, 'id'> & { id?: string }): SavedState {
+  saveProject(input: ProjectInput): SavedState {
     if (!this.host(input.hostId) || !input.name.trim() || !input.root.startsWith('/')) {
       throw new Error('El proyecto necesita un host y una ruta Linux absoluta.')
     }
-    const project: Project = { ...input, id: input.id || randomUUID(), name: input.name.trim(), root: input.root.replace(/\/$/, '') || '/' }
+    const summary = typeof input.summary === 'string' ? input.summary.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ' ').trim().slice(0, 1000) : ''
+    const tags = Array.isArray(input.tags) ? [...new Set(input.tags.filter((tag): tag is string => typeof tag === 'string').map(tag => tag.replace(/[\x00-\x1f\x7f]/g, ' ').trim().toLowerCase()).filter(Boolean))].slice(0, 12).map(tag => tag.slice(0, 32)) : []
+    let gitlabUrl: string | undefined
+    if (input.gitlabUrl?.trim()) {
+      try {
+        const parsed = new URL(input.gitlabUrl.trim())
+        if (input.gitlabUrl.length > 2048 || parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash || !parsed.pathname.replace(/\/$/, '')) throw new Error()
+        gitlabUrl = `${parsed.origin}${parsed.pathname.replace(/\/$/, '').replace(/\.git$/i, '')}`
+      } catch { throw new Error('Ingresá la URL HTTPS del repositorio GitLab, sin credenciales ni parámetros.') }
+    }
+    const { gitlabToken: _gitlabToken, ...projectInput } = input
+    const project: Project = { ...projectInput, id: input.id || randomUUID(), name: input.name.trim(), root: input.root.replace(/\/$/, '') || '/', summary: summary || undefined, tags, gitlabUrl, allowGitLabRead: !!gitlabUrl && input.allowGitLabRead === true }
     const index = this.state.projects.findIndex((item) => item.id === project.id)
     if (index >= 0) this.state.projects[index] = project
     else this.state.projects.push(project)

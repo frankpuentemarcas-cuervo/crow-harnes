@@ -21,6 +21,8 @@ window.crow = {
   clipboardReadText: async () => { qa.reads++; return qa.clipboard },
   terminalInput: async (_stream, text) => { qa.input.push(text) },
   terminalResize: async () => {}, detach: async () => {},
+  loadTerminalCheckpoint: async () => null,
+  saveTerminalCheckpoint: async () => {},
   attach: async () => 'qa-stream'
 }
 const root = createRoot(document.getElementById('root'))

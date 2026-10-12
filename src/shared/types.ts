@@ -56,7 +56,16 @@ export interface Project {
   hostId: string
   name: string
   root: string
+  summary?: string
+  tags?: string[]
+  gitlabUrl?: string
+  allowGitLabRead?: boolean
 }
+
+export interface ProjectInput extends Omit<Project, 'id'> { id?: string; gitlabToken?: string }
+export interface GitLabRepositoryContext { projectId: string; fileName: string; content: string }
+export interface GitLabRepositoryFiles { projectId: string; files: string[] }
+export interface TerminalCheckpoint { seq: number; state: string }
 
 export interface SessionInfo {
   ownerId?: string
@@ -214,7 +223,7 @@ export interface CrowAPI extends AccountUsageAPI {
   erpSync(): Promise<ERPTaskSnapshot>
   erpTaskDetail(taskKey: string): Promise<ERPTaskSnapshot>
   erpLinkProject(erpProject: string, projectId: string): Promise<ERPTaskSnapshot>
-  erpClassify(taskKey: string): Promise<ERPTaskSnapshot>
+  erpClassify(taskKey: string, repositoryContext?: GitLabRepositoryContext[]): Promise<ERPTaskSnapshot>
   erpAssign(taskKey: string, projectId: string): Promise<ERPTaskSnapshot>
   erpPreview(input: ERPTaskPreviewInput): Promise<ERPTaskPreview>
   erpApprove(previewId: string): Promise<ERPTaskSnapshot>
@@ -256,7 +265,11 @@ export interface CrowAPI extends AccountUsageAPI {
   getState(): Promise<SavedState>
   saveHost(host: Omit<Host, 'id'> & { id?: string }): Promise<SavedState>
   removeHost(id: string): Promise<SavedState>
-  saveProject(project: Omit<Project, 'id'> & { id?: string }): Promise<SavedState>
+  exportConnectionDiagnostics(hostId: string): Promise<{ canceled: boolean }>
+  saveProject(project: ProjectInput): Promise<SavedState>
+  openProjectRepository(projectId: string): Promise<void>
+  listGitLabProjectFiles(projectId: string): Promise<GitLabRepositoryFiles>
+  readGitLabProjectFiles(projectId: string, files: string[]): Promise<GitLabRepositoryContext[]>
   removeProject(id: string): Promise<SavedState>
   saveWorkspace(tabs: WorkspaceTab[], activeTabs: Record<string, string>, selectedProjectId: string): Promise<SavedState>
   connect(hostId: string): Promise<void>
@@ -272,6 +285,9 @@ export interface CrowAPI extends AccountUsageAPI {
   deleteSession(hostId: string, sessionId: string): Promise<SavedState>
   wakeSession(hostId: string, sessionId: string): Promise<SessionInfo>
   attach(hostId: string, sessionId: string, from: number, listener: (frame: TerminalFrame) => void): Promise<string>
+  loadTerminalCheckpoint(hostId: string, sessionId: string): Promise<TerminalCheckpoint | undefined>
+  saveTerminalCheckpoint(hostId: string, sessionId: string, checkpoint: TerminalCheckpoint): Promise<void>
+  removeTerminalCheckpoint(hostId: string, sessionId: string): Promise<void>
   detach(subscriptionId: string): Promise<void>
   terminalInput(subscriptionId: string, data: string): Promise<void>
   terminalResize(subscriptionId: string, cols: number, rows: number): Promise<void>
