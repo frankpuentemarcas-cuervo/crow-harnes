@@ -456,7 +456,7 @@ function registerIPC(): void {
     return id
   })
   handle('crow:terminal-checkpoint-load', (hostId: string, sessionId: string) => terminalCheckpoints.load(hostId, sessionId))
-  handle('crow:terminal-checkpoint-save', (hostId: string, sessionId: string, checkpoint: { seq: number; state: string }) => terminalCheckpoints.save(hostId, sessionId, checkpoint))
+  handle('crow:terminal-checkpoint-save', (hostId: string, sessionId: string, checkpoint: { seq: number; state: string; viewportY?: number }) => terminalCheckpoints.save(hostId, sessionId, checkpoint))
   handle('crow:terminal-checkpoint-remove', (hostId: string, sessionId: string) => terminalCheckpoints.remove(hostId, sessionId))
   handle('crow:detach', (id: string) => { byStream(id).detach(id) })
   handle('crow:terminal-input', (id: string, data: string) => byStream(id).send(id, { type: 'input', data: Buffer.from(data, 'utf8').toString('base64') }))

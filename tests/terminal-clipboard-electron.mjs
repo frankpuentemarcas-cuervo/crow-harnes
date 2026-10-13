@@ -44,6 +44,19 @@ app.whenReady().then(async () => {
     return value
   }
   for(let i=0;i<100;i++){if(await js('Boolean(window.qa)'))break; await delay(100)}
+  for(let i=0;i<100;i++){if(await js('qa.state().from === 44 && qa.viewport() === 3'))break; await delay(50)}
+  assert.equal((await js('qa.state()')).from, 44, 'reattach must continue after the saved output sequence')
+  assert.equal(await js('qa.viewport()'), 3, 'restore must put the terminal back at the saved viewport after replay')
+  console.log('PASS checkpoint resumes by sequence and restores viewport after replay')
+  await js('qa.scrollUp()'); await delay(900)
+  assert.ok((await js('qa.state()')).savedCheckpoint?.viewportY !== undefined, 'user scrolling must persist the viewport')
+  console.log('PASS user scroll persists checkpoint viewport')
+  await js('qa.useMissingCheckpoint()')
+  for(let i=0;i<100;i++){if(await js('qa.state().from === 0'))break; await delay(50)}
+  assert.equal((await js('qa.state()')).from, 0, 'missing checkpoint must explicitly replay from the beginning')
+  assert.match((await js('qa.state()')).noticeAtAttach, /no hay checkpoint local/, 'fallback notice must be visible before replay begins')
+  console.log('PASS fallback notice is visible before remote replay')
+  await js('qa.clearTerminal()')
   await js("qa.write('texto de prueba')")
   const shortcut = async (keyCode, modifiers = ['control']) => {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })

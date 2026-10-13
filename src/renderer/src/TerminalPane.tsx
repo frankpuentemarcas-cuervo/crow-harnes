@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { FitAddon } from '@xterm/addon-fit'
-import type { ConnectionStatus, SessionInfo } from '../../shared/types'
+import type { ConnectionStatus, SessionInfo, TerminalCheckpointLoadResult } from '../../shared/types'
 import { terminalClipboardAction, copyTerminalClipboardEvent, pasteTerminalClipboardEvent } from './terminal-clipboard'
 import { decodeOsc52Selection } from './terminal-osc52'
 import { PendingTerminalSelection } from './terminal-selection'
@@ -21,6 +21,11 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
   const serializer = useRef<SerializeAddon | null>(null)
   const restoreCheckpoint = useRef<Promise<void>>(Promise.resolve())
   const checkpointTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const restoring = useRef(true)
+  const fallbackAnnounced = useRef(false)
+  const savedViewportY = useRef<number | undefined>(undefined)
+  const loadResult = useRef<TerminalCheckpointLoadResult['status']>('missing')
   const activeRef = useRef(active)
   activeRef.current = active
   const fit = useRef<FitAddon | null>(null)
@@ -33,18 +38,34 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
   const [retry, setRetry] = useState(0)
   const [wakeError, setWakeError] = useState('')
   const [clipboardError, setClipboardError] = useState('')
+  const [checkpointNotice, setCheckpointNotice] = useState('')
   const [hasSelection, setHasSelection] = useState(false)
   const [hasRemoteSelection, setHasRemoteSelection] = useState(false)
 
   async function persistCheckpoint(): Promise<void> {
-    const addon = serializer.current, seq = lastSeq.current
-    if (!addon || seq <= 0) return
-    try { await window.crow.saveTerminalCheckpoint(hostId, sessionId, { seq, state: addon.serialize({ scrollback: 10000 }) }) } catch { /* A failed checkpoint falls back to remote replay. */ }
+    const addon = serializer.current, instance = terminal.current, seq = lastSeq.current
+    if (!addon || !instance || seq <= 0) return
+    try {
+      const result = await window.crow.saveTerminalCheckpoint(hostId, sessionId, { seq, state: addon.serialize({ scrollback: 10000 }), viewportY: instance.buffer.active.viewportY })
+      if (terminal.current !== instance) return
+      if (result !== 'saved') showCheckpointNotice(result === 'oversized' ? 'El snapshot supera 32 MB sin comprimir o 8 MB comprimido; se conserva el anterior y se avisará si hay que cargar el historial remoto.' : 'No se pudo guardar el snapshot local; al reabrir se cargará el historial remoto.')
+    } catch { if (terminal.current === instance) showCheckpointNotice('No se pudo guardar el snapshot local; al reabrir se cargará el historial remoto.') }
   }
 
-  function scheduleCheckpoint(): void {
+  function showCheckpointNotice(message: string, duration = 9000): void {
+    setCheckpointNotice(message)
+    clearTimeout(noticeTimer.current)
+    noticeTimer.current = duration > 0 ? setTimeout(() => setCheckpointNotice(''), duration) : undefined
+  }
+
+  function checkpointFallbackMessage(status: TerminalCheckpointLoadResult['status'], complete = false): string {
+    const cause = status === 'missing' ? 'no hay checkpoint local' : status === 'oversized' ? 'el checkpoint supera el límite' : status === 'unavailable' ? 'el cifrado local no está disponible' : 'el checkpoint no se pudo leer'
+    return complete ? `Historial remoto recuperado; ${cause}.` : `Aviso: ${cause}; se cargará el historial remoto desde el inicio.`
+  }
+
+  function scheduleCheckpoint(delay = 2500): void {
     clearTimeout(checkpointTimer.current)
-    checkpointTimer.current = setTimeout(() => { void persistCheckpoint() }, 2500)
+    checkpointTimer.current = setTimeout(() => { void persistCheckpoint() }, delay)
   }
 
   function clearRemoteSelection(): void {
@@ -135,10 +156,16 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     serializer.current = serializerAddon
     fit.current = addon
     if (activeRef.current) addon.fit()
-    restoreCheckpoint.current = window.crow.loadTerminalCheckpoint(hostId, sessionId).then(checkpoint => {
-      if (!checkpoint || !checkpoint.seq || !checkpoint.state || terminal.current !== instance) return
+    restoring.current = true
+    restoreCheckpoint.current = window.crow.loadTerminalCheckpoint(hostId, sessionId).then(result => {
+      if (terminal.current !== instance) return
+      loadResult.current = result.status
+      if (result.status !== 'restored') return
+      const checkpoint = result.checkpoint
+      savedViewportY.current = checkpoint.viewportY
+      if (!checkpoint.seq || !checkpoint.state) return
       return new Promise<void>(resolve => instance.write(checkpoint.state, () => { if (terminal.current === instance) lastSeq.current = checkpoint.seq; resolve() }))
-    }).catch(() => undefined)
+    }).catch(() => { loadResult.current = 'invalid' })
     instance.attachCustomKeyEventHandler((event) => {
       const action = terminalClipboardAction(event, Boolean(selectedText()))
       if (!action) return true
@@ -159,6 +186,7 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     const selection = instance.onSelectionChange(() => {
       setHasSelection(pendingSelection.current.capture(instance.getSelection()))
     })
+    const scrolled = instance.onScroll(() => { if (!restoring.current) scheduleCheckpoint(700) })
     const key = instance.onKey(({ domEvent }) => {
       if (terminalClipboardAction(domEvent, Boolean(selectedText())) !== 'copy') clearCopyCandidates()
     })
@@ -173,12 +201,14 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     return () => {
       observer.disconnect()
       selection.dispose()
+      scrolled.dispose()
       key.dispose()
       osc52.dispose()
       input.dispose()
       resized.dispose()
       pendingSelection.current.clear()
       clearTimeout(checkpointTimer.current)
+      clearTimeout(noticeTimer.current)
       void persistCheckpoint()
       serializerAddon.dispose()
       instance.dispose()
@@ -193,18 +223,48 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     let cancelled = false
     let attached = ''
     let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let pendingWrites = 0
+    let replayStateReceived = false
+    let replayedOutput = false
+    let viewportRestored = false
+    const finishReplay = (): void => {
+      if (!replayStateReceived || pendingWrites > 0 || viewportRestored) return
+      viewportRestored = true
+      const instance = terminal.current
+      const savedLine = savedViewportY.current
+      let notice = ''
+      if (savedLine !== undefined && instance) {
+        const availableLine = instance.buffer.active.baseY
+        if (savedLine > availableLine) notice = 'La posición guardada ya no está disponible en el scrollback actual.'
+        instance.scrollToLine(Math.min(savedLine, availableLine))
+      } else if (loadResult.current !== 'restored' && replayedOutput) notice = checkpointFallbackMessage(loadResult.current, true)
+      else if (loadResult.current === 'restored' && savedLine === undefined) notice = 'Snapshot restaurado; esta copia no guardaba la posición de lectura.'
+      restoring.current = false
+      if (notice) showCheckpointNotice(notice)
+      else if (loadResult.current !== 'restored') { clearTimeout(noticeTimer.current); setCheckpointNotice('') }
+    }
     const attach = async (): Promise<void> => {
       try {
         await restoreCheckpoint.current
         if (cancelled) return
+        if (loadResult.current !== 'restored' && !fallbackAnnounced.current) {
+          fallbackAnnounced.current = true
+          showCheckpointNotice(checkpointFallbackMessage(loadResult.current), 0)
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+          if (cancelled) return
+        }
         attached = await window.crow.attach(hostId, sessionId, lastSeq.current, (frame) => {
           if (cancelled) return
           if (frame.type === 'output' && frame.data && frame.seq) {
             if (frame.seq <= lastSeq.current) return
+            replayedOutput = true
             lastSeq.current = frame.seq
-            terminal.current?.write(bytes(frame.data), scheduleCheckpoint)
+            pendingWrites++
+            terminal.current?.write(bytes(frame.data), () => { pendingWrites--; scheduleCheckpoint(); finishReplay() })
           } else if (frame.type === 'state' && frame.info) {
             setInfo(frame.info)
+            replayStateReceived = true
+            finishReplay()
           } else if (frame.type === 'disconnected') {
             subscription.current = ''
             clearTimeout(retryTimer)
@@ -254,6 +314,7 @@ export function TerminalPane({ hostId, sessionId, status, active, readOnly = fal
     </div>
     {wakeError && <div className="inline-error" role="alert">{wakeError}</div>}
     {clipboardError && <div className="inline-error" role="alert">{clipboardError}</div>}
+    {checkpointNotice && <div className="inline-error" role="status">{checkpointNotice}</div>}
     <div className="terminal-surface" ref={container} onPointerDownCapture={clearCopyCandidates} onCompositionStartCapture={clearCopyCandidates}
       onPointerUpCapture={() => setHasSelection(pendingSelection.current.capture(terminal.current?.getSelection() || ''))}
       onCopyCapture={(event) => {

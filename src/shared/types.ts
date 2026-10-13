@@ -65,7 +65,9 @@ export interface Project {
 export interface ProjectInput extends Omit<Project, 'id'> { id?: string; gitlabToken?: string }
 export interface GitLabRepositoryContext { projectId: string; fileName: string; content: string }
 export interface GitLabRepositoryFiles { projectId: string; files: string[] }
-export interface TerminalCheckpoint { seq: number; state: string }
+export interface TerminalCheckpoint { seq: number; state: string; viewportY?: number }
+export type TerminalCheckpointLoadResult = { status: 'restored'; checkpoint: TerminalCheckpoint } | { status: 'missing' | 'invalid' | 'oversized' | 'unavailable' }
+export type TerminalCheckpointSaveResult = 'saved' | 'oversized' | 'unavailable' | 'invalid'
 
 export interface SessionInfo {
   ownerId?: string
@@ -285,8 +287,8 @@ export interface CrowAPI extends AccountUsageAPI {
   deleteSession(hostId: string, sessionId: string): Promise<SavedState>
   wakeSession(hostId: string, sessionId: string): Promise<SessionInfo>
   attach(hostId: string, sessionId: string, from: number, listener: (frame: TerminalFrame) => void): Promise<string>
-  loadTerminalCheckpoint(hostId: string, sessionId: string): Promise<TerminalCheckpoint | undefined>
-  saveTerminalCheckpoint(hostId: string, sessionId: string, checkpoint: TerminalCheckpoint): Promise<void>
+  loadTerminalCheckpoint(hostId: string, sessionId: string): Promise<TerminalCheckpointLoadResult>
+  saveTerminalCheckpoint(hostId: string, sessionId: string, checkpoint: TerminalCheckpoint): Promise<TerminalCheckpointSaveResult>
   removeTerminalCheckpoint(hostId: string, sessionId: string): Promise<void>
   detach(subscriptionId: string): Promise<void>
   terminalInput(subscriptionId: string, data: string): Promise<void>

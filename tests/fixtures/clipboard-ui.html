@@ -6,6 +6,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import { Terminal } from '@xterm/xterm'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { TerminalPane } from '/src/renderer/src/TerminalPane.tsx'
 import '/src/renderer/src/styles.css'
 import '@xterm/xterm/css/xterm.css'
@@ -15,18 +16,30 @@ import '@xterm/xterm/css/xterm.css'
 let instance, active = true
 const originalOpen = Terminal.prototype.open
 Terminal.prototype.open = function(...args) { instance = this; return originalOpen.apply(this, args) }
-const qa = { input: [], copied: '', clipboard: '', reads: 0, writes: 0, outsideKeys: [] }
+const seed = new Terminal({ cols: 80, rows: 10, scrollback: 10000 })
+const seedSerializer = new SerializeAddon(); seed.loadAddon(seedSerializer)
+await new Promise(resolve => seed.write(Array.from({ length: 60 }, (_, i) => `línea ${i}\r\n`).join(''), resolve))
+const seedState = seedSerializer.serialize({ scrollback: 10000 })
+seed.dispose()
+const qa = { input: [], copied: '', clipboard: '', reads: 0, writes: 0, outsideKeys: [], from: -1, savedCheckpoint: undefined, session: '0123456789abcdef0123456789abcdef', noticeAtAttach: '',
+  checkpoint: { status: 'restored', checkpoint: { seq: 44, state: seedState, viewportY: 3 } } }
 window.crow = {
   clipboardWriteText: async text => { qa.copied = text; qa.writes++ },
   clipboardReadText: async () => { qa.reads++; return qa.clipboard },
   terminalInput: async (_stream, text) => { qa.input.push(text) },
   terminalResize: async () => {}, detach: async () => {},
-  loadTerminalCheckpoint: async () => null,
-  saveTerminalCheckpoint: async () => {},
-  attach: async () => 'qa-stream'
+  loadTerminalCheckpoint: async () => qa.checkpoint,
+  saveTerminalCheckpoint: async (_host, _session, checkpoint) => { qa.savedCheckpoint = checkpoint; return 'saved' },
+  attach: async (_host, _session, from, listener) => {
+    qa.from = from
+    qa.noticeAtAttach = document.querySelector('.terminal-pane [role="status"]')?.textContent || ''
+    listener({ type: 'output', seq: from + 1, data: btoa('salida posterior\r\n') })
+    listener({ type: 'state', info: { agent: 'claude', state: 'running' } })
+    return 'qa-stream'
+  }
 }
 const root = createRoot(document.getElementById('root'))
-const render = () => flushSync(() => root.render(React.createElement(TerminalPane, { hostId: 'qa-host', sessionId: '0123456789abcdef0123456789abcdef', status: 'connected', active })))
+const render = () => flushSync(() => root.render(React.createElement(TerminalPane, { key: qa.session, hostId: 'qa-host', sessionId: qa.session, status: 'connected', active })))
 render()
 document.getElementById('outside').addEventListener('keydown', event => {
   if (event.ctrlKey && ['c', 'v'].includes(event.key.toLowerCase())) {
@@ -41,6 +54,10 @@ window.qa = {
   select: length => new Promise(resolve => { instance.select(0, 0, length); instance.textarea.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); instance.focus(); setTimeout(resolve, 60) }),
   redraw: () => instance.clearSelection(),
   focus: () => instance.focus(),
+  viewport: () => instance.buffer.active.viewportY,
+  scrollUp: () => instance.scrollLines(-2),
+  clearTerminal: () => instance.clear(),
+  useMissingCheckpoint: () => { qa.checkpoint = { status: 'missing' }; qa.session = '1123456789abcdef0123456789abcdef'; render() },
   active: value => { active = value; render() },
   nativeCopy: () => {
     const clipboardData = new DataTransfer()
