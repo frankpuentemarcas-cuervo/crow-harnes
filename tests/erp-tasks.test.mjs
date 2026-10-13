@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { ERPTaskService } from '../src/main/erp-task-service.ts'
 import { ERPNextClient, validateERPURL, taskText } from '../src/main/erp-next-client.ts'
 import { classifyERPTask } from '../src/main/erp-task-classifier.ts'
-const row = () => ({ name: 'TASK-001', subject: 'Fix search', description: '<p>Business confidential</p><script>secret()</script>', project: 'ERP-P', status: 'Open', priority: 'High', modified: '2026-10-09 12:00:00' })
+const row = () => ({ name: 'TASK-001', subject: 'Fix search', description: '<p>Business confidential</p><script>secret()</script>', project: 'ERP-P', status: 'Open', priority: 'High', modified: '2026-10-09 12:00:00', _assign: '["carlospalacios@larael.com"]' })
 const project = { id: 'p1', name: 'Search', hostId: 'h1', summary: 'Buscador de personal', tags: ['rrhh', 'busqueda'], repository: 'gitlab.com/company/search' }
 const encryption = { isEncryptionAvailable: () => true, encryptString: text => Buffer.from(Buffer.from(text).toString('base64')), decryptString: bytes => Buffer.from(bytes.toString(), 'base64').toString() }
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status })
@@ -25,10 +25,33 @@ function setup() {
 test('ERP connector queries only Task with bounded paging and authenticated read-only calls', async () => {
   const calls = []; const client = new ERPNextClient({ url: 'https://erp.example.org', apiKey: 'KEY', apiSecret: 'SECRET' }, async (url, opts) => { calls.push({ url, opts }); const offset = new URL(url).searchParams.get('limit_start'); return json({ data: offset === '0' ? Array.from({ length: 100 }, (_, i) => ({ ...row(), name: 'T-' + i })) : [] }) })
   assert.equal((await client.tasks()).length, 100); assert.equal(calls.length, 2)
-  for (const { url, opts } of calls) { assert.match(url, /\/api\/resource\/Task\?/); assert.equal(opts.method, 'GET'); assert.equal(opts.redirect, 'error'); assert.equal(opts.headers.Authorization, 'token KEY:SECRET'); assert.ok(!url.includes('owner')) }
+  for (const { url, opts } of calls) { assert.match(url, /\/api\/resource\/Task\?/); assert.equal(opts.method, 'GET'); assert.equal(opts.redirect, 'error'); assert.equal(opts.headers.Authorization, 'token KEY:SECRET'); const query = new URL(url).searchParams; assert.ok(!url.includes('owner')); assert.ok(JSON.parse(query.get('fields')).includes('_assign')); assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%"carlospalacios@larael.com"%']]) }
+})
+test('Kanban includes only exact _assign membership and never substring matches another address', async () => {
+  const rows = [row(), { ...row(), name: 'TASK-OTHER-1', _assign: '["other@larael.com"]' }, { ...row(), name: 'TASK-OTHER-2', _assign: '["carlospalacios@larael.com.evil"]' }, { ...row(), name: 'TASK-MALFORMED', _assign: 'not-json' }]
+  const client = new ERPNextClient({ url: 'https://erp.example.org', apiKey: 'KEY', apiSecret: 'SECRET' }, async () => json({ data: rows }))
+  await assert.rejects(client.tasks(), /Task inválida/)
+  const validRows = rows.slice(0, 3)
+  const validClient = new ERPNextClient({ url: 'https://erp.example.org', apiKey: 'KEY', apiSecret: 'SECRET' }, async () => json({ data: validRows }))
+  assert.deepEqual((await validClient.tasks()).map(task => task.name), ['TASK-001'])
 })
 test('connection DTO and encrypted file do not expose credentials; Tasks sanitize HTML and identity change clears cache', async () => {
   const c = setup(); try { c.configure(false); const checked = await c.service.testConnection(); assert.equal(checked.tasks.length, 0); await c.service.sync(); assert.equal(c.service.snapshot().tasks[0].description, ''); const snap = await c.service.loadDetail(c.service.snapshot().tasks[0].key); assert.equal(snap.connection.identity, 'erp-user'); assert.equal(snap.tasks[0].description, 'Business confidential'); const dto = JSON.stringify(snap), disk = readFileSync(join(c.dir, 'erp-tasks.json'), 'utf8'); for (const text of ['ERP-KEY', 'ERP-SECRET', 'Business confidential']) assert.ok(!disk.includes(text)); assert.ok(!dto.includes('ERP-KEY')); const ledger = JSON.parse(encryption.decryptString(Buffer.from(disk, 'base64'))); assert.equal(ledger.tasks[0].description, ''); c.service.saveConnection({ url: 'https://different.example.org', apiKey: 'NEW', apiSecret: 'NEW', allowAIClassification: false }); assert.equal(c.service.snapshot().tasks.length, 0) } finally { c.cleanup() }
+})
+test('old cached Tasks without verified assignee are hidden until an authoritative sync', async () => {
+  const c = setup()
+  try {
+    await c.ready(); c.service.stop()
+    const path = join(c.dir, 'erp-tasks.json')
+    const ledger = JSON.parse(encryption.decryptString(Buffer.from(readFileSync(path, 'utf8'), 'base64')))
+    delete ledger.tasks[0].assignedTo
+    writeFileSync(path, encryption.encryptString(JSON.stringify(ledger)).toString('base64'))
+    const reloaded = new ERPTaskService(c.dir, encryption, c.deps)
+    assert.deepEqual(reloaded.snapshot().tasks, [])
+    await reloaded.sync()
+    assert.equal(reloaded.snapshot().tasks.length, 1)
+    reloaded.stop()
+  } finally { c.cleanup() }
 })
 test('AI uses only project names until separate project-context consent is granted', async () => {
   const c = setup(); try { const key = await c.ready(); await assert.rejects(c.service.classify(key), /Autorizá/); c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true }); await c.service.classify(key); const request = c.calls.find(call => call.url.includes('/chat/completions')); assert.ok(request); const prompt = request.options.body; assert.ok(!prompt.includes('ERP-SECRET')); assert.ok(!prompt.includes('hostId')); assert.ok(!prompt.includes('Buscador de personal')); assert.ok(!prompt.includes('gitlab.com/company/search')); c.calls.length = 0; c.service.saveConnection({ url: 'https://erp.example.org', allowAIClassification: true, allowProjectContext: true }); await c.service.classify(key); const contextualPrompt = c.calls.find(call => call.url.includes('/chat/completions')).options.body; assert.match(contextualPrompt, /Buscador de personal/); assert.match(contextualPrompt, /gitlab\.com\/company\/search/); assert.equal(c.dispatched.length, 0); assert.equal(c.service.snapshot().tasks[0].stage, 'ready') } finally { c.cleanup() }

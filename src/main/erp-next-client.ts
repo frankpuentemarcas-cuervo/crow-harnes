@@ -1,9 +1,10 @@
-export interface ERPTaskRecord { name: string; subject: string; description: string; project: string; status: string; priority: string; modified: string }
+export const erpKanbanAssignee = 'carlospalacios@larael.com'
+export interface ERPTaskRecord { name: string; subject: string; description: string; project: string; status: string; priority: string; modified: string; assignedTo: string[] }
 export interface ERPCredentials { url: string; apiKey: string; apiSecret: string }
 interface ReadBudget { remainingBytes: number }
 // Bound transfer and time, not a legitimate account's number of Tasks.
 const syncBytes = 32_000_000, syncTimeoutMs = 120_000
-const openTaskFilters = JSON.stringify([['status', '=', 'Open']])
+const openTaskFilters = JSON.stringify([['status', '=', 'Open'], ['_assign', 'like', `%"${erpKanbanAssignee}"%`]])
 export function validateERPURL(value: string): string {
   let url: URL
   try { url = new URL(value) } catch { throw new Error('Ingresá una URL HTTPS válida de ERPNext.') }
@@ -37,11 +38,18 @@ export async function boundedJSON(response: Response, limit = 2_000_000, budget?
 function record(value: unknown, includeDescription = true): ERPTaskRecord {
   if (!value || typeof value !== 'object') throw new Error('Task inválida.')
   const row = value as Record<string, unknown>
-  const fields = includeDescription ? ['name', 'subject', 'description', 'project', 'status', 'priority', 'modified'] as const : ['name', 'subject', 'project', 'status', 'priority', 'modified'] as const
-  for (const field of fields) if (row[field] != null && (typeof row[field] !== 'string' || (row[field] as string).length > (field === 'description' ? 100000 : 500))) throw new Error('Task inválida.')
+  const fields = includeDescription ? ['name', 'subject', 'description', 'project', 'status', 'priority', 'modified', '_assign'] as const : ['name', 'subject', 'project', 'status', 'priority', 'modified', '_assign'] as const
+  for (const field of fields) if (row[field] != null && (typeof row[field] !== 'string' || (row[field] as string).length > (field === 'description' ? 100000 : field === '_assign' ? 20_000 : 500))) throw new Error('Task inválida.')
   if (!row.name || !row.modified || !row.subject) throw new Error('Task incompleta.')
   if (/[\x00-\x1f\x7f-\x9f]/.test(row.name as string)) throw new Error('Identificador Task inválido.')
-  return { name: row.name as string, subject: taskText(row.subject as string), description: includeDescription ? taskText((row.description as string) || '') : '', project: (row.project as string) || '', status: (row.status as string) || '', priority: (row.priority as string) || '', modified: row.modified as string }
+  let assignments: unknown = []
+  if (row._assign != null) {
+    if (typeof row._assign !== 'string' || row._assign.length > 20_000) throw new Error('Task inválida.')
+    try { assignments = JSON.parse(row._assign) } catch { throw new Error('Task inválida.') }
+  }
+  if (!Array.isArray(assignments) || assignments.length > 100 || assignments.some(user => typeof user !== 'string' || user.length > 200 || /[\x00-\x1f\x7f-\x9f]/.test(user))) throw new Error('Task inválida.')
+  const assignedTo = [...new Set(assignments.map(user => (user as string).trim().toLowerCase()).filter(Boolean))]
+  return { name: row.name as string, subject: taskText(row.subject as string), description: includeDescription ? taskText((row.description as string) || '') : '', project: (row.project as string) || '', status: (row.status as string) || '', priority: (row.priority as string) || '', modified: row.modified as string, assignedTo }
 }
 export class ERPNextClient {
   private credentials: ERPCredentials
@@ -70,15 +78,21 @@ export class ERPNextClient {
     const budget: ReadBudget = { remainingBytes: syncBytes }, deadline = AbortSignal.timeout(syncTimeoutMs)
     for (let offset = 0; ; offset += 100) {
       if (this.cancel?.aborted || deadline.aborted) throw new Error('No se pudo completar la consulta de Tasks: cancelada o fuera de tiempo.')
-      const query = new URLSearchParams({ fields: JSON.stringify(['name', 'subject', 'project', 'status', 'priority', 'modified']), filters: openTaskFilters, limit_page_length: '100', limit_start: String(offset), order_by: 'name asc' })
+      const query = new URLSearchParams({ fields: JSON.stringify(['name', 'subject', 'project', 'status', 'priority', 'modified', '_assign']), filters: openTaskFilters, limit_page_length: '100', limit_start: String(offset), order_by: 'name asc' })
       const body = await this.get('/api/resource/Task?' + query, budget, deadline) as { data?: unknown }
       if (this.cancel?.aborted || deadline.aborted) throw new Error('No se pudo completar la consulta de Tasks: cancelada o fuera de tiempo.')
       if (!Array.isArray(body?.data) || body.data.length > 100) throw new Error('ERPNext entregó una lista Task inválida.')
       const previousSize = result.size
-      for (const value of body.data) { const task = record(value, false); if (task.status !== 'Open') throw new Error('ERPNext entregó una Task fuera del filtro Open. No se publicó un catálogo parcial.'); result.set(task.name, task) }
+      for (const value of body.data) {
+        const task = record(value, false)
+        if (task.status !== 'Open') throw new Error('ERPNext entregó una Task fuera del filtro Open. No se publicó un catálogo parcial.')
+        // _assign is JSON text, so the server-side LIKE narrows the query and
+        // this exact match prevents substring collisions from reaching Kanban.
+        if (task.assignedTo.includes(erpKanbanAssignee)) result.set(task.name, task)
+      }
       if (body.data.length < 100) return [...result.values()]
       if (result.size === previousSize) throw new Error('ERPNext repitió una página sin avance. No se publicó una sincronización parcial.')
     }
   }
-  async task(name: string): Promise<ERPTaskRecord> { const body = await this.get('/api/resource/Task/' + encodeURIComponent(name)) as { data?: unknown }; return record(body?.data) }
+  async task(name: string): Promise<ERPTaskRecord> { const body = await this.get('/api/resource/Task/' + encodeURIComponent(name)) as { data?: unknown }; const task = record(body?.data); if (!task.assignedTo.includes(erpKanbanAssignee)) throw new Error('La Task ya no está asignada al usuario habilitado para este Kanban.'); return task }
 }

@@ -7,7 +7,7 @@ import { ERPNextClient, boundedJSON } from '../src/main/erp-next-client.ts'
 import { ERPTaskService } from '../src/main/erp-task-service.ts'
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status })
-const row = index => ({ name: `TASK-${index}`, subject: 'Test task', description: 'Fictitious', project: '', status: 'Open', priority: 'Low', modified: '2026-10-10 12:00:00' })
+const row = index => ({ name: `TASK-${index}`, subject: 'Test task', description: 'Fictitious', project: '', status: 'Open', priority: 'Low', modified: '2026-10-10 12:00:00', _assign: '["carlospalacios@larael.com"]' })
 const credentials = { url: 'https://erp.example.org', apiKey: 'TEST-KEY', apiSecret: 'TEST-SECRET' }
 const encryption = { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(Buffer.from(value).toString('base64')), decryptString: value => Buffer.from(value.toString(), 'base64').toString() }
 function serviceFixture(request) {
@@ -31,7 +31,7 @@ test('connection check validates identity and one name, without importing the Ta
     assert.equal(query.pathname, '/api/resource/Task')
     assert.equal(query.searchParams.get('limit_page_length'), '1')
     assert.deepEqual(JSON.parse(query.searchParams.get('fields')), ['name'])
-    assert.deepEqual(JSON.parse(query.searchParams.get('filters')), [['status', '=', 'Open']])
+    assert.deepEqual(JSON.parse(query.searchParams.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%"carlospalacios@larael.com"%']])
     return json({ data: [{ name: 'TASK-1' }] })
   })
   try {
@@ -110,7 +110,7 @@ for (const total of [2000, 2001, 2501]) test(`complete pagination loads ${total}
     assert.equal(options.method, 'GET')
     const offset = Number(new URL(url).searchParams.get('limit_start')); offsets.push(offset)
     const query = new URL(url).searchParams
-    assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open']])
+    assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%"carlospalacios@larael.com"%']])
     assert.ok(!JSON.parse(query.get('fields')).includes('description'))
     return json({ data: records.slice(offset, offset + 100) })
   })
