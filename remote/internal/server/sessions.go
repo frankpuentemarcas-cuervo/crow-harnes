@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -217,16 +218,7 @@ func agentCommand(agent, mode, hook string, statusLine ...map[string]any) (strin
 	case "claude":
 		args := []string{}
 		if hook != "" {
-			config := map[string]any{"hooks": map[string]any{
-				"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
-				"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
-				"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},
-				"SubagentStop":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-stop"}}}},
-			}}
-			if len(statusLine) > 0 && statusLine[0] != nil {
-				config["statusLine"] = statusLine[0]
-			}
-			settings, _ := json.Marshal(config)
+			settings := claudeHookSettings(hook, firstStatusLine(statusLine))
 			args = append(args, "--settings", string(settings))
 		}
 		if mode == "bypass" {
@@ -255,6 +247,86 @@ func agentCommand(agent, mode, hook string, statusLine ...map[string]any) (strin
 	default:
 		return "", nil, errors.New("unsupported agent")
 	}
+}
+
+func firstStatusLine(statusLines []map[string]any) map[string]any {
+	if len(statusLines) > 0 {
+		return statusLines[0]
+	}
+	return nil
+}
+
+func claudeHookSettings(hook string, statusLine map[string]any) []byte {
+	config := map[string]any{"hooks": map[string]any{
+		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
+		"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
+		"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},
+		"SubagentStop":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-stop"}}}},
+	}}
+	if statusLine != nil {
+		config["statusLine"] = statusLine
+	}
+	settings, _ := json.Marshal(config)
+	return settings
+}
+
+func setEnvironmentVariable(env []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
+}
+
+// installShellClaudeWrapper instruments only Claude commands started from a
+// Crow-managed shell. It does not edit the user's global or project settings.
+func (a *App) installShellClaudeWrapper(id, hook string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", nil
+	}
+	binary := a.binaryPath
+	var err error
+	if binary == "" {
+		binary, err = os.Executable()
+		if err != nil {
+			return "", err
+		}
+	}
+	dir := filepath.Join(a.dir, "shell-agent-"+id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	settings := string(claudeHookSettings(hook, nil))
+	stopCommand := shellQuote(binary) + " hook-notify agent-stop >/dev/null 2>&1"
+	script := "#!/bin/sh\n" +
+		"crow_wrapper_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n" +
+		"crow_claude=\n" +
+		"crow_old_ifs=$IFS; IFS=:\n" +
+		"for crow_entry in $PATH; do\n" +
+		"  [ -n \"$crow_entry\" ] || crow_entry=.\n" +
+		"  [ \"$crow_entry\" = \"$crow_wrapper_dir\" ] && continue\n" +
+		"  if [ -x \"$crow_entry/claude\" ] && [ ! -d \"$crow_entry/claude\" ]; then crow_claude=$crow_entry/claude; break; fi\n" +
+		"done\n" +
+		"IFS=$crow_old_ifs\n" +
+		"if [ -z \"$crow_claude\" ]; then echo 'Crow: no encuentro Claude Code en el PATH de esta shell.' >&2; exit 127; fi\n" +
+		"export CROW_AGENT=claude\n" +
+		"'" + strings.ReplaceAll(binary, "'", "'\\''") + "' hook-notify agent-start >/dev/null 2>&1 || true\n" +
+		"trap " + shellQuote(stopCommand) + " EXIT\n" +
+		"\"$crow_claude\" --settings " + shellQuote(settings) + " \"$@\"\n"
+	path := filepath.Join(dir, "claude")
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
 }
 
 func codexCommandHookConfig(event, command string) string {
@@ -337,17 +409,36 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 			return SessionInfo{}, err
 		}
 	}
+	shellAgentPath := ""
+	if agent == "shell" && hook != "" {
+		shellAgentPath, err = a.installShellClaudeWrapper(id, hook)
+		if err != nil {
+			_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
+			return SessionInfo{}, err
+		}
+	}
 	logPath := filepath.Join(a.dir, "terminal-"+id+".jsonl")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
+		if shellAgentPath != "" {
+			_ = os.RemoveAll(shellAgentPath)
+		}
+		_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
 		return SessionInfo{}, err
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "CROW_SESSION_ID="+id, "CROW_HOOK_TOKEN="+hookToken,
 		"CROW_EVENT_URL=http://127.0.0.1:"+a.port+"/api/events", "CROW_STATUSLINE_COMMAND="+originalStatusLine)
+	if shellAgentPath != "" {
+		cmd.Env = setEnvironmentVariable(cmd.Env, "PATH", shellAgentPath+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
 	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 32, Cols: 120})
 	if err != nil {
+		if shellAgentPath != "" {
+			_ = os.RemoveAll(shellAgentPath)
+		}
+		_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
 		_ = logFile.Close()
 		return SessionInfo{}, err
 	}
@@ -359,7 +450,8 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 	if (hook == "" || agent == "agy") && agent != "shell" {
 		initialAgentState = "unknown"
 	}
-	s := &session{hookHash: tokenHash(hookToken), info: SessionInfo{OwnerID: ownerID, ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hook != "" && agent != "shell" && agent != "agy", StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	hooksActive := hook != "" && (agent == "claude" || agent == "codex" || (agent == "shell" && shellAgentPath != ""))
+	s := &session{hookHash: tokenHash(hookToken), info: SessionInfo{OwnerID: ownerID, ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hooksActive, StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	if hookToken == "" {
 		s.hookHash = ""
@@ -459,6 +551,8 @@ func (a *App) deleteSession(id string) error {
 		s.mu.Unlock()
 		return err
 	}
+	_ = os.RemoveAll(filepath.Join(a.dir, "shell-agent-"+id))
+	_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
 	s.mu.Lock()
 	for ch := range s.subs {
 		delete(s.subs, ch)
@@ -498,7 +592,7 @@ func (s *session) write(data []byte) error {
 			s.userDraft = lastEnter != len(data)-1
 		}
 		s.lastActivity = time.Now().UTC()
-		if s.info.HooksActive && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
+		if s.info.HooksActive && s.info.Agent != "shell" && (strings.ContainsRune(string(data), '\r') || strings.ContainsRune(string(data), '\n')) {
 			s.rootAgentState = "working"
 			s.updateAgentStateLocked()
 			s.info.CacheExpiresAt = nil

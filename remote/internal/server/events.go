@@ -251,14 +251,19 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		Kind             string `json:"kind"`
 		Message          string `json:"message"`
 		AgentID          string `json:"agentId"`
+		Agent            string `json:"agent"`
 		MessageTruncated bool   `json:"messageTruncated"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
 	}
 	s := a.session(body.SessionID)
-	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "subagent-start" && body.Kind != "subagent-stop") {
+	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "subagent-start" && body.Kind != "subagent-stop" && body.Kind != "agent-start" && body.Kind != "agent-stop") {
 		http.Error(w, "invalid event", http.StatusBadRequest)
+		return
+	}
+	if (body.Kind == "agent-start" || body.Kind == "agent-stop") && body.Agent != "claude" {
+		http.Error(w, "invalid managed shell agent", http.StatusBadRequest)
 		return
 	}
 	if (body.Kind == "subagent-start" || body.Kind == "subagent-stop") && strings.TrimSpace(body.AgentID) == "" {
@@ -273,7 +278,30 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session is being deleted", http.StatusConflict)
 		return
 	}
-	if body.Kind == "working" {
+	if body.Kind == "agent-start" || body.Kind == "agent-stop" {
+		s.mu.Lock()
+		if s.info.Agent != "shell" && s.info.Agent != "claude" {
+			s.mu.Unlock()
+			http.Error(w, "shell agent tracking unavailable", http.StatusConflict)
+			return
+		}
+		if body.Kind == "agent-start" {
+			s.info.Agent = "claude"
+			s.rootAgentState = "working"
+			s.info.AgentState = "working"
+		} else {
+			s.info.Agent = "shell"
+			s.rootAgentState = "unknown"
+			s.info.AgentState = "unknown"
+			clear(s.activeSubagents)
+		}
+		s.info.UpdatedAt = time.Now().UTC()
+		s.lastActivity = s.info.UpdatedAt
+		info := s.info
+		s.broadcast(Frame{Type: "state", Info: &info})
+		s.mu.Unlock()
+		_ = a.saveSessions()
+	} else if body.Kind == "working" {
 		a.markAgentState(body.SessionID, "working")
 	} else if body.Kind == "subagent-start" {
 		a.markSubagentState(body.SessionID, body.AgentID, true)
@@ -298,8 +326,8 @@ const maxHookPayload = 128 * 1024
 // RunHookNotify is invoked by managed agent hooks. Claude writes the hook JSON
 // to stdin; Codex notify passes its JSON payload as a command argument.
 func RunHookNotify(args []string) error {
-	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop") {
-		return errors.New("usage: crowd hook-notify <working|turn-complete|subagent-start|subagent-stop> [agent-payload]")
+	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop" && args[0] != "agent-start" && args[0] != "agent-stop") {
+		return errors.New("usage: crowd hook-notify <working|turn-complete|subagent-start|subagent-stop|agent-start|agent-stop> [agent-payload]")
 	}
 	kind := args[0]
 	if os.Getenv("CROW_SESSION_ID") == "" {
@@ -346,7 +374,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID, "messageTruncated": messageTruncated})
+	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID, "agent": os.Getenv("CROW_AGENT"), "messageTruncated": messageTruncated})
 	if err != nil {
 		return err
 	}

@@ -127,6 +127,52 @@ func TestSubagentLifecycleIgnoresDuplicateStartAndUnknownStop(t *testing.T) {
 	}
 }
 
+func TestShellClaudeLifecyclePromotesAndRestoresSessionAgent(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	s := &session{
+		info:            SessionInfo{ID: sessionID, State: "running", Agent: "shell", AgentState: "unknown", HooksActive: true},
+		rootAgentState:  "unknown",
+		activeSubagents: make(map[string]struct{}),
+		subs:            make(map[chan Frame]struct{}),
+	}
+	a := &App{dir: t.TempDir(), sessions: map[string]*session{sessionID: s}}
+	post := func(kind string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"sessionId": sessionID, "kind": kind, "agent": "claude"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		a.handleEvents(response, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(string(body))))
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("%s status = %d, want %d: %s", kind, response.Code, http.StatusAccepted, response.Body.String())
+		}
+	}
+
+	post("agent-start")
+	if got := s.snapshot(); got.Agent != "claude" || got.AgentState != "working" {
+		t.Fatalf("agent-start session = agent:%q state:%q, want claude/working", got.Agent, got.AgentState)
+	}
+	post("agent-stop")
+	if got := s.snapshot(); got.Agent != "shell" || got.AgentState != "unknown" {
+		t.Fatalf("agent-stop session = agent:%q state:%q, want shell/unknown", got.Agent, got.AgentState)
+	}
+}
+
+func TestShellClaudeLifecycleRejectsUnexpectedAgent(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	s := &session{info: SessionInfo{ID: sessionID, State: "running", Agent: "shell", HooksActive: true}, subs: make(map[chan Frame]struct{})}
+	a := &App{dir: t.TempDir(), sessions: map[string]*session{sessionID: s}}
+	response := httptest.NewRecorder()
+	a.handleEvents(response, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(`{"sessionId":"`+sessionID+`","kind":"agent-start","agent":"codex"}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected agent status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	if got := s.snapshot().Agent; got != "shell" {
+		t.Fatalf("unexpected agent changed session to %q", got)
+	}
+}
+
 func TestRunHookNotifyForwardsCodexMessageOnlyToLoopback(t *testing.T) {
 	home := t.TempDir()
 	tokenPath := filepath.Join(home, ".local", "share", "crow-harness", "token")
