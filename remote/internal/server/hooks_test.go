@@ -54,6 +54,10 @@ func TestManagedShellWrapsClaudeWithoutEditingUserSettings(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("remote runtime is Linux")
 	}
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("POSIX shell is unavailable")
+	}
 	root := t.TempDir()
 	cliDir := filepath.Join(root, "cli")
 	if err := os.MkdirAll(cliDir, 0700); err != nil {
@@ -77,7 +81,7 @@ func TestManagedShellWrapsClaudeWithoutEditingUserSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
-	if output, err := exec.Command("sh", "-n", filepath.Join(dir, "claude")).CombinedOutput(); err != nil {
+	if output, err := exec.Command(shell, "-n", filepath.Join(dir, "claude")).CombinedOutput(); err != nil {
 		t.Fatalf("generated wrapper is invalid shell syntax: %v: %s\n%s", err, output, script)
 	}
 	for _, expected := range []string{
