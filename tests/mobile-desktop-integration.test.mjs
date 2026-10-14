@@ -14,8 +14,9 @@ function harness() {
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
   const store = { host: id => id === host.id ? host : undefined, snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
-  const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, stop() {}, setAccessCredential: async () => undefined }
-  const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
+  const hostCalls = []
+  const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, api: async (method, path, body) => { hostCalls.push([method, path, body]); return path === '/api/mobile/invite' ? { version: 2, gatewayId: 'linux', invitationCode: 'linux-once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } : {} }, stop() {}, setAccessCredential: async () => undefined }
+  const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true, relayUrl: 'wss://crow.frabubu.com/v1/tunnel' }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
 exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; gitLabTokens={remove(){},save(){},get(){}}; attention={reset(){}}; registerIPC()};
@@ -31,7 +32,7 @@ exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; 
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, connection, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, connection, hostCalls, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -111,6 +112,8 @@ test('desktop-only mobile IPC forwards typed configuration and rejects foreign s
   assert.deepEqual(plain(h.mobileInvites[0]), grant)
   assert.equal(invite.qrDataUrl, 'data:image/png;base64,invite')
   assert.equal(invite.enrollment.invitationCode, 'one-use')
+  assert.equal(invite.hostCount, 1)
+  assert.deepEqual(h.hostCalls.map(item => item[1]), ['/api/mobile/config', '/api/mobile/invite'])
   await h.invoke('crow:mobile-revoke', 'phone'); assert.deepEqual(h.invalidated, ['device:phone'])
   await assert.rejects(h.handlers.get('crow:mobile-invite')({ sender: {} }, grant), /no autorizada/)
 })
@@ -119,8 +122,10 @@ test('credential-bearing Pangolin QR is encoded in the main process and returned
   const h = harness(), input = { projectIds: ['project'], pangolinAuth: { tokenId: 'resource-id', token: 'secret-token' } }
   const result = plain(await h.invoke('crow:mobile-invite', input))
   const qr = JSON.parse(h.qrPayloads[0])
-  assert.equal(qr.endpoints[0].proxyAuth.token, 'secret-token')
-  assert.equal(qr.endpoints[0].proxyAuth.origin, 'https://crow.example.com')
+  assert.equal(qr.version, 3)
+  assert.equal(qr.enrollments.length, 2)
+  assert.equal(qr.enrollments[0].enrollment.endpoints[0].proxyAuth.token, 'secret-token')
+  assert.equal(qr.enrollments[0].enrollment.endpoints[0].proxyAuth.origin, 'https://crow.example.com')
   assert.equal(result.qrDataUrl, 'data:image/png;base64,invite')
   assert.equal(JSON.stringify(result).includes('secret-token'), false)
   assert.equal(result.enrollment.endpoints[0].proxyAuth, undefined)

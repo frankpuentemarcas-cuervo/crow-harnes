@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import { autoUpdater } from 'electron-updater'
 import { basename, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
+import { gzipSync } from 'node:zlib'
 import { Connection } from './connection'
 import { ConnectionDiagnosticsStore } from './connection-diagnostics'
 import { TerminalCheckpointStore } from './terminal-checkpoint-store'
@@ -448,10 +449,31 @@ function registerIPC(): void {
   handle('crow:mobile-stop', () => mobile.stop())
   handle('crow:mobile-invite', (input: MobileEnrollmentInput) => erpOperation(async () => {
     await refreshMobileWorkspace()
+    if (!mobile.status().running || mobile.status().relayUrl !== 'wss://crow.frabubu.com/v1/tunnel' || mobile.status().remoteProvider) {
+      const address = mobileAddresses()[0]
+      if (!address) throw new Error('Windows necesita una IPv4 privada para iniciar el gateway móvil.')
+      await mobile.start({ address, relayUrl: 'wss://crow.frabubu.com/v1/tunnel' })
+    }
+    const saved = store.snapshot()
+    const selected = saved.projects.filter(project => input.projectIds.includes(project.id))
+    const hosts = saved.hosts.filter(host => selected.some(project => project.hostId === host.id))
+    if (!hosts.length) throw new Error('No hay proyectos para vincular.')
+    if (hosts.length > 15) throw new Error('Un solo QR admite hasta 15 hosts Linux. Seleccioná menos proyectos para este vínculo.')
+    const hostInvites: Array<{ hostId: string; hostName: string; enrollment: unknown }> = []
+    for (const host of hosts) {
+      if (connection(host.id).status() !== 'connected') throw new Error(`${host.name}: conectá el host para crear el primer vínculo Android.`)
+      const projects = selected.filter(project => project.hostId === host.id).map(project => ({ id: project.id, name: project.name, root: project.root }))
+      await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects })
+      const enrollment = await connection(host.id).api('POST', '/api/mobile/invite')
+      hostInvites.push({ hostId: host.id, hostName: host.name, enrollment })
+    }
     const invite = await mobile.invite(input)
-    const qrDataUrl = await QRCode.toDataURL(JSON.stringify(invite), { width: 384, margin: 2, errorCorrectionLevel: 'M' })
+    const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: invite }, ...hostInvites] }
+    const bundleText = JSON.stringify(bundle)
+    const qrPayload = bundleText.length > 2000 ? `crow3:${gzipSync(bundleText).toString('base64url')}` : bundleText
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, { width: 512, margin: 2, errorCorrectionLevel: 'L' })
     const enrollment = { ...invite, endpoints: invite.endpoints.map(({ proxyAuth: _secret, ...endpoint }) => endpoint) }
-    return { enrollment, qrDataUrl }
+    return { enrollment, qrDataUrl, hostCount: hostInvites.length }
   }))
   handle('crow:mobile-revoke', (deviceId: string) => { mobile.revoke(deviceId); return mobile.status() })
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
@@ -584,6 +606,12 @@ app.whenReady().then(() => {
     } catch { console.error('Crow MCP deshabilitado: configuración local inválida.') }
   }
   for (const host of store.snapshot().hosts) void connection(host.id).connect().catch(() => undefined)
+  // A previously paired phone must reconnect after a normal Crow restart; the
+  // Linux host routes remain independent while this process is absent.
+  try {
+    const address = mobileAddresses()[0]
+    if (app.isPackaged && address && mobile.status().devices?.length) void mobile.start({ address, relayUrl: 'wss://crow.frabubu.com/v1/tunnel' }).catch(() => undefined)
+  } catch { /* A damaged trust store leaves mobile closed, never the desktop. */ }
 })
 
 app.on('window-all-closed', () => app.quit())

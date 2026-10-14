@@ -96,7 +96,9 @@ function certificate(address: string): Certificate {
   try {
     if (existsSync(path)) {
       const saved = JSON.parse(safeStorage.decryptString(readFileSync(path))) as Certificate
-      if (saved.address === address && saved.key && saved.cert && saved.fingerprint) return saved
+      // Keep the pinned relay identity when Windows receives a new LAN IP.
+      // The LAN endpoint is advertised only if its original IP SAN still matches.
+      if (saved.key && saved.cert && saved.fingerprint) return saved
     }
   } catch { /* Replace an unreadable certificate with a fresh local identity. */ }
 
@@ -105,7 +107,7 @@ function certificate(address: string): Certificate {
   cert.publicKey = keys.publicKey
   cert.serialNumber = randomBytes(16).toString('hex')
   cert.validity.notBefore = new Date(Date.now() - 60_000)
-  cert.validity.notAfter = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+  cert.validity.notAfter = new Date(Date.now() + 20 * 365 * 24 * 60 * 60 * 1000)
   cert.setSubject([{ name: 'commonName', value: 'Crow Harness LAN' }])
   cert.setIssuer([{ name: 'commonName', value: 'Crow Harness LAN' }])
   cert.setExtensions([
@@ -328,7 +330,7 @@ export class MobileGateway {
     if (!info || typeof info === 'string') { await this.stop(); throw new Error('No se pudo abrir el gateway móvil.') }
     this.lanAddress = address; this.lanPort = info.port
     this.origin = `https://${address}:${info.port}`
-    this.endpoints = [{ kind: 'lan-pinned', url: this.origin, certSHA256: tls.fingerprint }]
+    this.endpoints = tls.address === address ? [{ kind: 'lan-pinned', url: this.origin, certSHA256: tls.fingerprint }] : []
     try {
       this.remoteProvider = remote?.provider
       if (remote) {
@@ -674,9 +676,15 @@ export class MobileGateway {
   }
   private async keyHandle(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     if (!this.nativeOrigin(req)) { json(res, 403, mobileError('INVALID_ORIGIN', 'Origen inválido.')); return }
-    if (req.method !== 'POST' || !['pair', 'device-challenge', 'device-renew'].includes(url.pathname.slice('/api/v2/'.length))) { json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.')); return }
+    if (req.method !== 'POST' || !['pair', 'device-challenge', 'device-renew', 'device-revoke'].includes(url.pathname.slice('/api/v2/'.length))) { json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.')); return }
     try {
       const body = await readJSON(req), route = url.pathname.slice('/api/v2/'.length)
+      if (route === 'device-revoke') {
+        if (Object.keys(body).length) throw new Error('Solicitud inválida.')
+        const record = await this.nativeAuth(req)
+        this.revoke(record.device.id)
+        json(res, 200, { ok: true }); return
+      }
       const fields = route === 'pair' ? ['invitationCode', 'deviceName', 'publicKey'] : route === 'device-challenge' ? ['deviceId'] : ['deviceId', 'challengeId', 'signature']
       if (Object.keys(body).some(key => !fields.includes(key))) throw new Error('Solicitud inválida.')
       if (route === 'pair') {
