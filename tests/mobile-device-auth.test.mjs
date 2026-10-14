@@ -25,7 +25,7 @@ test('pairing stores only hashed bearer, single-use code and read-only scoped de
   assert.throws(() => registry.pair(enrollment.invitationCode, 'Replay'))
   assert.equal(registry.authenticate(credential.toUpperCase()), undefined)
 })
-test('invitation and credential TTL, per-device revoke, stop and host invalidation fail closed', () => {
+test('invitation and credential TTL, per-device revoke, full clear and host invalidation fail closed', () => {
   const c = setup()
   const enrollment = c.invite()
   c.advance(INVITATION_TTL)
@@ -42,6 +42,53 @@ test('invitation and credential TTL, per-device revoke, stop and host invalidati
   paired = c.registry.pair(c.invite().invitationCode, 'Android')
   c.registry.clear()
   assert.equal(c.registry.authenticate(paired.credential), undefined)
+})
+
+test('canceling pending invitation preserves active trust and cannot replay the canceled code', () => {
+  const c = setup(), paired = c.registry.pair(c.invite().invitationCode, 'Android')
+  const invitation = c.invite()
+  c.registry.cancelInvitation('foreign-host')
+  assert.equal(c.registry.invitation().invitationCode, invitation.invitationCode)
+  c.registry.cancelInvitation('host')
+  assert.equal(c.registry.invitation(), undefined)
+  assert.throws(() => c.registry.pair(invitation.invitationCode, 'Replay'))
+  assert.equal(c.registry.authenticate(paired.credential), paired.record)
+  c.registry.revoke(paired.record.device.id)
+  assert.equal(c.registry.authenticate(paired.credential), undefined)
+})
+
+test('registry restores only unexpired persisted grants and durably revokes host scope', () => {
+  let saved = [], now = 1_800_000_000_000
+  const persist = records => saved = structuredClone(records)
+  const create = () => new MobileDeviceRegistry(() => now, saved, persist)
+  const registry = create()
+  const invite = registry.invite({ version: 1, gatewayId: 'gateway', endpoints: [] }, [scope], READ_CAPABILITIES)
+  const paired = registry.pair(invite.invitationCode, 'Android')
+  assert.equal(saved[0].tokenHash, paired.record.tokenHash)
+  assert.equal(JSON.stringify(saved).includes(paired.credential), false)
+  const restarted = create()
+  assert.equal(restarted.authenticate(paired.credential).device.id, paired.record.device.id)
+  assert.equal(restarted.invitation(), undefined)
+  restarted.invalidateHost('host')
+  assert.equal(create().authenticate(paired.credential), undefined)
+  saved = [paired.record]; now += DEVICE_TTL
+  assert.equal(create().authenticate(paired.credential), undefined)
+})
+
+test('failed persistence never confirms pairing/revocation and blocks existing grants', () => {
+  let fail = false, saved = []
+  const registry = new MobileDeviceRegistry(Date.now, [], records => { if (fail) throw new Error('disk'); saved = records })
+  const invite = registry.invite({ version: 1, gatewayId: 'gateway', endpoints: [] }, [scope], READ_CAPABILITIES)
+  const paired = registry.pair(invite.invitationCode, 'Android')
+  fail = true
+  assert.throws(() => registry.revoke(paired.record.device.id), /disk/)
+  assert.equal(saved.length, 1, 'last successful durable state remains; failed revocation is not acknowledged')
+  assert.throws(() => registry.authenticate(paired.credential), /bloqueado/)
+  assert.throws(() => registry.active(paired.record), /bloqueado/)
+  const broken = new MobileDeviceRegistry(Date.now, [], () => { throw new Error('disk') })
+  const next = broken.invite({ version: 1, gatewayId: 'gateway', endpoints: [] }, [scope], READ_CAPABILITIES)
+  assert.throws(() => broken.pair(next.invitationCode, 'Android'), /disk/)
+  assert.equal(broken.invitation(), undefined)
 })
 test('pairing rate limits expired windows correctly and guards malformed labels', () => {
   const c = setup()

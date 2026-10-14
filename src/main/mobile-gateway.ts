@@ -12,19 +12,71 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { Connection } from './connection'
 import { isPrivateLanIPv4 } from './mobile-network'
 import type { MobileStatus, SavedState, SessionInfo, TerminalFrame } from '../shared/types'
-import type { MobileActorBinding, MobileCapabilities, MobileDevice, MobileEndpoint, MobileEnrollment, MobileEnrollmentInput, MobileNotice, MobileQuota, MobileSession, MobileStartInput } from '../shared/mobile-companion'
-import { MobileDeviceRegistry, READ_CAPABILITIES, type DeviceRecord, type MobileScope } from './mobile-device-auth'
+import { MOBILE_SUPPORTED_FEATURES, type MobileActorBinding, type MobileCapabilities, type MobileDevice, type MobileEndpoint, type MobileEnrollment, type MobileEnrollmentInput, type MobileErrorCode, type MobileErrorEnvelope, type MobileNotice, type MobileQuota, type MobileSession, type MobileStartInput } from '../shared/mobile-companion'
+import { MobileDeviceRegistry, MobileHostUnavailableError, MobileAuthorizationChangedError, READ_CAPABILITIES, type DeviceRecord, type MobileScope } from './mobile-device-auth'
+import { MobileTrustStore, type MobileTrustPersistence, type MobileTrustSnapshot } from './mobile-trust-store'
+import { MobileMutationLedger, MobileMutationRejectedError, type MobileMutationContext, type MobileMutationResult, type MobileMutationRoute } from './mobile-mutation-ledger'
+import type { MobileRelayClient, MobileRelayClientOptions, MobileRelayStatus } from './mobile-relay-client'
 
 export type MobileGatewayDependencies = {
   snapshot(): SavedState
+  configurationSnapshot?(): SavedState
   connection(hostId: string): Connection
   authSnapshot?(hostId: string): Promise<MobileActorBinding>
   quotas?(): MobileQuota[]
   notices?(): MobileNotice[]
   actorLabel?(): string
+  trustStore?: MobileTrustPersistence
+  relayClientFactory?: (options: MobileRelayClientOptions) => Pick<MobileRelayClient, 'start' | 'stop' | 'status'>
 }
-interface StreamRecord { client: WebSocket; connection: Connection; streamId: string; hostId: string; sessionId: string; device?: DeviceRecord; browser: boolean }
+interface StreamRecord { client: WebSocket; connection: Connection; streamId: string; hostId: string; sessionId: string; device?: DeviceRecord; browser: boolean; credentialExpiresAt?: number; mutationContext?: MobileMutationContext }
 type Certificate = { address: string; key: string; cert: string; fingerprint: string }
+
+/** Provider selection is explicit; forwarded headers never choose the trusted origin. */
+export function mobileRemoteConfig(input: string | MobileStartInput): { provider: 'tailscale' | 'pangolin'; origin: string; port: number } | undefined {
+  if (typeof input === 'string') return
+  const provider = input.remoteProvider === undefined ? 'tailscale' : input.remoteProvider
+  if (provider !== 'tailscale' && provider !== 'pangolin') throw new Error('Proveedor remoto inválido.')
+  if (!input.publicOrigin) {
+    if (provider === 'pangolin' || input.loopbackPort !== undefined) throw new Error('Pangolin requiere un dominio HTTPS y un puerto backend fijo.')
+    return
+  }
+  const message = provider === 'tailscale' ? 'Configurá una URL HTTPS explícita de Tailscale Serve (*.ts.net).' : 'Configurá un dominio HTTPS público exacto, sin puerto, ruta, usuario ni parámetros.'
+  const match = /^https:\/\/([a-z0-9.-]+)\/?$/i.exec(input.publicOrigin)
+  const hostname = match?.[1].toLowerCase() || ''
+  if (!hostname || hostname.length > 253 || !hostname.includes('.') || hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part)) || !/\.[a-z]{2,63}$/.test(hostname) || /\.(localhost|local|internal)$/.test(hostname)) throw new Error(message)
+  const url = new URL(input.publicOrigin)
+  if (url.protocol !== 'https:' || url.hostname !== hostname || url.port || (provider === 'tailscale' && !hostname.endsWith('.ts.net'))) throw new Error(message)
+  if (provider === 'pangolin') {
+    if (!Number.isInteger(input.loopbackPort) || Number(input.loopbackPort) < 1024 || Number(input.loopbackPort) > 65535) throw new Error('Elegí un puerto backend fijo entre 1024 y 65535 para Newt.')
+  } else if (input.loopbackPort !== undefined) throw new Error('El puerto fijo requiere seleccionar Pangolin.')
+  return { provider, origin: url.origin, port: input.loopbackPort || 0 }
+}
+
+export function mobileRelayConfig(input: string | MobileStartInput): string | undefined {
+  if (typeof input === 'string' || input.relayUrl === undefined || input.relayUrl.trim() === '') return
+  try {
+    const url = new URL(input.relayUrl)
+    if (url.protocol !== 'wss:' || !url.hostname || url.username || url.password || url.pathname !== '/v1/tunnel' || url.search || url.hash || url.port && (!/^\d+$/.test(url.port) || Number(url.port) < 1 || Number(url.port) > 65535)) throw new Error()
+    return url.toString()
+  } catch { throw new Error('Configurá una URL WSS exacta del relay que termine en /v1/tunnel.') }
+}
+
+export function listenMobileLoopback(server: HttpServer, port: number): Promise<void> {
+  return new Promise((ok, fail) => {
+    const error = (reason: NodeJS.ErrnoException): void => { server.off('error', error); fail(reason.code === 'EADDRINUSE' ? new Error(`El puerto backend ${port} está ocupado. Elegí otro y actualizá Newt; no se cambia automáticamente.`) : new Error('No se pudo abrir el backend solo loopback.')) }
+    server.once('error', error)
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => { server.off('error', error); ok() })
+  })
+}
+
+function listenMobileTlsLoopback(server: HttpsServer, port: number): Promise<void> {
+  return new Promise((ok, fail) => {
+    const error = (reason: NodeJS.ErrnoException): void => { server.off('error', error); fail(reason.code === 'EADDRINUSE' ? new Error(`El puerto local TLS ${port} está ocupado. Cerrá la aplicación que lo usa y reintentá.`) : new Error('No se pudo abrir el túnel TLS local.')) }
+    server.once('error', error)
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => { server.off('error', error); ok() })
+  })
+}
 
 export function mobileAddresses(): string[] {
   return [...new Set(Object.values(networkInterfaces()).flatMap((entries) => (entries || [])
@@ -80,6 +132,9 @@ function json(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value))
 }
 
+function mobileError(code: MobileErrorCode, error: string): MobileErrorEnvelope { return { code, error } }
+function isNativeApiRequest(req: IncomingMessage): boolean { return /^\/api\/v[12]\//.test(req.url || '') }
+
 function readJSON(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let body = ''
@@ -105,10 +160,14 @@ function readJSON(req: IncomingMessage): Promise<Record<string, unknown>> {
 export class MobileGateway {
   private server?: HttpsServer
   private loopback?: HttpServer
+  private relayTlsServer?: HttpsServer
+  private relayClient?: Pick<MobileRelayClient, 'start' | 'stop' | 'status'>
   private sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 })
   private clients = new Map<string, StreamRecord>()
   private registry = new MobileDeviceRegistry()
-  private gatewayId = ''
+  private gatewayId: string = randomUUID()
+  private lanAddress = ''
+  private lanPort = 0
   private pairingCode = ''
   private pairingExpires = 0
   private cookieToken = ''
@@ -119,25 +178,73 @@ export class MobileGateway {
   private fingerprint = ''
   private endpoints: MobileEndpoint[] = []
   private loopbackUrl = ''
+  private remoteProvider?: 'tailscale' | 'pangolin'
+  private relayUrl = ''
+  private relayRoute = ''
+  private relayLocalPort = 0
   private failures = new Map<string, { count: number; until: number }>()
   private monitor?: NodeJS.Timeout
+  private trustStore?: MobileTrustPersistence
+  private trustLoaded = false
+  private trustFault?: Error
+  private hostEpochs: Record<string, number> = {}
+  private mutations = new MobileMutationLedger()
 
   constructor(private deps: MobileGatewayDependencies) {}
 
-  status(): MobileStatus {
-    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined } : { running: false }
+  private trustSnapshot(records: DeviceRecord[]): MobileTrustSnapshot {
+    return { version: 2, gatewayId: this.gatewayId, lanAddress: this.lanAddress, lanPort: this.lanPort, hostEpochs: this.hostEpochs, records, relayRoute: this.relayRoute, relayLocalPort: this.relayLocalPort, ...(this.relayUrl ? { relayUrl: this.relayUrl } : {}) }
   }
-  devices(): MobileDevice[] { return this.registry.list() }
+  private saveTrust(records = this.registry.snapshot()): void {
+    try { this.trustStore!.save(this.trustSnapshot(records)) }
+    catch { this.trustFault = new MobileHostUnavailableError('No se pudo guardar el almacén móvil. El acceso está bloqueado; repará el almacenamiento seguro antes de continuar.'); throw this.trustFault }
+  }
+  private ensureTrust(): void {
+    if (this.trustFault) throw this.trustFault
+    if (this.trustLoaded) return
+    try {
+      this.trustStore = this.deps.trustStore || new MobileTrustStore(join(app.getPath('userData'), 'mobile-trust.enc'), safeStorage)
+      const saved = this.trustStore.load()
+      if (saved) {
+        this.gatewayId = saved.gatewayId; this.lanAddress = saved.lanAddress; this.lanPort = saved.lanPort; this.hostEpochs = structuredClone(saved.hostEpochs)
+      }
+      this.relayRoute = saved?.relayRoute || randomBytes(32).toString('base64url')
+      this.relayLocalPort = saved?.relayLocalPort || 0
+      this.relayUrl = saved?.relayUrl || ''
+      this.registry = new MobileDeviceRegistry(Date.now, saved?.records, records => this.saveTrust(records))
+      if (!saved || !saved.relayRoute) this.saveTrust()
+      this.trustLoaded = true
+    } catch (error) { this.trustFault = new MobileHostUnavailableError(error instanceof Error ? error.message : 'Almacén móvil no disponible.'); throw this.trustFault }
+  }
+  hostAuthorizationEpoch(hostId: string): number { this.ensureTrust(); return this.hostEpochs[hostId] || 0 }
+
+  status(): MobileStatus {
+    this.ensureTrust()
+    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined, remoteProvider: this.remoteProvider, relayUrl: this.relayUrl || undefined, relayState: this.relayClient?.status().state } : { running: false, devices: this.devices(), paired: this.registry.list().length > 0, relayUrl: this.relayUrl || undefined }
+  }
+  devices(): MobileDevice[] { this.ensureTrust(); return this.registry.list() }
   revoke(id: string): void {
-    this.registry.revoke(id)
-    for (const stream of this.clients.values()) if (stream.device?.device.id === id) stream.client.terminate()
+    this.ensureTrust()
+    try { this.registry.revoke(id) }
+    finally { for (const stream of this.clients.values()) if (stream.device?.device.id === id) stream.client.terminate() }
   }
   invalidateHost(hostId: string): void {
-    this.registry.invalidateHost(hostId).forEach(id => this.revoke(id))
+    this.ensureTrust()
+    this.hostEpochs = { ...this.hostEpochs, [hostId]: this.hostAuthorizationEpoch(hostId) + 1 }
+    try { this.registry.invalidateHost(hostId).forEach(id => this.revoke(id)) }
+    finally {
+      this.cookieToken = ''; this.browserScopes = []; this.pairingCode = ''
+      for (const stream of this.clients.values()) if (stream.hostId === hostId || stream.browser) stream.client.terminate()
+    }
+  }
+  suspendHost(hostId: string): void {
+    this.registry.cancelInvitation(hostId)
+    this.registry.cancelAccess(hostId)
     this.cookieToken = ''; this.browserScopes = []; this.pairingCode = ''
     for (const stream of this.clients.values()) if (stream.hostId === hostId || stream.browser) stream.client.terminate()
   }
-  async invite(input: MobileEnrollmentInput): Promise<MobileEnrollment> {
+  async invite(input: MobileEnrollmentInput, version: 1 | 2 = 2): Promise<MobileEnrollment> {
+    this.ensureTrust()
     if (!this.server) throw new Error('Activá primero el gateway móvil.')
     if (!Array.isArray(input.projectIds) || input.projectIds.length < 1 || input.projectIds.length > 64 || input.projectIds.some(id => typeof id !== 'string')) throw new Error('Proyectos inválidos.')
     const capabilities = { ...READ_CAPABILITIES }
@@ -156,21 +263,18 @@ export class MobileGateway {
       scopes.push({ projectId, hostId: project.hostId, root: project.root, hostDigest: this.hostDigest(project.hostId), binding })
     }
     await this.validateScopes(scopes)
-    return this.registry.invite({ version: 1, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities)
+    return this.registry.invite({ version, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities)
   }
 
   async start(input: string | MobileStartInput): Promise<MobileStatus> {
+    this.ensureTrust()
     const address = typeof input === 'string' ? input : input.address
-    const publicOrigin = typeof input === 'string' ? undefined : input.publicOrigin
+    const remote = mobileRemoteConfig(input)
+    const relay = typeof input === 'string' || input.relayUrl === undefined ? (this.relayUrl || undefined) : mobileRelayConfig(input)
     if (!mobileAddresses().includes(address)) throw new Error('Elegí una dirección IPv4 privada de este equipo.')
     if (!app.isPackaged) throw new Error('La vista móvil estará disponible en el instalador; no se expone el servidor de desarrollo.')
-    if (publicOrigin) {
-      const parsed = new URL(publicOrigin)
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || !/^[a-z0-9][a-z0-9.-]*\.ts\.net$/i.test(parsed.hostname) || parsed.port) throw new Error('Configurá una URL HTTPS explícita de Tailscale Serve (*.ts.net).')
-    }
     if (this.server) await this.stop()
     const tls = certificate(address)
-    this.gatewayId = randomUUID()
     this.pairingCode = randomBytes(8).toString('hex').toUpperCase()
     this.pairingExpires = Date.now() + 5 * 60_000
     this.cookieToken = randomBytes(32).toString('hex')
@@ -181,26 +285,47 @@ export class MobileGateway {
     const server = createServer({ key: tls.key, cert: tls.cert }, (req, res) => { void this.handle(req, res, false) })
     server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head, false) })
     server.headersTimeout = 10_000; server.requestTimeout = 30_000
-    await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen(0, address, () => { server.off('error', fail); ok() }) })
+    // Reuse the last LAN endpoint on resume. A conflict is an error, never a silent endpoint change.
+    await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen(this.lanAddress === address ? this.lanPort : 0, address, () => { server.off('error', fail); ok() }) })
     this.server = server
     server.on('error', () => { void this.stop() })
     const info = server.address()
     if (!info || typeof info === 'string') { await this.stop(); throw new Error('No se pudo abrir el gateway móvil.') }
+    this.lanAddress = address; this.lanPort = info.port
     this.origin = `https://${address}:${info.port}`
     this.endpoints = [{ kind: 'lan-pinned', url: this.origin, certSHA256: tls.fingerprint }]
     try {
-      if (publicOrigin) {
-        this.endpoints.push({ kind: 'remote-public', url: new URL(publicOrigin).origin })
+      this.remoteProvider = remote?.provider
+      if (remote) {
+        this.endpoints.push({ kind: 'remote-public', url: remote.origin, ...(remote.provider === 'pangolin' ? { provider: 'pangolin', proxyAuthRequired: true } as const : {}) })
         const loopback = createHttpServer((req, res) => { void this.handle(req, res, true) })
         loopback.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head, true) })
         loopback.headersTimeout = 10_000; loopback.requestTimeout = 30_000
-        await new Promise<void>((ok, fail) => { loopback.once('error', fail); loopback.listen(0, '127.0.0.1', () => { loopback.off('error', fail); ok() }) })
+        await listenMobileLoopback(loopback, remote.port)
         this.loopback = loopback
         loopback.on('error', () => { void this.stop() })
         const info = loopback.address()
         if (!info || typeof info === 'string') throw new Error('No se pudo abrir el proxy local.')
         this.loopbackUrl = `http://127.0.0.1:${info.port}` // Desktop-only Serve target; never an enrollment endpoint.
       }
+      this.relayUrl = relay || ''
+      if (relay) {
+        if (!this.deps.relayClientFactory) throw new Error('El cliente de relay no está disponible en esta versión de Crow.')
+        const relayTls = createServer({ key: tls.key, cert: tls.cert }, (req, res) => { void this.handle(req, res, false) })
+        relayTls.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head, false) })
+        relayTls.headersTimeout = 10_000; relayTls.requestTimeout = 30_000
+        await listenMobileTlsLoopback(relayTls, this.relayLocalPort)
+        this.relayTlsServer = relayTls
+        relayTls.on('error', () => { void this.stop() })
+        const relayAddress = relayTls.address()
+        if (!relayAddress || typeof relayAddress === 'string') throw new Error('No se pudo iniciar el endpoint TLS local del relay.')
+        this.relayLocalPort = relayAddress.port
+        const localOrigin = `https://127.0.0.1:${relayAddress.port}`
+        this.endpoints.push({ kind: 'relay', url: localOrigin, certSHA256: tls.fingerprint, relayUrl: relay, relayRoute: this.relayRoute })
+        this.relayClient = this.deps.relayClientFactory({ url: relay, routeId: this.relayRoute, localPort: relayAddress.port })
+        this.relayClient.start()
+      } else this.relayUrl = ''
+      this.saveTrust()
       this.monitor = setInterval(() => { void this.auditStreams() }, 2_000)
       this.monitor.unref()
       return this.status()
@@ -212,17 +337,21 @@ export class MobileGateway {
     this.monitor = undefined
     for (const stream of this.clients.values()) { stream.connection.detach(stream.streamId); stream.client.terminate() }
     this.clients.clear()
-    const servers = [this.server, this.loopback]
-    this.server = undefined; this.loopback = undefined
+    this.relayClient?.stop(); this.relayClient = undefined
+    const servers = [this.server, this.loopback, this.relayTlsServer]
+    this.server = undefined; this.loopback = undefined; this.relayTlsServer = undefined
+    this.remoteProvider = undefined
     this.cookieToken = ''; this.pairingCode = ''; this.origin = ''; this.loopbackUrl = ''; this.endpoints = []; this.browserScopes = []
-    this.registry.clear(); this.failures.clear()
+    this.registry.cancelInvitation(); this.failures.clear()
+    this.registry.cancelAccess()
+    this.mutations.clear() // All bearer contexts have already been retired.
     await Promise.all(servers.map(server => server && new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections() })))
     return this.status()
   }
 
   private hostDigest(hostId: string): string {
-    const host = this.deps.snapshot().hosts.find(host => host.id === hostId)
-    if (!host) throw new Error('Host no configurado.')
+    const host = (this.deps.configurationSnapshot?.() || this.deps.snapshot()).hosts.find(host => host.id === hostId)
+    if (!host) throw new MobileAuthorizationChangedError('Host no configurado.')
     return createHash('sha256').update(JSON.stringify([host.id, host.target, host.port, host.remotePort, host.identity || ''])).digest('hex')
   }
   private snapshotDigest(): string {
@@ -230,30 +359,43 @@ export class MobileGateway {
     return createHash('sha256').update(JSON.stringify([saved.hosts.map(host => [host.id, host.target, host.port, host.remotePort, host.identity || '']).sort(), saved.projects.map(project => [project.id, project.hostId, project.root]).sort()])).digest('hex')
   }
   private async actor(hostId: string): Promise<MobileActorBinding> {
-    if (!this.deps.authSnapshot || this.deps.connection(hostId).status() !== 'connected') throw new Error('Se requiere una credencial individual activa en el host.')
-    const value = await this.deps.authSnapshot(hostId)
-    if (!value?.actorId || !value.generation || !Array.isArray(value.allowedRoots) || value.allowedRoots.some(root => typeof root !== 'string') || typeof value.operateOthers !== 'boolean') throw new Error('Identidad no disponible.')
+    if (!this.deps.authSnapshot) throw new MobileAuthorizationChangedError('Se requiere una credencial individual activa en el host.')
+    if (this.deps.connection(hostId).status() !== 'connected') throw new MobileHostUnavailableError('Host desconectado. El acceso está pausado.')
+    let value: MobileActorBinding
+    try { value = await this.deps.authSnapshot(hostId) }
+    catch (error) {
+      if (error instanceof MobileAuthorizationChangedError) throw error
+      throw new MobileHostUnavailableError('No se pudo comprobar la identidad. El acceso está pausado.')
+    }
+    if (this.deps.connection(hostId).status() !== 'connected') throw new MobileHostUnavailableError('Host desconectado. El acceso está pausado.')
+    if (!value?.actorId || !value.generation || !Array.isArray(value.allowedRoots) || value.allowedRoots.some(root => typeof root !== 'string') || typeof value.operateOthers !== 'boolean') throw new MobileAuthorizationChangedError('Identidad no disponible.')
     return value
   }
   private sameBinding(a: MobileActorBinding, b: MobileActorBinding): boolean {
-    return a.actorId === b.actorId && a.generation === b.generation && a.operateOthers === b.operateOthers && JSON.stringify([...a.allowedRoots].sort()) === JSON.stringify([...b.allowedRoots].sort())
+    return a.actorId === b.actorId && a.generation === b.generation && a.operateOthers === b.operateOthers && (a.role === undefined || a.role === b.role) && JSON.stringify([...a.allowedRoots].sort()) === JSON.stringify([...b.allowedRoots].sort())
   }
   private async validateScopes(scopes: MobileScope[]): Promise<void> {
     for (const scope of scopes) {
       this.validateConfig(scope)
       const live = await this.actor(scope.hostId)
       this.validateConfig(scope)
-      if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new Error('La identidad o autorización cambió. Volvé a emparejar.')
+      if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió. Volvé a emparejar.')
     }
   }
   private validateConfig(scope: MobileScope): void {
-    const project = this.deps.snapshot().projects.find(project => project.id === scope.projectId)
-    if (!project || project.hostId !== scope.hostId || project.root !== scope.root || this.hostDigest(scope.hostId) !== scope.hostDigest) throw new Error('La configuración autorizada cambió.')
+    const project = (this.deps.configurationSnapshot?.() || this.deps.snapshot()).projects.find(project => project.id === scope.projectId)
+    if (!project || project.hostId !== scope.hostId || project.root !== scope.root || this.hostDigest(scope.hostId) !== scope.hostDigest) throw new MobileAuthorizationChangedError('La configuración autorizada cambió.')
   }
   private async validateDevice(record: DeviceRecord): Promise<void> {
+    this.ensureTrust()
     if (!this.registry.active(record)) throw new Error('Emparejamiento vencido o revocado.')
-    try { await this.validateScopes(record.scopes) } catch (error) { this.revoke(record.device.id); throw error }
+    if (!this.server) throw new MobileHostUnavailableError('Gateway pausado.')
+    try { await this.validateScopes(record.scopes) } catch (error) {
+      if (error instanceof MobileAuthorizationChangedError) this.revoke(record.device.id)
+      throw error
+    }
     if (!this.registry.active(record)) throw new Error('Emparejamiento revocado.')
+    if (!this.server) throw new MobileHostUnavailableError('Gateway pausado.')
   }
   private nativeOrigin(req: IncomingMessage): boolean { return !req.headers.origin || this.endpoints.some(endpoint => endpoint.url === req.headers.origin) }
   private async nativeAuth(req: IncomingMessage): Promise<DeviceRecord> {
@@ -307,11 +449,14 @@ export class MobileGateway {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse, proxy: boolean): Promise<void> {
+    try { this.ensureTrust() } catch { json(res, 503, isNativeApiRequest(req) ? mobileError('GATEWAY_UNAVAILABLE', 'Almacén móvil no disponible. El acceso está bloqueado.') : { error: 'Almacén móvil no disponible. El acceso está bloqueado.' }); return }
+    if (!this.server) { json(res, 503, isNativeApiRequest(req) ? mobileError('GATEWAY_UNAVAILABLE', 'Gateway pausado.') : { error: 'Gateway pausado.' }); return }
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer')
     res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ${this.origin.replace('https:', 'wss:')}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`)
     try {
       const url = new URL(req.url || '/', this.origin)
-      if (url.pathname.startsWith('/api/v1/')) { await this.nativeHandle(req, res, url); return }
+      if (url.pathname.startsWith('/api/v2/')) { res.setHeader('X-Crow-Mobile-API', '1'); await this.keyHandle(req, res, url); return }
+      if (url.pathname.startsWith('/api/v1/')) { res.setHeader('X-Crow-Mobile-API', '1'); await this.nativeHandle(req, res, url); return }
       if (proxy) { json(res, 404, { error: 'Ruta no encontrada.' }); return }
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/mobile.html' || url.pathname.startsWith('/assets/'))) { this.staticFile(url.pathname, res); return }
       if (req.method === 'POST' && url.pathname === '/api/pair') {
@@ -356,11 +501,17 @@ export class MobileGateway {
         json(res, 200, await connection.api<SessionInfo>('POST', `/api/sessions/${body.sessionId}/wake`)); return
       }
       json(res, 404, { error: 'Ruta no encontrada.' })
-    } catch { json(res, 400, { error: 'Solicitud rechazada. Revisá el emparejamiento y los permisos.' }) }
+    } catch (error) {
+      const status = error instanceof MobileHostUnavailableError ? 503 : error instanceof MobileMutationRejectedError ? error.status : 400
+      const message = error instanceof MobileHostUnavailableError ? 'Acceso pausado. Reconectá el host o el gateway en Windows.' : error instanceof MobileMutationRejectedError ? error.message : 'Solicitud rechazada. Revisá el emparejamiento y los permisos.'
+      if (!isNativeApiRequest(req)) { json(res, status, { error: message }); return }
+      const code: MobileErrorCode = error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : error instanceof MobileMutationRejectedError && error.status === 429 ? 'RATE_LIMITED' : error instanceof MobileMutationRejectedError && error.status === 409 ? 'REQUEST_CONFLICT' : error instanceof MobileMutationRejectedError && error.status === 401 ? 'DEVICE_REJECTED' : 'INVALID_REQUEST'
+      json(res, status, mobileError(code, message))
+    }
   }
 
   private async nativeHandle(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    if (!this.nativeOrigin(req)) { json(res, 403, { error: 'Origen inválido.' }); return }
+    if (!this.nativeOrigin(req)) { json(res, 403, mobileError('INVALID_ORIGIN', 'Origen inválido.')); return }
     if (req.method === 'POST' && url.pathname === '/api/v1/pair') {
       const body = await readJSON(req)
       const code = this.string(body, 'invitationCode', 32).toUpperCase()
@@ -370,20 +521,20 @@ export class MobileGateway {
         await this.validateScopes(scopes)
         const { record, credential } = this.registry.pair(code, label)
         json(res, 200, { version: 1, device: record.device, credential, endpoints: this.endpoints })
-      } catch (error) { json(res, error instanceof Error && error.message === 'RATE_LIMIT' ? 429 : 401, { error: 'Invitación inválida, vencida o revocada.' }) }
+      } catch (error) { const limited = error instanceof Error && error.message === 'RATE_LIMIT'; json(res, error instanceof MobileHostUnavailableError ? 503 : limited ? 429 : 401, mobileError(error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED', 'Invitación inválida o acceso no disponible.')) }
       return
     }
     let record: DeviceRecord
-    try { record = await this.nativeAuth(req) } catch { json(res, 401, { error: 'Dispositivo revocado o identidad modificada. Volvé a emparejar.' }); return }
+    try { record = await this.nativeAuth(req) } catch (error) { const unavailable = error instanceof MobileHostUnavailableError; json(res, unavailable ? 503 : 401, mobileError(unavailable ? 'HOST_UNAVAILABLE' : 'DEVICE_REJECTED', unavailable ? 'Acceso pausado. Reconectá el host o el gateway en Windows.' : 'Dispositivo revocado o identidad modificada. Volvé a emparejar.')); return }
     const route = url.pathname.slice('/api/v1/'.length)
     if (req.method === 'GET' && route === 'bootstrap') {
       const saved = this.deps.snapshot()
       const hostIds = new Set(record.scopes.map(scope => scope.hostId))
-      json(res, 200, { version: 1, device: record.device, hosts: saved.hosts.filter(host => hostIds.has(host.id)).map(host => ({ id: host.id, name: host.name, status: this.deps.connection(host.id).status() })), projects: saved.projects.filter(project => record.scopes.some(scope => scope.projectId === project.id)).map(({ id, hostId, name }) => ({ id, hostId, name })), actor: { label: this.deps.actorLabel?.() || 'Usuario vinculado' }, devices: [record.device] }); return
+      json(res, 200, { version: 1, device: record.device, hosts: saved.hosts.filter(host => hostIds.has(host.id)).map(host => ({ id: host.id, name: host.name, status: this.deps.connection(host.id).status() })), projects: saved.projects.filter(project => record.scopes.some(scope => scope.projectId === project.id)).map(({ id, hostId, name }) => ({ id, hostId, name })), actor: { label: this.deps.actorLabel?.() || 'Usuario vinculado' }, devices: [record.device], supportedFeatures: MOBILE_SUPPORTED_FEATURES }); return
     }
     if (req.method === 'GET' && route === 'sessions') { json(res, 200, await this.sessions(record, url.searchParams.get('hostId') || '', url.searchParams.get('projectId') || undefined)); return }
     if (req.method === 'GET' && route === 'quotas') {
-      if (!record.device.capabilities.quotas) { json(res, 403, { error: 'Cuotas no habilitadas para este dispositivo.' }); return }
+      if (!record.device.capabilities.quotas) { json(res, 403, mobileError('GRANT_REQUIRED', 'Cuotas no habilitadas para este dispositivo.')); return }
       const quotas = (this.deps.quotas?.() || []).filter(account => account.provider === 'claude' || account.provider === 'codex').slice(0, 64).map(account => ({ id: account.id, label: account.label, provider: account.provider, state: account.state, sampledAt: account.sampledAt, windows: account.windows.slice(0, 16).map(({ label, usedPercent, resetsAt }) => ({ label, usedPercent: typeof usedPercent === 'number' && Number.isFinite(usedPercent) && usedPercent >= 0 && usedPercent <= 100 ? usedPercent : null, resetsAt })) }))
       json(res, 200, quotas); return
     }
@@ -396,38 +547,96 @@ export class MobileGateway {
     }
     if (req.method === 'POST' && ['sessions', 'wake', 'close', 'input', 'resize'].includes(route)) {
       const body = await readJSON(req)
+      // A short bearer may expire while its request body is being read; never execute using only durable trust.
+      await this.nativeAuth(req)
+      const credential = /^Bearer ([0-9a-f]{64})$/.exec(req.headers.authorization || '')?.[1]
+      const result = await this.executeMutation(record, credential ? this.registry.credentialContext(credential) : undefined, route as MobileMutationRoute, body)
+      json(res, result.status, result.body); return
+    }
+    json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.'))
+  }
+  /** Adapter boundary: authenticate a transport first, then pass the registry's opaque
+   * context (never a serialized client-supplied context) and the complete decrypted body.
+   * Replays revalidate current device authority but do not reexecute an accepted action.
+   */
+  async executeMutation(record: DeviceRecord, context: MobileMutationContext | undefined, route: MobileMutationRoute, body: Record<string, unknown>): Promise<MobileMutationResult> {
+    const authorize = async (): Promise<void> => {
+      await this.validateDevice(record)
+      if (record.publicKey && (!context || !this.registry.contextActive(context, record))) throw new MobileMutationRejectedError(401, 'El contexto de autorización venció. Renovalo antes de otra acción.')
+    }
+    await authorize()
+    if (!['sessions', 'wake', 'close', 'input', 'resize'].includes(route)) throw new MobileMutationRejectedError(400, 'Operación inválida.')
+    if (!record.publicKey) return this.mutationOperation(record, route, body)
+    const { requestId, ...operation } = body
+    const result = await this.mutations.run(context!, requestId, route, body, async () => {
+      await authorize()
+      return this.mutationOperation(record, route, operation)
+    })
+    await authorize()
+    return result
+  }
+  private async mutationOperation(record: DeviceRecord, route: MobileMutationRoute, body: Record<string, unknown>): Promise<MobileMutationResult> {
       if (route === 'input' || route === 'resize') {
-        if (!record.device.capabilities.input) { json(res, 403, { error: 'Entrada no habilitada.' }); return }
+        if (!record.device.capabilities.input) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Entrada no habilitada.') }
         const stream = this.clients.get(this.string(body, 'streamId'))
         if (!stream || stream.device !== record || stream.client.readyState !== WebSocket.OPEN) throw new Error('Terminal desconectada.')
+        this.validateStreamCredential(stream)
         await this.allowedSession(stream.hostId, stream.sessionId, record, true)
         stream.connection.send(stream.streamId, this.inputFrame(body, route))
-        json(res, 200, { ok: true }); return
+        return { status: 200, body: { ok: true } }
       }
       const hostId = this.string(body, 'hostId')
       if (route === 'sessions') {
-        if (!record.device.capabilities.create) { json(res, 403, { error: 'Creación no habilitada.' }); return }
+        if (!record.device.capabilities.create) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Creación no habilitada.') }
         const projectId = this.string(body, 'projectId')
         const scope = record.scopes.find(scope => scope.projectId === projectId && scope.hostId === hostId)
         if (!scope || (body.agent !== 'claude' && body.agent !== 'codex') || body.mode !== undefined || body.root !== undefined || Object.keys(body).some(key => !['hostId', 'projectId', 'agent'].includes(key))) throw new Error('Creación inválida.')
         await this.validateDevice(record)
         const info = await this.deps.connection(hostId).api<SessionInfo>('POST', '/api/sessions', { agent: body.agent, mode: 'normal', root: scope.root })
         await this.validateDevice(record)
-        json(res, 200, this.safeSession(info, [scope], (record.device.capabilities.input || record.device.capabilities.close))); return
+        return { status: 200, body: this.safeSession(info, [scope], (record.device.capabilities.input || record.device.capabilities.close)) }
       }
-      if (!record.device.capabilities[route === 'close' ? 'close' : 'input']) { json(res, 403, { error: 'Operación no habilitada.' }); return }
+      if (!record.device.capabilities[route === 'close' ? 'close' : 'input']) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Operación no habilitada.') }
       const sessionId = this.string(body, 'sessionId')
       const { connection } = await this.allowedSession(hostId, sessionId, record, true)
       if (route === 'close') {
         await connection.api('DELETE', `/api/sessions/${sessionId}`)
         for (const stream of this.clients.values()) if (stream.hostId === hostId && stream.sessionId === sessionId) stream.client.close()
-        json(res, 200, { ok: true }); return
+        return { status: 200, body: { ok: true } }
       }
       const info = await connection.api<SessionInfo>('POST', `/api/sessions/${sessionId}/wake`)
       await this.validateDevice(record)
-      json(res, 200, this.safeSession(info, record.scopes.filter(scope => scope.hostId === hostId), (record.device.capabilities.input || record.device.capabilities.close))); return
-    }
-    json(res, 404, { error: 'Ruta no encontrada.' })
+      return { status: 200, body: this.safeSession(info, record.scopes.filter(scope => scope.hostId === hostId), (record.device.capabilities.input || record.device.capabilities.close)) }
+  }
+  private async keyHandle(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (!this.nativeOrigin(req)) { json(res, 403, mobileError('INVALID_ORIGIN', 'Origen inválido.')); return }
+    if (req.method !== 'POST' || !['pair', 'device-challenge', 'device-renew'].includes(url.pathname.slice('/api/v2/'.length))) { json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.')); return }
+    try {
+      const body = await readJSON(req), route = url.pathname.slice('/api/v2/'.length)
+      const fields = route === 'pair' ? ['invitationCode', 'deviceName', 'publicKey'] : route === 'device-challenge' ? ['deviceId'] : ['deviceId', 'challengeId', 'signature']
+      if (Object.keys(body).some(key => !fields.includes(key))) throw new Error('Solicitud inválida.')
+      if (route === 'pair') {
+        const code = this.string(body, 'invitationCode', 32).toUpperCase()
+        await this.validateScopes(this.registry.candidate(code, req.socket.remoteAddress || ''))
+        const paired = this.registry.pairKey(code, this.string(body, 'deviceName', 80), this.string(body, 'publicKey', 124))
+        json(res, 200, { version: 2, device: paired.record.device, credential: paired.credential, credentialExpiresAt: paired.credentialExpiresAt, endpoints: this.endpoints }); return
+      }
+      const id = this.string(body, 'deviceId')
+      if (route === 'device-challenge') {
+        const record = this.registry.keyDevice(id)
+        await this.validateDevice(record)
+        json(res, 200, this.registry.challenge(id, this.gatewayId, req.socket.remoteAddress || '')); return
+      }
+      const record = this.registry.prove(id, this.string(body, 'challengeId'), this.string(body, 'signature', 112))
+      await this.validateDevice(record)
+      json(res, 200, { version: 2, ...this.registry.issueCredential(record) })
+    } catch (error) { const limited = error instanceof Error && error.message === 'RATE_LIMIT'; json(res, error instanceof MobileHostUnavailableError ? 503 : limited ? 429 : 401, mobileError(error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED', error instanceof MobileHostUnavailableError ? 'Acceso pausado. Comprobá Crow y el host en Windows.' : 'Dispositivo o prueba no autorizados. La invitación o el desafío pueden haber vencido.')) }
+  }
+  private validateStreamCredential(stream: StreamRecord): void {
+    // V2 bearer authenticates the upgrade only. Established streams remain bound to
+    // durable key trust and live scopes, revalidated on every action/output and audit.
+    // Legacy v1 has no renewable key identity; its original credential TTL still applies.
+    if (stream.device && !stream.device.publicKey && (!stream.credentialExpiresAt || stream.credentialExpiresAt <= Date.now())) throw new Error('Credencial de acceso vencida. Reconectá la terminal.')
   }
   private inputFrame(body: Record<string, unknown>, type: 'input' | 'resize'): unknown {
     if (type === 'input') {
@@ -452,7 +661,7 @@ export class MobileGateway {
   }
   private async auditStreams(): Promise<void> {
     for (const stream of this.clients.values()) {
-      try { await this.allowedSession(stream.hostId, stream.sessionId, stream.device) } catch { stream.client.terminate() }
+      try { this.validateStreamCredential(stream); await this.allowedSession(stream.hostId, stream.sessionId, stream.device) } catch { stream.client.terminate() }
     }
   }
   private async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, proxy: boolean): Promise<void> {
@@ -469,20 +678,34 @@ export class MobileGateway {
       if (this.clients.size >= 32) throw new Error('Demasiadas terminales.')
       this.sockets.handleUpgrade(req, socket, head, client => {
         const streamId = randomUUID()
-        const stream: StreamRecord = { client, connection, streamId, hostId, sessionId, device, browser: !native }
+        const credential = /^Bearer ([0-9a-f]{64})$/.exec(req.headers.authorization || '')?.[1]
+        const stream: StreamRecord = { client, connection, streamId, hostId, sessionId, device, browser: !native, credentialExpiresAt: credential ? this.registry.credentialExpiry(credential) : undefined, mutationContext: credential ? this.registry.credentialContext(credential) : undefined }
         this.clients.set(streamId, stream)
-        let inputBusy = false
+        let inputBusy = 0, inputRequestId: unknown
         client.on('message', raw => {
-          if (inputBusy) { client.close(1008, 'Entrada concurrente'); return }
-          inputBusy = true
+          let body: Record<string, unknown>
+          try { body = JSON.parse(raw.toString()) } catch { client.close(1008, 'Mensaje inválido'); return }
+          if (!body || (body.type !== 'input' && body.type !== 'resize')) { client.close(1008, 'Mensaje inválido'); return }
+          // Preserve input ordering; only bounded duplicates of the same v2 attempt may coalesce.
+          if (inputBusy && (!device?.publicKey || !body.requestId || body.requestId !== inputRequestId || inputBusy >= 32)) { client.close(1008, 'Entrada concurrente'); return }
+          if (!inputBusy) inputRequestId = body.requestId
+          inputBusy++
           void (async () => {
             try {
               if (device && !device.device.capabilities.input) throw new Error('Solo lectura.')
-              const body = JSON.parse(raw.toString()) as Record<string, unknown>
-              if (!body || (body.type !== 'input' && body.type !== 'resize')) throw new Error('Mensaje inválido.')
+              this.validateStreamCredential(stream)
+              if (device?.publicKey) {
+                const { type, ...operation } = body
+                const result = await this.executeMutation(device, stream.mutationContext, type as 'input' | 'resize', { ...operation, streamId })
+                if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'mutation-result', requestId: body.requestId, status: result.status, result: result.body }))
+                return
+              }
               await this.allowedSession(hostId, sessionId, device, true)
-              connection.send(streamId, this.inputFrame(body, body.type))
-            } catch { client.close(1008, 'Entrada no autorizada') } finally { inputBusy = false }
+              connection.send(streamId, this.inputFrame(body, body.type as 'input' | 'resize'))
+            } catch (error) {
+              if (device?.publicKey && error instanceof MobileMutationRejectedError && client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'mutation-result', status: error.status, result: { error: error.message } }))
+              else client.close(1008, 'Entrada no autorizada')
+            } finally { if (!--inputBusy) inputRequestId = undefined }
           })()
         })
         client.on('close', () => { connection.detach(streamId); this.clients.delete(streamId) })
@@ -495,6 +718,7 @@ export class MobileGateway {
           frames = frames.then(async () => {
             try {
               if (device) await this.validateDevice(device); else await this.browserValid()
+              this.validateStreamCredential(stream)
               if (client.readyState !== WebSocket.OPEN) return
               let output: unknown = frame
               if (native && device) {
@@ -511,10 +735,11 @@ export class MobileGateway {
           })
         }).then(async () => {
           if (device) await this.validateDevice(device); else await this.browserValid()
+          this.validateStreamCredential(stream)
           if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'ready', streamId }))
           else connection.detach(streamId)
         }).catch(() => { client.close(); connection.detach(streamId) })
       })
-    } catch { socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); socket.destroy() }
+    } catch (error) { socket.write(`HTTP/1.1 ${error instanceof MobileHostUnavailableError ? '503 Service Unavailable' : '403 Forbidden'}\r\nX-Crow-Mobile-API: 1\r\nConnection: close\r\n\r\n`); socket.destroy() }
   }
 }

@@ -1,0 +1,16 @@
+{
+  "name": "@crow-harness/mobile-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Opaque WebSocket byte router for Crow mobile end-to-end TLS tunnels",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

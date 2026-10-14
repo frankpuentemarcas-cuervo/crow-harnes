@@ -18,3 +18,7 @@ test('a deleted session is not mistaken for an old runtime', () => {
   assert.equal(remoteApiError(404, 'session not found\n', 'DELETE', `/api/sessions/${'a'.repeat(32)}`).message, 'session not found')
   assert.equal(remoteApiError(500, 'disk error', 'GET', '/api/host/metrics').message, 'disk error')
 })
+
+test('HTTP failures retain status to distinguish authorization from availability', () => {
+  for (const status of [401, 403, 404, 500, 503]) assert.equal(remoteApiError(status, 'failure', 'GET', '/api/access/me').status, status)
+})

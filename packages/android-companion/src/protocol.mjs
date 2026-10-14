@@ -1,10 +1,24 @@
 export function parseEnrollment(raw, now = Date.now()) {
   const value = JSON.parse(raw)
-  if (value?.version !== 1 || typeof value.gatewayId !== 'string' || !value.gatewayId || typeof value.invitationCode !== 'string' || !value.invitationCode || !Array.isArray(value.endpoints) || !value.endpoints.length || value.endpoints.length > 8 || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= now) throw new Error('Invitación inválida o vencida. Generá otra desde Crow en Windows.')
+  if (value?.version === 1) throw new Error('Esta invitación usa el protocolo anterior. Actualizá Crow en Windows y generá un nuevo QR; tus perfiles anteriores no se convierten automáticamente.')
+  if (value?.version !== 2 || typeof value.gatewayId !== 'string' || !value.gatewayId || typeof value.invitationCode !== 'string' || !value.invitationCode || !Array.isArray(value.endpoints) || !value.endpoints.length || value.endpoints.length > 8 || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= now) throw new Error('Invitación inválida o vencida. Generá otra desde Crow en Windows.')
+  if (Object.keys(value).some(key => !['version', 'gatewayId', 'invitationCode', 'expiresAt', 'endpoints'].includes(key))) throw new Error('La invitación no puede incluir credenciales del proxy.')
   for (const endpoint of value.endpoints) {
+    if (Object.keys(endpoint).some(key => !['kind', 'url', 'certSHA256', 'provider', 'proxyAuthRequired', 'relayUrl', 'relayRoute'].includes(key))) throw new Error('El QR no puede incluir claves del recurso.')
     const url = new URL(endpoint.url)
-    if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || url.pathname !== '/' || !['lan-pinned', 'remote-public'].includes(endpoint.kind)) throw new Error('El endpoint debe ser un origen HTTPS exacto.')
-    if (endpoint.kind === 'lan-pinned' && !/^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$/.test(endpoint.certSHA256 ?? '')) throw new Error('Falta la huella SHA-256 válida del certificado LAN.')
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || url.pathname !== '/' || !['lan-pinned', 'remote-public', 'relay'].includes(endpoint.kind)) throw new Error('El endpoint debe ser un origen HTTPS exacto.')
+    if (['lan-pinned', 'relay'].includes(endpoint.kind) && !/^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$/.test(endpoint.certSHA256 ?? '')) throw new Error('Falta la huella SHA-256 válida del certificado fijado.')
+    if (endpoint.kind === 'relay') {
+      let relay
+      try { relay = new URL(endpoint.relayUrl) } catch { throw new Error('URL de relay inválida.') }
+      const route = endpoint.relayRoute ?? ''
+      const decodedRoute = /^[A-Za-z0-9_-]{43}$/.test(route) ? atob(route.replace(/-/g, '+').replace(/_/g, '/') + '=') : ''
+      const canonicalRoute = decodedRoute.length === 32 && btoa(decodedRoute).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') === route
+      if (url.hostname !== '127.0.0.1' || !url.port || relay.protocol !== 'wss:' || relay.username || relay.password || relay.pathname !== '/v1/tunnel' || relay.search || relay.hash || !canonicalRoute) throw new Error('Configuración de relay E2E inválida.')
+    } else if ('relayUrl' in endpoint || 'relayRoute' in endpoint) throw new Error('La ruta y URL de relay solo son válidas en un endpoint relay.')
+    if ('provider' in endpoint || 'proxyAuthRequired' in endpoint) {
+      if (endpoint.provider !== 'pangolin' || endpoint.proxyAuthRequired !== true || endpoint.kind !== 'remote-public' || !/^https:\/\/[a-z0-9.-]+\/?$/.test(endpoint.url) || !url.hostname.includes('.') || !/\.[a-z]{2,63}$/.test(url.hostname) || /\.(localhost|local|internal)$/.test(url.hostname) || url.hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) throw new Error('Pangolin requiere dominio HTTPS exacto y autenticación nativa.')
+    }
   }
   return value
 }
@@ -14,8 +28,11 @@ export function encodeInput(text) { const bytes = new TextEncoder().encode(text)
 export function decodeOutput(text) { return Uint8Array.from(atob(text), character => character.charCodeAt(0)) }
 export class OutputCursor {
   seq = 0
+  lastGap = false
   accept(frame) {
+    this.lastGap = false
     if (frame.type !== 'output' || typeof frame.data !== 'string' || !Number.isSafeInteger(frame.seq) || frame.seq <= this.seq) return false
+    this.lastGap = frame.seq > this.seq + 1
     this.seq = frame.seq
     return true
   }

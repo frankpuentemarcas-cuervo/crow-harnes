@@ -11,7 +11,7 @@ import '@xterm/xterm/css/xterm.css'
 
 export function TerminalView({ profile, hostId, session, onBack, onError, onState }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onError(message: string): void; onState(info: MobileSession): void }) {
   const surface = useRef<HTMLDivElement>(null), terminal = useRef<Terminal | null>(null), fit = useRef<FitAddon | null>(null), connection = useRef(''), live = useRef(false)
-  const [connected, setConnected] = useState(false), [prompt, setPrompt] = useState(''), [pending, setPending] = useState(false), [paste, setPaste] = useState<string | null>(null)
+  const [connected, setConnected] = useState(false), [outputGap, setOutputGap] = useState(false), [prompt, setPrompt] = useState(''), [pending, setPending] = useState(false), [paste, setPaste] = useState<string | null>(null)
   const canInput = mayOperate(session, profile.device), writable = useRef(canInput)
   writable.current = canInput
   async function send(text: string) {
@@ -44,7 +44,10 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
         try {
           const frame = JSON.parse(event.data)
           if (frame.type === 'ready') { retries = 0; live.current = true; setConnected(true); return }
-          if (cursor.accept(frame)) instance.write(decodeOutput(frame.data))
+          if (cursor.accept(frame)) {
+            instance.write(decodeOutput(frame.data))
+            if (cursor.lastGap) setOutputGap(true)
+          }
           if (frame.type === 'state' && frame.info) onState(frame.info)
           if (frame.type === 'disconnected') { detach(); schedule() }
         } catch { onError('Crow envió una trama inválida. Se desconectó la terminal.'); detach(); schedule() }
@@ -66,6 +69,7 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
   return <section className="terminal-page">
     <div className="row"><button onClick={onBack}>← Volver</button><div><strong>{agentLabel(session.agent)} · {session.name || session.id.slice(0, 8)}</strong><small role="status">{connected ? canInput ? 'Conectada · mismo proceso' : 'Solo lectura' : 'Desconectada · reanudando salida'}</small></div></div>
     <div className="terminal-surface" ref={surface} aria-label="Salida de terminal remota" />
+    {outputGap && <p className="terminal-recovery-warning" role="status" aria-live="polite" aria-atomic="true">Parte de la salida anterior no se pudo recuperar. El búfer remoto es limitado; la terminal continúa desde la salida disponible.</p>}
     <div className="keys" aria-label="Acciones de terminal">
       {[['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl+C', '\x03'], ['↑', '\x1b[A'], ['↓', '\x1b[B']].map(([label, data]) => <button key={label} disabled={!connected || !canInput} onClick={() => void send(data)}>{label}</button>)}
       <button onClick={() => terminal.current?.focus()} disabled={!canInput}>Teclado</button>

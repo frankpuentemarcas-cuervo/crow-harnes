@@ -4,7 +4,7 @@ import type { FreeLLMRuntimeStatus } from './free-llm-startup'
 import type { AccountUsageAPI } from './account-usage'
 import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage } from './erp-task'
 import type { AccessIdentity } from './access'
-import type { MobileDevice, MobileEnrollment, MobileEnrollmentInput, MobileStartInput } from './mobile-companion'
+import type { MobileDevice, MobileEnrollment, MobileEnrollmentInput, MobileStartInput, MobileRemoteProvider } from './mobile-companion'
 
 export interface CrowAccessPrincipal { id: string; label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[]; revoked?: boolean }
 export interface CrowAccessStatus { enabled: boolean; credentialRequired: boolean; version?: number }
@@ -49,6 +49,9 @@ export interface MobileStatus {
   enrollment?: MobileEnrollment
   devices?: MobileDevice[]
   loopbackUrl?: string
+  remoteProvider?: MobileRemoteProvider
+  relayUrl?: string
+  relayState?: 'stopped' | 'connecting' | 'connected' | 'reconnecting'
 }
 
 export interface Project {

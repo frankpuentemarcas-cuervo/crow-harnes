@@ -1,34 +1,36 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { createRequire, stripTypeScriptTypes } from 'node:module'
 import vm from 'node:vm'
 import ts from 'typescript'
+const mobileAuth = await import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(readFileSync(new URL('../src/main/mobile-device-auth.ts', import.meta.url), 'utf8'), { mode: 'transform' })).toString('base64'))
 
 const require = createRequire(import.meta.url)
 const plain = value => JSON.parse(JSON.stringify(value))
 function harness() {
-  const handlers = new Map(), invalidated = [], sender = { send() {} }
+  const handlers = new Map(), invalidated = [], suspended = [], sender = { send() {} }
   const host = { id: 'host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
   const store = { host: id => id === host.id ? host : undefined, snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
   const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, stop() {}, setAccessCredential: async () => undefined }
-  const mobile = { invalidateHost: id => invalidated.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => ({ invitationCode: 'one-use', input }), revoke: id => invalidated.push(`device:${id}`) }
+  const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => ({ invitationCode: 'one-use', input }), revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
 exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; attention={reset(){}}; registerIPC()};
-exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; exports.quotas = mobileCachedQuotas; exports.notices = mobileCachedNotices; exports.invalidate = invalidateMobileHost;`
+exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; exports.quotas = mobileCachedQuotas; exports.notices = mobileCachedNotices; exports.invalidate = invalidateMobileHost; exports.suspend = suspendMobileHost;`
   const module = { exports: {} }
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
+    if (id === './mobile-device-auth') return mobileAuth
     if (id === 'electron') return { app: { whenReady: () => ({ then() {} }), on() {} }, ipcMain: { handle: (name, handler) => handlers.set(name, handler) } }
     if (id === '../shared/access-visibility') return { withoutHostWorkspace: value => value, projectVisibleSessions: value => value }
     return {}
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, connection, invalidated, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, connection, invalidated, suspended, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -42,7 +44,7 @@ test('Android snapshot binds a current individual actor without exposing credent
   h.actor.allowedRoots = ['/srv']; assert.deepEqual(plain(await h.auth('host')).allowedRoots, ['/srv/project'])
   h.actor.allowedRoots = ['/srv/project-foreign']; await assert.rejects(h.auth('host'), /no tiene proyectos/)
   h.actor.allowedRoots = ['/srv/project']
-  assert.deepEqual(Object.keys(first).sort(), ['actorId', 'allowedRoots', 'generation', 'operateOthers'])
+  assert.deepEqual(Object.keys(first).sort(), ['actorId', 'allowedRoots', 'generation', 'operateOthers', 'role'])
   h.invalidate('host'); const second = await h.auth('host')
   assert.notEqual(second.generation, first.generation)
   h.actor.revoked = true; await assert.rejects(h.auth('host'), /no está autorizada/)
@@ -53,6 +55,27 @@ test('legacy bootstrap and disconnected hosts cannot enroll Android', async () =
   await assert.rejects(h.auth('host'), /acceso individual Crow/)
   h.connection.status = () => 'disconnected'
   await assert.rejects(h.auth('host'), /Conectá el host/)
+})
+
+test('host transport loss suspends grants without advancing identity generation', async () => {
+  const h = harness(), before = plain(await h.auth('host'))
+  h.connection.status = () => 'disconnected'; h.suspend('host')
+  assert.deepEqual(h.suspended, ['host']); assert.deepEqual(h.invalidated, [])
+  assert.deepEqual(plain(h.workspace()).projects, [])
+  await assert.rejects(h.auth('host'), error => error instanceof mobileAuth.MobileHostUnavailableError)
+  h.connection.status = () => 'connected'
+  const after = plain(await h.auth('host'))
+  assert.equal(after.generation, before.generation)
+  assert.deepEqual(after, before)
+})
+
+test('authorization rejects confirmed HTTP denial but preserves trust on unavailable host response', async () => {
+  for (const status of [401, 403, 404, 500, 503, undefined]) {
+    const h = harness()
+    h.connection.accessIdentity = async () => { throw Object.assign(new Error('failure'), { status }) }
+    const expected = [401, 403, 404].includes(status) ? mobileAuth.MobileAuthorizationChangedError : mobileAuth.MobileHostUnavailableError
+    await assert.rejects(h.auth('host'), error => error instanceof expected)
+  }
 })
 
 test('mobile snapshot authorizes configured admin projects without ERP whitelist or foreign-operation grant', async () => {

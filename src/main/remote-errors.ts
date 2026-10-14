@@ -10,7 +10,7 @@ const newerRuntimeRoutes = [
 
 export function remoteApiError(status: number, body: string, method: string, path: string): Error {
   if (status === 404 && body.trim() === '404 page not found' && newerRuntimeRoutes.some((route) => route.test(`${method} ${path}`))) {
-    return new Error('El servicio crowd de Linux está desactualizado. Actualizá y reiniciá crowd en este host para usar esta función.')
+    return Object.assign(new Error('El servicio crowd de Linux está desactualizado. Actualizá y reiniciá crowd en este host para usar esta función.'), { status })
   }
-  return new Error(body.trim() || `Error HTTP ${status}`)
+  return Object.assign(new Error(body.trim() || `Error HTTP ${status}`), { status })
 }

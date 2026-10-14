@@ -39,5 +39,5 @@ final class CredentialStore {
         return new JSONObject(new String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), StandardCharsets.UTF_8));
     }
     synchronized List<String> ids() { return new ArrayList<>(preferences.getAll().keySet()); }
-    synchronized void delete(String id) { preferences.edit().remove(id).commit(); }
+    synchronized void delete(String id) { if (!preferences.edit().remove(id).commit()) throw new IllegalStateException("Credential deletion failed"); }
 }

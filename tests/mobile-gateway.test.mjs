@@ -4,10 +4,16 @@ import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { createServer } from 'node:http'
+import { generateKeyPairSync, sign, randomUUID } from 'node:crypto'
 
 const ts = path => stripTypeScriptTypes(readFileSync(new URL(path, import.meta.url), 'utf8'), { mode: 'transform' })
 const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64')
 const registryURL = dataURL(ts('../src/main/mobile-device-auth.ts'))
+const mobileAuth = await import(registryURL)
+const trustStoreURL = dataURL(ts('../src/main/mobile-trust-store.ts').replace("from './mobile-device-auth'", `from '${registryURL}'`))
+const ledgerURL = dataURL(ts('../src/main/mobile-mutation-ledger.ts'))
+const mobileSharedURL = dataURL(ts('../src/shared/mobile-companion.ts'))
 class Client extends EventEmitter {
   readyState = 1; bufferedAmount = 0; frames = []; ended = false
   send(value) { this.frames.push(JSON.parse(value)) }
@@ -22,12 +28,16 @@ const source = ts('../src/main/mobile-gateway.ts')
   .replace("import { WebSocket, WebSocketServer } from 'ws';", 'const WebSocket = { OPEN: 1 }; const WebSocketServer = globalThis.__mobileFixture.SocketServer;')
   .replace("import { isPrivateLanIPv4 } from './mobile-network';", 'const isPrivateLanIPv4 = () => true;')
   .replace("import { networkInterfaces } from 'node:os';", "const networkInterfaces = () => ({ lan: [{ family: 'IPv4', internal: false, address: '192.168.1.8' }] });")
+  .replace("from '../shared/mobile-companion'", `from '${mobileSharedURL}'`)
   .replace("from './mobile-device-auth'", `from '${registryURL}'`)
-const { MobileGateway } = await import(dataURL(source))
+  .replace("from './mobile-trust-store'", `from '${trustStoreURL}'`)
+  .replace("from './mobile-mutation-ledger'", `from '${ledgerURL}'`)
+const { MobileGateway, mobileRemoteConfig, mobileRelayConfig, listenMobileLoopback } = await import(dataURL(source))
 const SESSION = 'a'.repeat(32), FOREIGN = 'b'.repeat(32), OUTSIDE = 'c'.repeat(32)
 function fixture() {
   const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: {}, notices: [] }
-  let binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false }
+  let binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'member' }
+  let hostStatus = 'connected'
   let sessions = [
     { id: SESSION, agent: 'claude', mode: 'normal', ownerId: 'alice', root: '/work', state: 'running', seq: 4, startedAt: 'now', updatedAt: 'now' },
     { id: FOREIGN, agent: 'codex', mode: 'normal', ownerId: 'bob', root: '/work', state: 'running', seq: 4, startedAt: 'now', updatedAt: 'now', readOnly: true },
@@ -36,7 +46,7 @@ function fixture() {
   const calls = [], streams = new Map()
   let apiHook = () => {}
   const connection = {
-    status: () => 'connected',
+    status: () => hostStatus,
     api: async (method, path, body) => {
       calls.push({ method, path, body })
       apiHook(method, path, body)
@@ -48,7 +58,7 @@ function fixture() {
     detach: id => streams.delete(id),
     send: (id, body) => calls.push({ stream: id, body })
   }
-  const gateway = new MobileGateway({ snapshot: () => state, connection: () => connection, authSnapshot: async () => { if (!binding) throw new Error('legacy'); return structuredClone(binding) }, quotas: () => [{ id: 'safe', label: 'Trabajo', provider: 'claude', state: 'ready', windows: [], sampledAt: null }], notices: () => [{ id: 'event', hostId: 'host', sessionId: SESSION, kind: 'turn-complete', at: 'now', message: 'SECRET', classification: { detail: 'SECRET' } }, { id: 'hidden', hostId: 'host', sessionId: OUTSIDE, kind: 'turn-complete', at: 'now' }] })
+  const gateway = new MobileGateway({ trustStore: { load: () => undefined, save() {} }, snapshot: () => state, configurationSnapshot: () => state, connection: () => connection, authSnapshot: async () => { if (!binding) throw new mobileAuth.MobileAuthorizationChangedError('legacy'); return structuredClone(binding) }, quotas: () => [{ id: 'safe', label: 'Trabajo', provider: 'claude', state: 'ready', windows: [], sampledAt: null }], notices: () => [{ id: 'event', hostId: 'host', sessionId: SESSION, kind: 'turn-complete', at: 'now', message: 'SECRET', classification: { detail: 'SECRET' } }, { id: 'hidden', hostId: 'host', sessionId: OUTSIDE, kind: 'turn-complete', at: 'now' }] })
   gateway.server = { close: cb => cb(), closeAllConnections() {} }; gateway.origin = 'https://192.168.1.8:4000'; gateway.gatewayId = 'test'; gateway.endpoints = [{ kind: 'lan-pinned', url: gateway.origin, certSHA256: 'pin' }]; gateway.cookieToken = 'cookie'; gateway.cookieExpires = Date.now() + 10000; gateway.pairingCode = '1234567890ABCDEF'; gateway.pairingExpires = Date.now() + 10000; gateway.browserSnapshot = gateway.snapshotDigest()
   async function request(path, method = 'GET', body, credential, headers = {}, proxy = false) {
     const req = new PassThrough(); req.url = path; req.method = method; req.headers = { ...headers, ...(credential ? { authorization: `Bearer ${credential}` } : {}) }; req.socket = { remoteAddress: 'mock' }
@@ -59,7 +69,7 @@ function fixture() {
     return { status: res.status, body: JSON.parse(res.value), headers: res.headers }
   }
   async function pair(capabilities = {}) {
-    const invitation = await gateway.invite({ projectIds: ['p1'], capabilities })
+    const invitation = await gateway.invite({ projectIds: ['p1'], capabilities }, 1)
     const result = await request('/api/v1/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Pixel' })
     assert.equal(result.status, 200)
     return result.body
@@ -71,7 +81,7 @@ function fixture() {
     await new Promise(ok => setImmediate(ok))
     return transport.denied ? null : globalThis.__mobileClient
   }
-  return { state, gateway, calls, streams, request, pair, socket, binding: value => binding = value, sessions: value => sessions = value, apiHook: value => apiHook = value }
+  return { state, gateway, calls, streams, request, pair, socket, binding: value => binding = value, hostStatus: value => hostStatus = value, sessions: value => sessions = value, apiHook: value => apiHook = value }
 }
 test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or roots', async () => {
   const c = fixture(), paired = await c.pair()
@@ -80,6 +90,7 @@ test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or
   assert.equal(boot.body.devices[0].id, paired.device.id)
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, undefined, { cookie: 'crow_mobile=cookie' })).status, 401)
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).status, 403)
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).headers['X-Crow-Mobile-API'], '1')
   assert.equal((await c.request('/api/state', 'GET', undefined, paired.credential, {}, true)).status, 404)
 })
 test('read-only enrollment denies create/wake/close/quotas and returns foreign sessions readonly', async () => {
@@ -113,11 +124,11 @@ test('actor rotation, host replacement and scope mutation revoke device instead 
 })
 test('pair replay, revoked invite identity, malformed body and body bound are rejected', async () => {
   const c = fixture()
-  const invitation = await c.gateway.invite({ projectIds: ['p1'] })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'] }, 1)
   const body = { invitationCode: invitation.invitationCode, deviceName: 'Pixel' }
   assert.equal((await c.request('/api/v1/pair', 'POST', body)).status, 200)
   assert.equal((await c.request('/api/v1/pair', 'POST', body)).status, 401)
-  const next = await c.gateway.invite({ projectIds: ['p1'] })
+  const next = await c.gateway.invite({ projectIds: ['p1'] }, 1)
   c.binding(null)
   assert.equal((await c.request('/api/v1/pair', 'POST', { ...body, invitationCode: next.invitationCode })).status, 401)
   assert.equal((await c.request('/api/v1/pair', 'POST', '{invalid')).status, 400)
@@ -179,7 +190,7 @@ test('identity changing during awaited session listing leaks no old or new actor
   assert.equal(c.gateway.devices().length, 0)
 })
 test('pair invitation is consumed once even by concurrent valid requests', async () => {
-  const c = fixture(), invitation = await c.gateway.invite({ projectIds: ['p1'] })
+  const c = fixture(), invitation = await c.gateway.invite({ projectIds: ['p1'] }, 1)
   const result = await Promise.all(['one', 'two'].map(deviceName => c.request('/api/v1/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName })))
   assert.deepEqual(result.map(response => response.status).sort(), [200, 401])
 })
@@ -204,17 +215,51 @@ test('output is sequenced, allowlisted and backpressure closes slow consumers', 
   emit({ type: 'output', seq: 7, data: 'ZA==' })
   assert.equal(client.ended, true)
 })
-test('stop and expired legacy cookies revoke credentials, invitations and active streams', async () => {
+test('stop cancels invitations and streams but preserves device trust; legacy cookies expire', async () => {
   const c = fixture(), paired = await c.pair(), client = await c.socket(paired.credential)
-  await c.gateway.invite({ projectIds: ['p1'] })
+  await c.gateway.invite({ projectIds: ['p1'] }, 1)
   await c.gateway.stop()
-  assert.equal(client.ended, true); assert.deepEqual(c.gateway.status(), { running: false }); assert.equal(c.gateway.devices().length, 0)
+  assert.equal(client.ended, true); assert.equal(c.gateway.status().running, false); assert.equal(c.gateway.devices().length, 1)
+  assert.equal(c.gateway.registry.invitation(), undefined)
+  assert.equal(c.gateway.registry.authenticate(paired.credential).device.id, paired.device.id)
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)).status, 503)
   const other = fixture()
   other.gateway.pairingCode = ''; other.gateway.cookieExpires = Date.now() - 1
   assert.equal((await other.request('/api/state', 'GET', undefined, undefined, { cookie: 'crow_mobile=cookie' })).status, 401)
   const replaced = fixture()
   replaced.gateway.pairingCode = ''; replaced.state.hosts[0].target = 'new@host'
   assert.equal((await replaced.request('/api/state', 'GET', undefined, undefined, { cookie: 'crow_mobile=cookie' })).status, 401)
+})
+
+test('temporary host disconnect suspends access and streams without revoking device trust', async () => {
+  const c = fixture(), paired = await c.pair({ input: true, create: true, quotas: true }), client = await c.socket(paired.credential)
+  const streamId = client.frames[0].streamId
+  c.hostStatus('disconnected'); c.gateway.suspendHost('host')
+  c.gateway.deps.snapshot = () => ({ ...c.state, hosts: [], projects: [] }) // Visible workspace disappears while SSH is down.
+  assert.equal(client.ended, true)
+  for (const path of ['/api/v1/bootstrap', '/api/v1/quotas', '/api/v1/notices']) {
+    const response = await c.request(path, 'GET', undefined, paired.credential)
+    assert.equal(response.status, 503)
+  }
+  assert.equal((await c.request('/api/v1/input', 'POST', { streamId, data: 'aGk=' }, paired.credential)).status, 503)
+  assert.equal((await c.request('/api/v1/sessions', 'POST', { hostId: 'host', projectId: 'p1', agent: 'codex' }, paired.credential)).status, 503)
+  assert.equal(c.gateway.devices().length, 1)
+  assert.equal(c.calls.some(call => call.stream || call.method === 'POST'), false)
+  c.hostStatus('connected')
+  c.gateway.deps.snapshot = () => c.state
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)).status, 200)
+  assert.ok(await c.socket(paired.credential))
+})
+
+test('host availability loss during authorization does not revoke; changed grants after reconnect do', async () => {
+  const c = fixture(), paired = await c.pair()
+  c.apiHook(() => c.hostStatus('disconnected'))
+  assert.equal((await c.request('/api/v1/sessions?hostId=host', 'GET', undefined, paired.credential)).status, 503)
+  assert.equal(c.gateway.devices().length, 1)
+  c.hostStatus('connected'); c.apiHook(() => {})
+  c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/other'], operateOthers: false })
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)).status, 401)
+  assert.equal(c.gateway.devices().length, 0)
 })
 test('remote access cannot bind publicly or trust arbitrary proxy origins', async () => {
   const c = fixture()
@@ -223,4 +268,273 @@ test('remote access cannot bind publicly or trust arbitrary proxy origins', asyn
   const paired = await c.pair()
   assert.equal(paired.endpoints[0].kind, 'lan-pinned'); assert.equal(paired.endpoints[0].certSHA256, 'pin')
   assert.equal(paired.endpoints.some(endpoint => endpoint.url.startsWith('http:')), false)
+})
+
+test('Pangolin is explicit, requires a stable port and a pure public HTTPS FQDN', () => {
+  const valid = { address: '192.168.1.8', remoteProvider: 'pangolin', publicOrigin: 'https://crow.example.com', loopbackPort: 47323 }
+  assert.deepEqual(mobileRemoteConfig(valid), { provider: 'pangolin', origin: valid.publicOrigin, port: 47323 })
+  assert.equal(mobileRemoteConfig({ address: valid.address, publicOrigin: 'https://host.ts.net' }).provider, 'tailscale')
+  assert.equal(mobileRemoteConfig(valid.address), undefined)
+  for (const publicOrigin of ['http://crow.example.com', 'https://localhost', 'https://foo.localhost', 'https://127.0.0.1', 'https://[::1]', 'https://a.123', 'https://*.example.com', 'https://crow.example.com:443', 'https://crow.example.com/path', 'https://user@crow.example.com', 'https://crow.example.com?x=1', 'https://crow.example.com#x', 'https://crow.example.com/../']) assert.throws(() => mobileRemoteConfig({ ...valid, publicOrigin }))
+  for (const loopbackPort of [undefined, 0, 1023, 65536, 47323.5, '47323']) assert.throws(() => mobileRemoteConfig({ ...valid, loopbackPort }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, remoteProvider: 'unknown' }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, publicOrigin: undefined }))
+  assert.throws(() => mobileRemoteConfig({ ...valid, remoteProvider: undefined }))
+})
+
+test('relay configuration accepts only an exact WSS tunnel endpoint', () => {
+  assert.equal(mobileRelayConfig({ address: '192.168.1.8', relayUrl: 'wss://relay.example.com/v1/tunnel' }), 'wss://relay.example.com/v1/tunnel')
+  assert.equal(mobileRelayConfig({ address: '192.168.1.8' }), undefined)
+  for (const relayUrl of ['ws://relay.example.com/v1/tunnel', 'wss://relay.example.com/', 'wss://user:pass@relay.example.com/v1/tunnel', 'wss://relay.example.com/v1/tunnel?token=x', 'wss://relay.example.com/v1/tunnel#x']) assert.throws(() => mobileRelayConfig({ address: '192.168.1.8', relayUrl }), /WSS exacta/)
+})
+
+test('stable loopback bind is exclusive and never silently retries a different port', async () => {
+  const server = new EventEmitter(), calls = []
+  server.listen = (options) => { calls.push(options); server.emit('error', Object.assign(new Error('occupied'), { code: 'EADDRINUSE' })) }
+  await assert.rejects(listenMobileLoopback(server, 47323), /47323.*ocupado/)
+  assert.deepEqual(calls, [{ port: 47323, host: '127.0.0.1', exclusive: true }])
+  server.listen = (options, ready) => { calls.push(options); ready() }
+  await listenMobileLoopback(server, 47324)
+  assert.deepEqual(calls[1], { port: 47324, host: '127.0.0.1', exclusive: true })
+})
+
+test('real local bind stays loopback and an occupied port is never replaced', async t => {
+  const owner = createServer(), other = createServer()
+  t.after(async () => { if (owner.listening) await new Promise(ok => owner.close(ok)); if (other.listening) await new Promise(ok => other.close(ok)) })
+  await listenMobileLoopback(owner, 0)
+  const address = owner.address()
+  assert.equal(address.address, '127.0.0.1')
+  await assert.rejects(listenMobileLoopback(other, address.port), /ocupado/)
+  assert.equal(other.listening, false)
+})
+
+test('Pangolin invitation contains only provider flags, never proxy credentials', async () => {
+  const c = fixture()
+  c.gateway.endpoints.push({ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true })
+  const invite = await c.gateway.invite({ projectIds: ['p1'] }, 1)
+  assert.equal(invite.endpoints[1].proxyAuthRequired, true)
+  assert.doesNotMatch(JSON.stringify(c.gateway.status()), /tokenId|proxyAuth"|P-Access-Token|credential/)
+})
+
+test('v2 enrollment cannot downgrade; signed fresh proof renews only scoped authorization', async () => {
+  const c = fixture(), keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const publicKey = keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+  const invitation = await c.gateway.invite({ projectIds: ['p1'], capabilities: { input: true } })
+  assert.equal(invitation.version, 2)
+  assert.equal((await c.request('/api/v1/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Downgrade' })).status, 401)
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey })
+  assert.equal(paired.status, 200); assert.equal(paired.body.version, 2); assert.equal(paired.body.device.expiresAt, null)
+  const boot = await c.request('/api/v1/bootstrap', 'GET', undefined, paired.body.credential)
+  assert.equal(boot.status, 200); assert.equal(boot.body.projects.length, 1)
+  assert.equal(JSON.stringify(c.gateway.registry.snapshot()).includes(paired.body.credential), false)
+  const id = paired.body.device.id
+  const challenge = await c.request('/api/v2/device-challenge', 'POST', { deviceId: id })
+  const signature = sign('sha256', mobileAuth.deviceProofPayload(challenge.body), keys.privateKey).toString('base64')
+  const proof = { deviceId: id, challengeId: challenge.body.challengeId, signature }
+  const renewed = await c.request('/api/v2/device-renew', 'POST', proof)
+  assert.equal(renewed.status, 200)
+  assert.equal((await c.request('/api/v2/device-renew', 'POST', proof)).status, 401)
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, renewed.body.credential)).status, 200)
+  const client = await c.socket(renewed.body.credential)
+  const stream = [...c.gateway.clients.values()][0]
+  stream.credentialExpiresAt = Date.now() - 1
+  await c.gateway.auditStreams()
+  assert.equal(client.ended, false, 'v2 trust governs an already authenticated stream, not the bearer lifetime')
+  c.hostStatus('disconnected'); c.gateway.suspendHost('host')
+  assert.equal((await c.request('/api/v2/device-challenge', 'POST', { deviceId: id })).status, 503)
+  assert.equal(c.gateway.devices().length, 1)
+  c.hostStatus('connected')
+  const again = await c.request('/api/v2/device-challenge', 'POST', { deviceId: id })
+  assert.equal(again.status, 200)
+  c.binding({ actorId: 'bob', generation: 'two', allowedRoots: ['/work'], operateOthers: false })
+  const after = { deviceId: id, challengeId: again.body.challengeId, signature: sign('sha256', mobileAuth.deviceProofPayload(again.body), keys.privateKey).toString('base64') }
+  assert.equal((await c.request('/api/v2/device-renew', 'POST', after)).status, 401)
+  assert.equal(c.gateway.devices().length, 0)
+})
+
+test('v2 terminal survives short bearer expiry, operates once, and closes on revocation or role change', async () => {
+  for (const invalidation of ['revoke', 'role']) {
+    const c = fixture(), keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+    const invitation = await c.gateway.invite({ projectIds: ['p1'], capabilities: { input: true } })
+    const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+    const client = await c.socket(paired.body.credential), stream = [...c.gateway.clients.values()][0]
+    stream.credentialExpiresAt = Date.now() - 1
+    for (const token of c.gateway.registry.access.values()) token.expiresAt = Date.now() - 1
+    assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.body.credential)).status, 401)
+    assert.equal(await c.socket(paired.body.credential), null, 'expired bearer cannot authenticate a new stream')
+    await c.gateway.auditStreams()
+    assert.equal(client.ended, false)
+    c.streams.get(stream.streamId).emit({ type: 'output', seq: 5, data: 'aGk=' })
+    client.emit('message', Buffer.from(JSON.stringify({ type: 'input', requestId: randomUUID(), data: 'aGk=' })))
+    await new Promise(ok => setImmediate(ok))
+    assert.equal(client.frames.some(frame => frame.type === 'output' && frame.seq === 5), true)
+    assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 0, 'expired WS mutation context cannot bypass renewed HTTP authorization')
+    assert.equal(client.ended, false, 'reading continues while Android renews its HTTP credential')
+    const challenge = await c.request('/api/v2/device-challenge', 'POST', { deviceId: paired.body.device.id })
+    const renewed = await c.request('/api/v2/device-renew', 'POST', { deviceId: paired.body.device.id, challengeId: challenge.body.challengeId, signature: sign('sha256', mobileAuth.deviceProofPayload(challenge.body), keys.privateKey).toString('base64') })
+    const input = { streamId: stream.streamId, requestId: randomUUID(), data: 'aGk=' }
+    assert.equal((await c.request('/api/v1/input', 'POST', input, renewed.body.credential)).status, 200)
+    assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 1, 'Android HTTP mutation is executed once after renewal')
+    if (invalidation === 'revoke') c.gateway.revoke(paired.body.device.id)
+    else { c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'admin' }); await c.gateway.auditStreams() }
+    assert.equal(client.ended, true)
+    assert.equal(c.gateway.devices().length, 0)
+  }
+})
+
+test('legacy v1 streams still close at their original credential/device TTL', async () => {
+  const c = fixture(), paired = await c.pair(), client = await c.socket(paired.credential)
+  const stream = [...c.gateway.clients.values()][0], record = c.gateway.registry.authenticate(paired.credential)
+  assert.equal(record.publicKey, undefined)
+  record.device.expiresAt = new Date(Date.now() - 1).toISOString()
+  stream.credentialExpiresAt = Date.now() - 1
+  await c.gateway.auditStreams()
+  assert.equal(client.ended, true)
+  assert.equal(c.gateway.registry.authenticate(paired.credential), undefined)
+})
+
+test('v2 pause clears short credentials/challenges without revoking key trust', async () => {
+  const c = fixture(), keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'] })
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+  const challenge = await c.request('/api/v2/device-challenge', 'POST', { deviceId: paired.body.device.id })
+  await c.gateway.stop()
+  assert.equal(c.gateway.registry.authenticate(paired.body.credential), undefined)
+  assert.equal(c.gateway.devices().length, 1)
+  const signature = sign('sha256', mobileAuth.deviceProofPayload(challenge.body), keys.privateKey).toString('base64')
+  assert.throws(() => c.gateway.registry.prove(paired.body.device.id, challenge.body.challengeId, signature))
+})
+
+test('v2 role promotion/demotion with unchanged actor and roots revokes trust rather than inheriting visibility', async () => {
+  for (const [before, after] of [['member', 'admin'], ['admin', 'member']]) {
+    const c = fixture(), keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+    const binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false }
+    c.binding({ ...binding, role: before })
+    const invitation = await c.gateway.invite({ projectIds: ['p1'] })
+    const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+    c.binding({ ...binding, role: after })
+    assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.body.credential)).status, 401)
+    assert.equal(c.gateway.devices().length, 0)
+  }
+})
+
+async function keyFixture() {
+  const c = fixture(), keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'], capabilities: { input: true, create: true, close: true } })
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+  return { ...c, credential: paired.body.credential }
+}
+test('all HTTP v2 mutations require requestId and replay the same result without reexecution', async () => {
+  for (const route of ['sessions', 'wake', 'close', 'input', 'resize']) {
+    const c = await keyFixture(), client = await c.socket(c.credential), streamId = client.frames[0].streamId
+    const body = route === 'sessions' ? { hostId: 'host', projectId: 'p1', agent: 'codex' } : route === 'input' ? { streamId, data: 'aGk=' } : route === 'resize' ? { streamId, cols: 80, rows: 24 } : { hostId: 'host', sessionId: SESSION }
+    assert.equal((await c.request(`/api/v1/${route}`, 'POST', body, c.credential)).status, 400)
+    const input = { ...body, requestId: randomUUID() }
+    const results = await Promise.all([c.request(`/api/v1/${route}`, 'POST', input, c.credential), c.request(`/api/v1/${route}`, 'POST', input, c.credential)])
+    assert.equal(results[0].status, 200); assert.deepEqual(results[0].body, results[1].body)
+    if (route === 'close') c.sessions([]) // The original session may already be gone on replay.
+    const replay = await c.request(`/api/v1/${route}`, 'POST', input, c.credential)
+    assert.equal(replay.status, 200); assert.deepEqual(replay.body, results[0].body)
+    assert.equal(c.calls.filter(call => call.stream || call.method === 'POST' || call.method === 'DELETE').length, 1)
+    assert.equal((await c.request(`/api/v1/${route}`, 'POST', { ...input, extra: 'changed' }, c.credential)).status, 409)
+  }
+})
+test('HTTP v2 ambiguous execution caches a tombstone rather than retrying the operation', async () => {
+  const c = await keyFixture()
+  c.apiHook(method => { if (method === 'POST') throw new Error('uncertain private failure') })
+  const body = { hostId: 'host', projectId: 'p1', agent: 'claude', requestId: randomUUID() }
+  const first = await c.request('/api/v1/sessions', 'POST', body, c.credential)
+  assert.equal(first.status, 502)
+  const replay = await c.request('/api/v1/sessions', 'POST', body, c.credential)
+  assert.deepEqual(replay.body, first.body); assert.equal(replay.status, 502)
+  assert.equal(c.calls.filter(call => call.method === 'POST').length, 1)
+  assert.equal(JSON.stringify(first.body).includes('private failure'), false)
+})
+test('WS v2 uses the same contextual ledger, including missing IDs, concurrent replay and HTTP replay', async () => {
+  const c = await keyFixture(), client = await c.socket(c.credential), streamId = client.frames[0].streamId
+  const send = frame => client.emit('message', Buffer.from(JSON.stringify(frame)))
+  send({ type: 'input', data: 'aGk=' }); await new Promise(ok => setImmediate(ok))
+  assert.equal(c.calls.filter(call => call.stream).length, 0)
+  assert.equal(client.ended, false)
+  assert.equal(client.frames.some(frame => frame.type === 'mutation-result' && frame.status === 400), true)
+  const requestId = randomUUID(), frame = { type: 'input', requestId, data: 'aGk=' }
+  send(frame); send(frame); await new Promise(ok => setImmediate(ok))
+  assert.equal(c.calls.filter(call => call.stream).length, 1)
+  const replay = await c.request('/api/v1/input', 'POST', { requestId, streamId, data: 'aGk=' }, c.credential)
+  assert.equal(replay.status, 200); assert.equal(c.calls.filter(call => call.stream).length, 1)
+  send({ ...frame, data: 'd3Jvbmc=' }); await new Promise(ok => setImmediate(ok))
+  assert.equal(client.frames.some(value => value.type === 'mutation-result' && value.status === 409), true)
+  assert.equal(c.calls.filter(call => call.stream).length, 1)
+})
+test('bootstrap advertises gateway support separately from per-device grants', async () => {
+  const c = fixture(), paired = await c.pair()
+  const boot = await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)
+  assert.deepEqual(boot.body.supportedFeatures, {
+    sessionList: true,
+    terminalStream: true,
+    terminalInput: true,
+    sessionCreate: true,
+    sessionWake: true,
+    sessionClose: true,
+    notices: true,
+    quotas: true,
+    pushNotifications: false,
+    structuredChat: false,
+    approvalActions: false,
+    fileBrowser: false,
+    gitStatus: false,
+  })
+  assert.deepEqual(boot.body.device.capabilities, { input: false, create: false, close: false, quotas: false })
+  const granted = await c.pair({ input: true, create: true, close: true, quotas: true })
+  const grantedBoot = await c.request('/api/v1/bootstrap', 'GET', undefined, granted.credential)
+  assert.deepEqual(grantedBoot.body.supportedFeatures, boot.body.supportedFeatures)
+  assert.deepEqual(grantedBoot.body.device.capabilities, { input: true, create: true, close: true, quotas: true })
+})
+
+test('native errors expose stable codes without changing their HTTP status or message', async () => {
+  const c = fixture()
+  const origin = await c.request('/api/v1/bootstrap', 'GET', undefined, undefined, { origin: 'https://attacker.invalid' })
+  assert.equal(origin.status, 403)
+  assert.equal(origin.body.error, 'Origen inválido.')
+  assert.equal(origin.body.code, 'INVALID_ORIGIN')
+
+  const unavailable = fixture()
+  await unavailable.gateway.stop()
+  const paused = await unavailable.request('/api/v1/bootstrap')
+  assert.equal(paused.status, 503)
+  assert.equal(paused.body.error, 'Gateway pausado.')
+  assert.equal(paused.body.code, 'GATEWAY_UNAVAILABLE')
+
+  const paired = await c.pair()
+  const rejected = await c.request('/api/v1/bootstrap', 'GET', undefined, 'f'.repeat(64))
+  assert.equal(rejected.status, 401)
+  assert.equal(rejected.body.error, 'Dispositivo revocado o identidad modificada. Volvé a emparejar.')
+  assert.equal(rejected.body.code, 'DEVICE_REJECTED')
+
+  c.hostStatus('disconnected')
+  const hostDown = await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)
+  assert.equal(hostDown.status, 503)
+  assert.equal(hostDown.body.error, 'Acceso pausado. Reconectá el host o el gateway en Windows.')
+  assert.equal(hostDown.body.code, 'HOST_UNAVAILABLE')
+  c.hostStatus('connected')
+
+  const grant = await c.request('/api/v1/quotas', 'GET', undefined, paired.credential)
+  assert.equal(grant.status, 403)
+  assert.equal(grant.body.error, 'Cuotas no habilitadas para este dispositivo.')
+  assert.equal(grant.body.code, 'GRANT_REQUIRED')
+
+  const writeGrant = await c.request('/api/v1/sessions', 'POST', { hostId: 'host', projectId: 'p1', agent: 'claude' }, paired.credential)
+  assert.equal(writeGrant.status, 403)
+  assert.equal(writeGrant.body.error, 'Creación no habilitada.')
+  assert.equal(writeGrant.body.code, 'GRANT_REQUIRED')
+
+  const missing = await c.request('/api/v1/does-not-exist', 'GET', undefined, paired.credential)
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error, 'Ruta no encontrada.')
+  assert.equal(missing.body.code, 'NOT_FOUND')
+
+  const malformed = await c.request('/api/v1/input', 'POST', '{invalid', paired.credential)
+  assert.equal(malformed.status, 400)
+  assert.equal(malformed.body.error, 'Solicitud rechazada. Revisá el emparejamiento y los permisos.')
+  assert.equal(malformed.body.code, 'INVALID_REQUEST')
 })

@@ -1,0 +1,69 @@
+services:
+  mobile-relay-deps:
+    image: node:22-alpine
+    working_dir: /app
+    command: ["npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"]
+    environment:
+      npm_config_cache: /tmp/npm-cache
+    volumes:
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - mobile-relay-node-modules:/app/node_modules
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 32
+    restart: "no"
+
+  mobile-relay:
+    image: node:22-alpine
+    working_dir: /app
+    command: ["node", "src/server.mjs"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      MAX_ROUTES: "2"
+      MAX_DEVICE_STREAMS_PER_ROUTE: "4"
+    depends_on:
+      mobile-relay-deps:
+        condition: service_completed_successfully
+    volumes:
+      - ./src:/app/src:ro
+      - mobile-relay-node-modules:/app/node_modules:ro
+    networks:
+      relay-internal:
+        ipv4_address: 172.30.254.2
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 32
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.status === 204 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  relay-internal:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.254.0/28
+
+volumes:
+  mobile-relay-node-modules:

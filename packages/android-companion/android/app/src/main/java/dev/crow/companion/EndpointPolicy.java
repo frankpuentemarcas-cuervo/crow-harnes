@@ -4,18 +4,36 @@ import java.net.URI;
 import java.security.MessageDigest;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import android.util.Base64;
 import javax.net.ssl.X509TrustManager;
 import org.json.JSONObject;
 
 /** Pure endpoint/pin policy; never installs a process-wide trust manager. */
 final class EndpointPolicy {
     static String origin(JSONObject endpoint) throws Exception {
+        java.util.Iterator<String> fields = endpoint.keys();
+        while (fields.hasNext()) if (!fields.next().matches("kind|url|certSHA256|provider|proxyAuthRequired|relayUrl|relayRoute")) throw new IllegalArgumentException("El endpoint no puede incluir claves del recurso.");
         String raw = endpoint.getString("url");
         URI uri = new URI(raw);
         if (!"https".equals(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null || !(uri.getRawPath().isEmpty() || "/".equals(uri.getRawPath())) || (uri.getPort() != -1 && (uri.getPort() < 1 || uri.getPort() > 65535))) throw new IllegalArgumentException("Exact HTTPS origin required");
         String kind = endpoint.getString("kind");
-        if (!kind.equals("remote-public") && !kind.equals("lan-pinned")) throw new IllegalArgumentException("Invalid endpoint kind");
-        if (kind.equals("lan-pinned") && !endpoint.optString("certSHA256").matches("(?i)([0-9a-f]{2}:){31}[0-9a-f]{2}")) throw new IllegalArgumentException("Missing SHA256 pin");
+        if (!kind.equals("remote-public") && !kind.equals("lan-pinned") && !kind.equals("relay")) throw new IllegalArgumentException("Invalid endpoint kind");
+        if ((kind.equals("lan-pinned") || kind.equals("relay")) && !endpoint.optString("certSHA256").matches("(?i)([0-9a-f]{2}:){31}[0-9a-f]{2}")) throw new IllegalArgumentException("Missing SHA256 pin");
+        if (kind.equals("relay")) {
+            String route = endpoint.optString("relayRoute");
+            boolean validRoute = false;
+            if (route.matches("[A-Za-z0-9_-]{43}")) {
+                try { byte[] decoded = Base64.decode(route, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP); validRoute = decoded.length == 32 && route.equals(Base64.encodeToString(decoded, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP)); }
+                catch (IllegalArgumentException ignored) { validRoute = false; }
+            }
+            if (!"127.0.0.1".equals(uri.getHost()) || uri.getPort() < 1 || !validRoute) throw new IllegalArgumentException("Configuración de relay inválida.");
+            URI relay = new URI(endpoint.optString("relayUrl"));
+            if (!"wss".equals(relay.getScheme()) || relay.getHost() == null || relay.getUserInfo() != null || !"/v1/tunnel".equals(relay.getRawPath()) || relay.getRawQuery() != null || relay.getRawFragment() != null || relay.getPort() == 0 || relay.getPort() > 65535) throw new IllegalArgumentException("URL de relay inválida.");
+        } else if (endpoint.has("relayUrl") || endpoint.has("relayRoute")) throw new IllegalArgumentException("Relay configuration is valid only for relay endpoints");
+        if (endpoint.has("provider") || endpoint.has("proxyAuthRequired")) {
+            if (!"pangolin".equals(endpoint.opt("provider")) || !Boolean.TRUE.equals(endpoint.opt("proxyAuthRequired")) || !kind.equals("remote-public") || !raw.matches("https://[a-z0-9.-]+/?") || uri.getHost().length() > 253 || !uri.getHost().contains(".") || !uri.getHost().matches(".*\\.[a-z]{2,63}") || uri.getHost().matches(".*\\.(localhost|local|internal)")) throw new IllegalArgumentException("Pangolin requiere un dominio HTTPS público exacto y autenticación nativa.");
+            for (String part : uri.getHost().split("\\.", -1)) if (!part.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")) throw new IllegalArgumentException("Dominio Pangolin inválido.");
+        }
         return raw.endsWith("/") ? raw.substring(0, raw.length() - 1) : raw;
     }
     static X509TrustManager pinnedTrust(String expected) {

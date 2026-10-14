@@ -1,7 +1,7 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core'
 import type { MobileDevice, MobileEnrollment, MobileEndpoint } from '../../../src/shared/mobile-companion'
 
-export interface GatewayProfile { id: string; gatewayId: string; endpoint: MobileEndpoint; device: MobileDevice }
+export interface GatewayProfile { id: string; version?: 2; gatewayId: string; endpoint: MobileEndpoint; device: MobileDevice }
 export interface StreamEvent { connectionId: string; profileId: string; status?: 'connected' | 'disconnected' | 'revoked'; data?: string }
 interface NativeGateway {
   pair(input: { enrollment: MobileEnrollment; endpointIndex: number; deviceName: string; fingerprintConfirmed: boolean }): Promise<{ profile: GatewayProfile }>

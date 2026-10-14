@@ -8,6 +8,8 @@ import { ConnectionDiagnosticsStore } from './connection-diagnostics'
 import { TerminalCheckpointStore } from './terminal-checkpoint-store'
 import { PassphraseVault } from './passphrase-vault'
 import { MobileGateway, mobileAddresses } from './mobile-gateway'
+import { MobileRelayClient } from './mobile-relay-client'
+import { MobileHostUnavailableError, MobileAuthorizationChangedError } from './mobile-device-auth'
 import { Store } from './store'
 import { AlertSoundStore } from './alert-sound-store'
 import { AlertAISettingsStore } from './alert-ai-settings'
@@ -81,7 +83,7 @@ function connection(hostId: string): Connection {
   if (!host) throw new Error('Host desconocido.')
   let current = connections.get(hostId)
   if (!current) {
-    current = new Connection(host, store, vault, (id, status) => { if (status !== 'connected') invalidateMobileHost(id); erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled(), undefined, entry => connectionDiagnostics.record({ ...entry, hostId }))
+    current = new Connection(host, store, vault, (id, status) => { if (status !== 'connected') suspendMobileHost(id); erpProjects = []; send('crow:status', { hostId: id, status }); if (status === 'connected') void erpOperation(() => undefined) }, (id, event) => attention.receive(id, event), (id) => send('crow:passphrase-required', id), () => attention.enabled(), undefined, entry => connectionDiagnostics.record({ ...entry, hostId }))
     connections.set(hostId, current)
   }
   return current
@@ -182,20 +184,32 @@ function invalidateMobileHost(hostId: string): void {
   mobile?.invalidateHost(hostId)
 }
 
+function suspendMobileHost(hostId: string): void {
+  mobileActorRoots.delete(hostId)
+  mobile?.suspendHost(hostId)
+}
+
 async function mobileAuthSnapshot(hostId: string): Promise<MobileActorBinding> {
   const host = store.host(hostId), current = connections.get(hostId)
-  if (!host || current?.status() !== 'connected') throw new Error('Conectá el host en Windows antes de vincular Android.')
+  if (!host) throw new MobileAuthorizationChangedError('Host no configurado.')
+  if (current?.status() !== 'connected') throw new MobileHostUnavailableError('Conectá el host en Windows antes de vincular Android.')
   const revision = mobileHostGenerations.get(hostId) || 0
   const accessRevision = accessGeneration
-  const status = await current.accessStatus(), identity = await current.accessIdentity()
-  if (revision !== (mobileHostGenerations.get(hostId) || 0) || accessRevision !== accessGeneration || connections.get(hostId) !== current || current.status() !== 'connected') throw new Error('La identidad cambió. Generá otra invitación.')
-  if (!status.enabled || identity.role === 'legacy') throw new Error('Android requiere acceso individual Crow. Activá Acceso individual e importá tu credencial en Windows.')
-  if (identity.revoked || !identity.id || !Array.isArray(identity.allowedRoots)) throw new Error('La identidad Crow no está autorizada.')
+  let status: Awaited<ReturnType<Connection['accessStatus']>>, identity: Awaited<ReturnType<Connection['accessIdentity']>>
+  try { status = await current.accessStatus(); identity = await current.accessIdentity() }
+  catch (error) {
+    if ([401, 403, 404].includes((error as { status?: number })?.status || 0)) throw new MobileAuthorizationChangedError('La identidad Crow fue rechazada o el servicio ya no admite acceso individual.')
+    throw new MobileHostUnavailableError('No se pudo comprobar la identidad del host. El acceso está pausado.')
+  }
+  if (revision !== (mobileHostGenerations.get(hostId) || 0) || accessRevision !== accessGeneration || connections.get(hostId) !== current) throw new MobileAuthorizationChangedError('La identidad cambió. Generá otra invitación.')
+  if (current.status() !== 'connected') throw new MobileHostUnavailableError('Conectá el host en Windows antes de vincular Android.')
+  if (!status.enabled || identity.role === 'legacy') throw new MobileAuthorizationChangedError('Android requiere acceso individual Crow. Activá Acceso individual e importá tu credencial en Windows.')
+  if (identity.revoked || !identity.id || !Array.isArray(identity.allowedRoots)) throw new MobileAuthorizationChangedError('La identidad Crow no está autorizada.')
   const principalRoots = identity.allowedRoots.filter(root => typeof root === 'string' && root.startsWith('/') && posix.normalize(root) === root)
   const allowedRoots = [...new Set(store.snapshot().projects.filter(project => project.hostId === hostId && project.root.startsWith('/') && posix.normalize(project.root) === project.root && (identity.role === 'admin' || principalRoots.some(root => project.root === root || project.root.startsWith(root.replace(/\/$/, '') + '/')))).map(project => project.root))]
-  if (!allowedRoots.length) throw new Error('La identidad Crow no tiene proyectos permitidos.')
+  if (!allowedRoots.length) throw new MobileAuthorizationChangedError('La identidad Crow no tiene proyectos permitidos.')
   mobileActorRoots.set(hostId, allowedRoots)
-  return { actorId: identity.id, generation: JSON.stringify([revision, host.target, host.port, host.remotePort, host.identity || '']), allowedRoots, operateOthers: identity.role === 'admin' && identity.operateOthers === true }
+  return { actorId: identity.id, generation: JSON.stringify([mobile?.hostAuthorizationEpoch?.(hostId) ?? revision, host.target, host.port, host.remotePort, host.identity || '']), allowedRoots, operateOthers: identity.role === 'admin' && identity.operateOthers === true, role: identity.role }
 }
 
 function mobileWorkspaceSnapshot(): SavedState {
@@ -550,7 +564,7 @@ app.whenReady().then(() => {
   auditTimer.unref()
   attention = new AttentionService(store, alertAISettings, onNotice, (status) => send('crow:alert-ai-status', status), undefined, Date.now, alertAudit)
   vault = new PassphraseVault()
-  mobile = new MobileGateway({ snapshot: mobileWorkspaceSnapshot, connection, authSnapshot: mobileAuthSnapshot, quotas: mobileCachedQuotas, notices: mobileCachedNotices })
+  mobile = new MobileGateway({ snapshot: mobileWorkspaceSnapshot, configurationSnapshot: () => store.snapshot(), connection, authSnapshot: mobileAuthSnapshot, quotas: mobileCachedQuotas, notices: mobileCachedNotices, relayClientFactory: options => new MobileRelayClient(options) })
   registerIPC()
   createWindow()
   configureUpdater()
