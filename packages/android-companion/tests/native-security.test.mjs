@@ -29,7 +29,7 @@ test('bundled UI only, camera user gesture, no fake keyboard/direct fetch creden
   assert.match(config, /allowNavigation: \[\]/); assert.doesNotMatch(config, /server:\s*\{[^}]*\burl:/)
   assert.match(main, /CapacitorBarcodeScanner\.scanBarcode/); assert.match(main, /onClick=\{\(\) => void scan\(\)\}/)
   assert.doesNotMatch(main + terminal, /localStorage|sessionStorage|fetch\(|new WebSocket/)
-  assert.match(terminal, /from: cursor\.seq/); assert.match(terminal, /Adaptar terminal/); assert.match(terminal, /PasteConfirmation/)
+  assert.match(terminal, /from: cursor\.seq/); assert.match(terminal, /Ajustar \+ Windows/); assert.match(terminal, /PasteConfirmation/)
   assert.match(terminal, /cursor\.lastGap/)
   assert.match(terminal, /role="status" aria-live="polite" aria-atomic="true"[^>]*>Parte de la salida anterior no se pudo recuperar/)
 })

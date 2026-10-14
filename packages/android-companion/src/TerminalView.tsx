@@ -6,12 +6,12 @@ import { App } from '@capacitor/app'
 import { Keyboard } from '@capacitor/keyboard'
 import type { MobileSession } from '../../../src/shared/mobile-companion'
 import { Gateway, type GatewayProfile } from './native'
-import { OutputCursor, encodeInput, decodeOutput, mayOperate, inputByteLength, MAX_INPUT_BYTES, agentLabel } from './protocol.mjs'
+import { OutputCursor, encodeInput, decodeOutput, mayOperate, inputByteLength, MAX_INPUT_BYTES, agentLabel, terminalTitle } from './protocol.mjs'
 import '@xterm/xterm/css/xterm.css'
 
 export function TerminalView({ profile, hostId, session, onBack, onError, onState }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onError(message: string): void; onState(info: MobileSession): void }) {
   const surface = useRef<HTMLDivElement>(null), terminal = useRef<Terminal | null>(null), fit = useRef<FitAddon | null>(null), connection = useRef(''), live = useRef(false)
-  const [connected, setConnected] = useState(false), [outputGap, setOutputGap] = useState(false), [prompt, setPrompt] = useState(''), [pending, setPending] = useState(false), [paste, setPaste] = useState<string | null>(null)
+  const [connected, setConnected] = useState(false), [streamState, setStreamState] = useState<'connecting' | 'connected' | 'reconnecting' | 'disconnected'>('connecting'), [resizeMessage, setResizeMessage] = useState(''), [outputGap, setOutputGap] = useState(false), [prompt, setPrompt] = useState(''), [pending, setPending] = useState(false), [paste, setPaste] = useState<string | null>(null)
   const canInput = mayOperate(session, profile.device), writable = useRef(canInput)
   writable.current = canInput
   async function send(text: string) {
@@ -31,25 +31,25 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
     function schedule() { if (disposed || !active) return; clearTimeout(retryTimer); retryTimer = setTimeout(() => void connect(), Math.min(15000, 1000 * 2 ** Math.min(retries++, 4))) }
     async function connect() {
       if (disposed || !active) return
-      detach(); const id = crypto.randomUUID(); connection.current = id
+      detach(); setStreamState(retries ? 'reconnecting' : 'connecting'); const id = crypto.randomUUID(); connection.current = id
       try { await Gateway.openStream({ profileId: profile.id, hostId, sessionId: session.id, from: cursor.seq, connectionId: id }); if (disposed || connection.current !== id) await Gateway.closeStream({ connectionId: id }) }
-      catch (error) { if (disposed || connection.current !== id) return; onError(String(error)); if (/revocado|vencido|Profile forgotten/.test(String(error))) { active = false; return } schedule() }
+      catch (error) { if (disposed || connection.current !== id) return; onError(String(error)); if (/revocado|vencido|Profile forgotten/.test(String(error))) { active = false; setStreamState('disconnected'); return } setStreamState('reconnecting'); schedule() }
     }
     async function setup() {
       handles.push(await Gateway.addListener('stream', event => {
         if (disposed || event.profileId !== profile.id || event.connectionId !== connection.current) return
-        if (event.status === 'revoked') { active = false; detach(); onError('Vínculo revocado o vencido. Volvé a vincular desde Windows.'); return }
-        if (event.status === 'disconnected') { live.current = false; setConnected(false); schedule(); return }
+        if (event.status === 'revoked') { active = false; detach(); setStreamState('disconnected'); onError('Vínculo revocado o vencido. Volvé a vincular desde Windows.'); return }
+        if (event.status === 'disconnected') { live.current = false; setConnected(false); setStreamState('reconnecting'); schedule(); return }
         if (!event.data) return
         try {
           const frame = JSON.parse(event.data)
-          if (frame.type === 'ready') { retries = 0; live.current = true; setConnected(true); return }
+          if (frame.type === 'ready') { retries = 0; live.current = true; setConnected(true); setStreamState('connected'); return }
           if (cursor.accept(frame)) {
             instance.write(decodeOutput(frame.data))
             if (cursor.lastGap) setOutputGap(true)
           }
           if (frame.type === 'state' && frame.info) onState(frame.info)
-          if (frame.type === 'disconnected') { detach(); schedule() }
+          if (frame.type === 'disconnected') { detach(); setStreamState('reconnecting'); schedule() }
         } catch { onError('Crow envió una trama inválida. Se desconectó la terminal.'); detach(); schedule() }
       }))
       handles.push(await App.addListener('appStateChange', state => { active = state.isActive; clearTimeout(retryTimer); if (!active) detach(); else void connect() }))
@@ -66,18 +66,34 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
   }, [profile.id, hostId, session.id])
   useEffect(() => { if (terminal.current) terminal.current.options.disableStdin = !canInput }, [canInput])
   async function submit() { if (!prompt || pending) return; setPending(true); const text = prompt; if (await send(text + '\r')) setPrompt(previous => previous === text ? '' : previous); setPending(false) }
+  async function resizeRemote() {
+    const term = terminal.current
+    if (!term || !connected) return
+    try { await Gateway.send({ connectionId: connection.current, type: 'resize', cols: term.cols, rows: term.rows }); setResizeMessage('Tamaño ajustado para Android y Crow Windows.') }
+    catch { onError('No se pudo ajustar el tamaño compartido. La terminal sigue abierta; reintentá cuando esté conectada.') }
+  }
   return <section className="terminal-page">
-    <div className="row"><button onClick={onBack}>← Volver</button><div><strong>{agentLabel(session.agent)} · {session.name || session.id.slice(0, 8)}</strong><small role="status">{connected ? canInput ? 'Conectada · mismo proceso' : 'Solo lectura' : 'Desconectada · reanudando salida'}</small></div></div>
+    <div className="terminal-heading">
+      <button className="terminal-back" onClick={onBack} aria-label="Volver a las terminales">← <span>Volver</span></button>
+      <div className="terminal-identity" title={session.name || `${agentLabel(session.agent)} · ${session.id}`}>
+        <strong>{terminalTitle(session)}</strong>
+        <small>{session.name ? `${agentLabel(session.agent)} · ${session.id.slice(0, 8)}` : `Sesión ${session.id.slice(0, 8)}`}</small>
+      </div>
+      <span className={`terminal-status ${streamState === 'connected' ? 'is-connected' : 'is-reconnecting'}`} role="status">{streamState === 'connected' ? canInput ? 'Conectada' : 'Solo lectura' : streamState === 'connecting' ? 'Conectando…' : streamState === 'disconnected' ? 'Sin conexión' : 'Reconectando…'}</span>
+    </div>
+    {resizeMessage && <p className="terminal-resize-notice" role="status">{resizeMessage}</p>}
     <div className="terminal-surface" ref={surface} aria-label="Salida de terminal remota" />
     {outputGap && <p className="terminal-recovery-warning" role="status" aria-live="polite" aria-atomic="true">Parte de la salida anterior no se pudo recuperar. El búfer remoto es limitado; la terminal continúa desde la salida disponible.</p>}
-    <div className="keys" aria-label="Acciones de terminal">
+    <div className="keys" aria-label="Teclas rápidas">
       {[['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl+C', '\x03'], ['↑', '\x1b[A'], ['↓', '\x1b[B']].map(([label, data]) => <button key={label} disabled={!connected || !canInput} onClick={() => void send(data)}>{label}</button>)}
       <button onClick={() => terminal.current?.focus()} disabled={!canInput}>Teclado</button>
+    </div>
+    <div className="terminal-tools" aria-label="Herramientas de terminal">
       <button onClick={() => { const text = terminal.current?.getSelection(); if (text) void Clipboard.write({ string: text }).catch(error => onError(String(error))); else onError('Seleccioná texto de la salida primero.') }}>Copiar selección</button>
       <button disabled={!connected || !canInput} onClick={() => void Clipboard.read().then(value => setPaste(value.value)).catch(error => onError(String(error)))}>Pegar…</button>
-      <button disabled={!connected || !canInput} onClick={() => { const term = terminal.current; if (term) void Gateway.send({ connectionId: connection.current, type: 'resize', cols: term.cols, rows: term.rows }).catch(error => onError(String(error))) }}>Adaptar terminal</button>
+      <button className="terminal-resize" title="Ajusta las filas y columnas compartidas también en Crow Windows" disabled={!connected || !canInput} onClick={() => void resizeRemote()}>Ajustar + Windows</button>
     </div>
-    <small>Adaptar cambia el tamaño compartido también en Windows. Volver solo desconecta; no cierra el proceso.</small>
+    <details className="terminal-help"><summary>Acerca de esta terminal</summary><p>El agente sigue en ejecución aunque vuelvas. “Ajustar tamaño” adapta la sesión en Android y Crow Windows.</p></details>
     {canInput && <form className="compose" onSubmit={event => { event.preventDefault(); if (prompt.includes('\n')) setPaste(prompt + '\r'); else void submit() }}><label className="sr-only" htmlFor="prompt">Mensaje al agente</label><textarea id="prompt" rows={2} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Escribí al agente…" /><button className="primary" disabled={!connected || pending || !prompt}>Enviar</button></form>}
     {paste !== null && <PasteConfirmation text={paste} onCancel={() => setPaste(null)} onConfirm={() => { const text = paste; setPaste(null); void send(text).then(sent => { if (sent) setPrompt('') }) }} />}
   </section>

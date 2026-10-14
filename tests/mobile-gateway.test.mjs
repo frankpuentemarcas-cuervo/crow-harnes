@@ -35,7 +35,7 @@ const source = ts('../src/main/mobile-gateway.ts')
 const { MobileGateway, mobileRemoteConfig, mobileRelayConfig, listenMobileLoopback } = await import(dataURL(source))
 const SESSION = 'a'.repeat(32), FOREIGN = 'b'.repeat(32), OUTSIDE = 'c'.repeat(32)
 function fixture() {
-  const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: {}, notices: [] }
+  const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: { [`host:${SESSION}`]: 'Mi terminal de QA', [`host:${FOREIGN}`]: 'Sesión privada' }, notices: [] }
   let binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'member' }
   let hostStatus = 'connected'
   let sessions = [
@@ -122,6 +122,8 @@ test('read-only enrollment denies create/wake/close/quotas and returns foreign s
   const c = fixture(), paired = await c.pair()
   const result = await c.request('/api/v1/sessions?hostId=host', 'GET', undefined, paired.credential)
   assert.equal(result.body.length, 2); assert.equal(result.body.find(s => s.id === FOREIGN).canOperate, false)
+  assert.equal(result.body.find(s => s.id === SESSION).name, 'Mi terminal de QA')
+  assert.equal(result.body.find(s => s.id === FOREIGN).name, undefined, 'foreign read-only sessions must not expose saved aliases')
   assert.equal(result.body[0].root, undefined); assert.equal(result.body[0].promptCache, undefined)
   for (const route of ['wake', 'close']) assert.equal((await c.request(`/api/v1/${route}`, 'POST', { hostId: 'host', sessionId: SESSION }, paired.credential)).status, 403)
   assert.equal((await c.request('/api/v1/sessions', 'POST', { hostId: 'host', projectId: 'p1', agent: 'claude' }, paired.credential)).status, 403)

@@ -471,7 +471,10 @@ export class MobileGateway {
   private safeSession(info: SessionInfo, scopes: MobileScope[], input: boolean): MobileSession {
     const scope = scopes.find(scope => scope.root === info.root)
     if (!scope) throw new Error('Sesión fuera del proyecto autorizado.')
-    return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name: this.deps.snapshot().sessionNames[info.id], canOperate: input && this.canOperate(info, scope.binding) }
+    const ownsSession = this.canOperate(info, scope.binding)
+    const canOperate = input && ownsSession
+    const name = ownsSession ? this.deps.snapshot().sessionNames[`${scope.hostId}:${info.id}`] : undefined
+    return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate }
   }
   private canOperate(info: SessionInfo, binding: MobileActorBinding): boolean { return info.readOnly !== true && !!info.ownerId && (info.ownerId === binding.actorId || binding.operateOthers) }
   private async sessions(record: DeviceRecord, hostId: string, projectId?: string): Promise<MobileSession[]> {

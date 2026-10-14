@@ -6,7 +6,7 @@ import { CapacitorBarcodeScanner } from '@capacitor/barcode-scanner'
 import { House, Folder, Bell, Settings, RefreshCw } from 'lucide-react'
 import type { MobileBootstrap, MobileEnrollment, MobileNotice, MobileProject, MobileQuota, MobileSession } from '../../../src/shared/mobile-companion'
 import { Gateway, api, type GatewayProfile } from './native'
-import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, staleQuota, mayWake, agentLabel, sessionStateLabel, agentStateLabel, quotaStateLabel, hostStateLabel } from './protocol.mjs'
+import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, staleQuota, mayWake, agentLabel, terminalTitle, sessionStateLabel, agentStateLabel, quotaStateLabel, hostStateLabel } from './protocol.mjs'
 import { TerminalView } from './TerminalView'
 import './styles.css'
 
@@ -112,7 +112,7 @@ function MobileApp() {
     {unlinking && <ConfirmUnlink label={unlinking.length === 1 ? unlinking[0].device.label : `todos los ${unlinking.length} equipos`} busy={busy} onCancel={() => setUnlinking(null)} onConfirm={() => { const targets = [...unlinking], removed: string[] = []; setBusy(true); generation.current++; profileListGeneration.current++; void (async () => { for (const item of targets) { await Gateway.deleteProfile({ profileId: item.id }); removed.push(item.id); setProfiles(previous => previous.filter(value => value.id !== item.id)) } setUnlinking(null) })().catch(reason => fail(message(reason))).finally(() => { if (removed.includes(active.current)) changeProfile(profiles.find(item => !removed.includes(item.id))?.id || ''); setBusy(false) }) }} />}
   </div>
 }
-function SessionRow({ session, disabled, onOpen }: { session: MobileSession; disabled: boolean; onOpen(): void }) { return <button className="session" disabled={disabled} onClick={onOpen}><span><strong>{agentLabel(session.agent)} · {session.name || session.id.slice(0, 8)}</strong><small>{sessionStateLabel(session.state)} · {agentStateLabel(session.agentState)}{!session.canOperate || session.readOnly ? ' · solo lectura' : ''}</small></span><span aria-hidden="true">→</span></button> }
+function SessionRow({ session, disabled, onOpen }: { session: MobileSession; disabled: boolean; onOpen(): void }) { return <button className="session" disabled={disabled} onClick={onOpen}><span><strong>{terminalTitle(session)}</strong><small>{agentLabel(session.agent)} · {sessionStateLabel(session.state)} · {agentStateLabel(session.agentState)}{!session.canOperate || session.readOnly ? ' · solo lectura' : ''}</small></span><span aria-hidden="true">→</span></button> }
 function Enrollment({ onCancel, onError, onPaired }: { onCancel(): void; onError(message: string): void; onPaired(profiles: GatewayProfile[]): void }) {
   const [raw, setRaw] = useState(''), [invitations, setInvitations] = useState<Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }>>([]), [label, setLabel] = useState('Mi Android'), [confirmed, setConfirmed] = useState(false), [busy, setBusy] = useState(false)
   const mounted = useRef(true)

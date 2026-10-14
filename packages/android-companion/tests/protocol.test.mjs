@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { gzipSync } from 'node:zlib'
-import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, OutputCursor, encodeInput, decodeOutput, mayOperate, mayWake, staleQuota, agentLabel, sessionStateLabel, quotaStateLabel } from '../src/protocol.mjs'
+import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, OutputCursor, encodeInput, decodeOutput, mayOperate, mayWake, staleQuota, agentLabel, terminalTitle, sessionStateLabel, quotaStateLabel } from '../src/protocol.mjs'
 const valid = () => ({ version: 2, gatewayId: 'gateway-test', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: [{ kind: 'lan-pinned', url: 'https://192.168.1.10:9841', certSHA256: Array(32).fill('AB').join(':') }] })
 
 test('one QR validates every host invitation and rejects duplicate gateway identities', () => {
@@ -78,3 +78,4 @@ test('foreign/read-only terminal is fail closed despite device grant', () => { c
 test('missing quota sample is unavailable/stale, not invented 0%', () => { assert.equal(staleQuota(null), true); assert.equal(staleQuota('invalid'), true); assert.equal(staleQuota(new Date(Date.now() - 600000).toISOString()), true); assert.equal(staleQuota(new Date().toISOString()), false) })
 test('close-only device cannot wake or send despite canOperate=true', () => { const session = { canOperate: true, state: 'sleeping' }; const device = { capabilities: { close: true, input: false } }; assert.equal(mayWake(session, device), false); assert.equal(mayOperate(session, device), false); assert.equal(mayWake(session, { capabilities: { input: true } }), true) })
 test('production states/brands are Spanish and brand-cased, without raw unknown values', () => { assert.equal(agentLabel('claude'), 'Claude'); assert.equal(agentLabel('codex'), 'Codex'); assert.equal(sessionStateLabel('sleeping'), 'Suspendida'); assert.equal(quotaStateLabel('ready'), 'Actualizada'); assert.equal(quotaStateLabel('stale'), 'Desactualizada'); assert.equal(quotaStateLabel('new-unknown-state'), 'Estado no disponible') })
+test('terminal title prefers the Crow alias and falls back to agent plus a short id', () => { assert.equal(terminalTitle({ name: '  QA desplegado  ', agent: 'claude', id: '1234567890' }), 'QA desplegado'); assert.equal(terminalTitle({ agent: 'codex', id: '1234567890' }), 'Codex · 12345678') })

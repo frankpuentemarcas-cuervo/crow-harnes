@@ -217,7 +217,12 @@ function mobileWorkspaceSnapshot(): SavedState {
   const saved = store.snapshot()
   const projects = saved.projects.filter(project => connections.get(project.hostId)?.status() === 'connected' && mobileActorRoots.get(project.hostId)?.includes(project.root))
   const hosts = saved.hosts.filter(host => projects.some(project => project.hostId === host.id))
-  return { ...saved, hosts, projects, notices: [], sessionNames: {}, tabs: [], activeTabs: {}, eventCursors: {} }
+  const visibleHostIds = new Set(hosts.map(host => host.id))
+  const sessionNames = Object.fromEntries(Object.entries(saved.sessionNames).filter(([key]) => {
+    const separator = key.indexOf(':')
+    return separator > 0 && visibleHostIds.has(key.slice(0, separator))
+  }))
+  return { ...saved, hosts, projects, notices: [], sessionNames, tabs: [], activeTabs: {}, eventCursors: {} }
 }
 
 async function refreshMobileWorkspace(): Promise<void> {

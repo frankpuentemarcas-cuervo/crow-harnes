@@ -82,6 +82,7 @@ export function mayOperate(session, device) { return !!session && session.canOpe
 export function mayWake(session, device) { return mayOperate(session, device) && session.state !== 'running' }
 export function staleQuota(sampledAt, now = Date.now()) { return !sampledAt || !Number.isFinite(Date.parse(sampledAt)) || now - Date.parse(sampledAt) > 300000 }
 export function agentLabel(agent) { return agent === 'claude' ? 'Claude' : agent === 'codex' ? 'Codex' : 'Agente' }
+export function terminalTitle(session) { return typeof session?.name === 'string' && session.name.trim() ? session.name.trim() : `${agentLabel(session?.agent)} · ${String(session?.id || '').slice(0, 8)}` }
 export function sessionStateLabel(state) { return ({ running: 'Activa', sleeping: 'Suspendida', exited: 'Finalizada', interrupted: 'Interrumpida' })[state] ?? 'Estado no disponible' }
 export function agentStateLabel(state) { return ({ working: 'Trabajando', waiting: 'Esperando', completed: 'Completado', unknown: 'Estado del agente no disponible' })[state] ?? 'Estado del agente no disponible' }
 export function quotaStateLabel(state) { return ({ ready: 'Actualizada', stale: 'Desactualizada', unknown: 'Sin datos', unavailable: 'No disponible', unsupported: 'No disponible', error: 'No disponible', 'signed-out': 'Sin sesión', 'rate-limited': 'Límite temporal', 'reauth-required': 'Requiere iniciar sesión' })[state] ?? 'Estado no disponible' }
