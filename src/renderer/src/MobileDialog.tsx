@@ -18,7 +18,7 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
   const [relayUrl, setRelayUrl] = useState('')
   const [provider, setProvider] = useState<MobileRemoteProvider>('tailscale')
   const [loopbackPort, setLoopbackPort] = useState('47323')
-  const [projectIds, setProjectIds] = useState<string[]>([])
+  const [projectIds, setProjectIds] = useState<string[]>(projects.map(project => project.id))
   const [capabilities, setCapabilities] = useState(defaults)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -26,6 +26,7 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
   const [notice, setNotice] = useState('')
   const [qr, setQR] = useState('')
   const [now, setNow] = useState(Date.now())
+  const projectIdsKey = JSON.stringify(projects.map(project => project.id).sort())
   const working = useRef(false)
   const errorFocus = useRef<HTMLDivElement>(null)
   const confirm = useConfirm()
@@ -44,6 +45,7 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     }).catch(reason => { if (live) setError(String(reason)) })
     return () => { live = false }
   }, [])
+  useEffect(() => { setProjectIds(JSON.parse(projectIdsKey) as string[]) }, [projectIdsKey])
   useEffect(() => {
     let live = true
     const timer = setInterval(() => {
@@ -102,15 +104,15 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     {status.running && <><div className="mobile-credentials"><div><strong>LAN · HTTPS fijado por huella</strong><code>{status.url}</code></div>{status.loopbackUrl && <div><strong>Backend remoto · solo loopback</strong><code>{status.loopbackUrl}</code></div>}{status.relayUrl && <div><strong>Relay E2E · {status.relayState === 'connected' ? 'conectado' : status.relayState === 'reconnecting' ? 'reconectando' : 'conectando'}</strong><code>{status.relayUrl}</code></div>}</div>
       <div className="mobile-fingerprint"><strong>Huella SHA-256 del certificado LAN</strong><code>{status.fingerprint}</code></div>
       <p>Android compara esta huella antes de enviar el código. Un cambio de huella exige una nueva vinculación. El endpoint remoto usa certificados HTTPS de confianza, no una excepción global.</p>
-      <fieldset disabled={busy}><legend>Proyectos autorizados para esta invitación</legend>{projects.map(project => <label key={project.id}><input type="checkbox" checked={projectIds.includes(project.id)} onChange={event => setProjectIds(current => event.target.checked ? [...current, project.id] : current.filter(id => id !== project.id))} /> {hosts.find(host => host.id === project.hostId)?.name || project.hostId} · {project.name}</label>)}</fieldset>
+      <fieldset disabled={busy}><legend>Proyectos para esta invitación · {projectIds.length} seleccionados</legend><div className="mobile-project-actions"><button type="button" onClick={() => setProjectIds(JSON.parse(projectIdsKey) as string[])}>Seleccionar todos</button><button type="button" onClick={() => setProjectIds([])}>Quitar selección</button></div>{projects.map(project => <label key={project.id}><input type="checkbox" checked={projectIds.includes(project.id)} onChange={event => setProjectIds(current => event.target.checked ? [...current, project.id] : current.filter(id => id !== project.id))} /> {hosts.find(host => host.id === project.hostId)?.name || project.hostId} · {project.name}</label>)}</fieldset>
       <fieldset disabled={busy}><legend>Permisos del dispositivo · solo lectura por defecto</legend>{(Object.keys(labels) as (keyof MobileCapabilities)[]).map(key => <label key={key}><input type="checkbox" checked={capabilities[key]} onChange={event => setCapabilities(current => ({ ...current, [key]: event.target.checked }))} /> {labels[key]}</label>)}</fieldset>
-      <p>Requiere una identidad individual Crow vigente y permisos sobre estos proyectos. Cuotas es una autorización separada: solo lectura de valores ya almacenados en Windows, sin iniciar sesión ni consultar al proveedor.</p>
+      <p>Todos los proyectos quedan seleccionados inicialmente. Si un servidor está desconectado, la invitación igual se crea y Android lo marcará como no disponible; no se habilita acceso hasta que el host pueda validar tu identidad. Cuotas es una autorización separada.</p>
       <button className="primary-button" disabled={busy || !projectIds.length} onClick={() => void invite()}>{enrollment ? 'Renovar invitación' : 'Generar invitación Android'}</button>
       {enrollment && !expired && <div className="mobile-qr-panel"><strong>Importá este QR desde Crow Android</strong>{qr ? <img src={qr} width="256" height="256" alt="Invitación Android temporal con endpoints y huella TLS" /> : <span role="status">Generando QR…</span>}<small>Vence: {new Date(enrollment.expiresAt).toLocaleTimeString()}. No compartas capturas.</small><details><summary>Importación manual</summary><textarea readOnly aria-label="Invitación Android JSON" value={JSON.stringify(enrollment)} /></details></div>}
       {enrollment && expired && <p role="status">La invitación venció. Generá una nueva; nunca se reutiliza el código.</p>}
       {status.url && status.pairingCode && <details><summary>Navegador LAN anterior</summary><p>Verificá la huella en el navegador antes de aceptar el certificado autofirmado.</p><a href={mobilePairingURL(status.url, status.pairingCode)} target="_blank" rel="noreferrer">Abrir emparejamiento LAN de un solo uso</a></details>}
     </>}
-    <h3>Dispositivos vinculados</h3>{!status.devices?.length && <p>Ningún dispositivo vinculado. Confirmá el nombre al completar la vinculación.</p>}{status.devices?.map(device => <div key={device.id} className="mobile-credentials"><div><strong>{device.label}</strong><small>{device.expiresAt === null ? 'Confianza hasta revocación' : `Vínculo antiguo · vence ${new Date(device.expiresAt).toLocaleString()}`} · {device.projectIds.length} proyectos</small><small>{device.capabilities.input ? 'Entrada habilitada' : 'Solo lectura'} · Cuotas {device.capabilities.quotas ? 'compartidas' : 'ocultas'}</small></div><button className="danger-button" disabled={busy} onClick={() => void revoke(device.id, device.label)}>Revocar dispositivo</button></div>)}
+    <h3>Dispositivos vinculados</h3>{!status.devices?.length && <p>Ningún dispositivo vinculado. Confirmá el nombre al completar la vinculación.</p>}{status.devices?.map(device => <div key={device.id} className="mobile-credentials"><div><strong>{device.label}</strong><small>{device.expiresAt === null ? 'Confianza hasta revocación' : `Vínculo antiguo · vence ${new Date(device.expiresAt).toLocaleString()}`} · {device.projectIds.length + (device.unavailableProjects?.length || 0)} proyectos</small><small>{device.capabilities.input ? 'Entrada habilitada' : 'Solo lectura'} · Cuotas {device.capabilities.quotas ? 'compartidas' : 'ocultas'}</small></div><button className="danger-button" disabled={busy} onClick={() => void revoke(device.id, device.label)}>Revocar dispositivo</button></div>)}
     {notice && <p role="status">{notice}</p>}{error && <div ref={errorFocus} tabIndex={-1} className="inline-error" role="alert">{error}</div>}
     <div className="dialog-actions"><span /><button className="secondary-button" disabled={busy} onClick={onClose}>Cerrar</button><button className={status.running ? 'secondary-button' : 'primary-button'} disabled={busy || (!status.running && !address)} onClick={() => void toggle()}>{busy ? 'Aplicando…' : status.running ? 'Pausar acceso' : status.devices?.length ? 'Reanudar acceso' : 'Activar gateway'}</button></div>
   </Modal>

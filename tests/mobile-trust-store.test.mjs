@@ -31,6 +31,15 @@ test('encrypted mobile trust restores identity, endpoint, epochs and grants with
   assert.deepEqual(f.newStore().load(), revoked)
   assert.deepEqual(readdirSync(f.directory), ['mobile-trust.enc'])
 })
+test('encrypted trust accepts display-only projects while no server is connected', async t => {
+  const f = await fixture(t), value = snapshot(), record = value.records[0]
+  record.device.projectIds = []
+  record.device.unavailableProjects = [{ id: 'project', hostId: 'host', name: 'Offline work', availability: 'server-disconnected' }]
+  record.scopes = []
+  const store = f.newStore()
+  store.save(value)
+  assert.deepEqual(f.newStore().load(), value)
+})
 test('unavailable encryption, corrupt or unsupported stores block access without overwriting', async t => {
   const f = await fixture(t), store = f.newStore()
   store.save(snapshot()); const original = readFileSync(f.path)

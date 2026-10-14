@@ -40,7 +40,7 @@ There is no checked-in JS bundle, APK, keystore signing credential or real gatew
 ## Pairing and transport
 
 1. In Windows Crow, enable **individual user access**. Legacy/unsecured mode refuses Android enrollment; do not use a shared administrator credential.
-2. Start the Android gateway, select authorized projects and opt-in capabilities, then generate the current **version 2** invitation. It expires after five minutes, is single-use, and contains no reusable bearer credential. The current Android client rejects legacy version 1 invitations; generate a fresh QR if Windows presents one.
+2. Start the Android gateway; every project is selected by default, and you can deselect projects or capabilities before generating the current **version 2** invitation. If a host is offline, the project can still appear in Android as unavailable, but it receives no operational scope until you reconnect the host, confirm individual access, and generate a new invitation. It expires after five minutes, is single-use, and contains no reusable bearer credential. The current Android client rejects legacy version 1 invitations; generate a fresh QR if Windows presents one.
 3. Scan the QR or paste/import its complete JSON. Choose **one exact offered endpoint** explicitly. LAN and relay endpoints require comparing the full colon-delimited SHA256 certificate fingerprint with Windows and confirming it. For LAN, the leaf certificate must be unexpired and its SAN must match the selected hostname/IP.
 4. For a remote-public endpoint, native OkHttp uses system CA roots and the exact public origin configured in Windows. There is no redirect, origin-changing fallback, TLS-ignore option or direct SSH connection.
 

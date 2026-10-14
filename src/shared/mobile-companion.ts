@@ -41,12 +41,13 @@ export interface MobileEnrollmentInput { projectIds: string[]; capabilities?: Pa
 /** No reusable credential in this desktop-only, single-use invitation. */
 export interface MobileEnrollment { version: 1 | 2; gatewayId: string; invitationCode: string; expiresAt: string; endpoints: MobileEndpoint[] }
 /** null means key-based trust until explicit revocation, never a permanent bearer. */
-export interface MobileDevice { id: string; label: string; pairedAt: string; expiresAt: string | null; projectIds: string[]; capabilities: MobileCapabilities }
+export interface MobileDevice { id: string; label: string; pairedAt: string; expiresAt: string | null; projectIds: string[]; unavailableProjects?: MobileProject[]; capabilities: MobileCapabilities }
 /** generation includes host target + current credential/access epoch, never raw credentials. */
 export interface MobileActorBinding { actorId: string; generation: string; allowedRoots: string[]; operateOthers: boolean; role?: 'admin' | 'member' }
 export interface MobilePairResult { version: 1 | 2; device: MobileDevice; credential: string; credentialExpiresAt?: string; endpoints: MobileEndpoint[] }
 export interface MobileDeviceChallenge { version: 2; gatewayId: string; deviceId: string; challengeId: string; nonce: string; expiresAt: string }
-export interface MobileProject { id: string; hostId: string; name: string }
+export type MobileProjectAvailability = 'available' | 'server-disconnected' | 'authorization-required'
+export interface MobileProject { id: string; hostId: string; name: string; availability?: MobileProjectAvailability }
 export interface MobileHost { id: string; name: string; status: ConnectionStatus }
 export interface MobileSession extends Omit<SessionInfo, 'root' | 'promptCache'> { projectId: string; name?: string; canOperate: boolean }
 export interface MobileNotice { id: string; hostId: string; sessionId: string; kind: 'turn-complete' | 'process-exited'; at: string; requiresAttention?: boolean }

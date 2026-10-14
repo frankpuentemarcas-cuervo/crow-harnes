@@ -12,7 +12,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { Connection } from './connection'
 import { isPrivateLanIPv4 } from './mobile-network'
 import type { MobileStatus, SavedState, SessionInfo, TerminalFrame } from '../shared/types'
-import { MOBILE_SUPPORTED_FEATURES, type MobileActorBinding, type MobileCapabilities, type MobileDevice, type MobileEndpoint, type MobileEnrollment, type MobileEnrollmentInput, type MobileErrorCode, type MobileErrorEnvelope, type MobileNotice, type MobileQuota, type MobileSession, type MobileStartInput } from '../shared/mobile-companion'
+import { MOBILE_SUPPORTED_FEATURES, type MobileActorBinding, type MobileCapabilities, type MobileDevice, type MobileEndpoint, type MobileEnrollment, type MobileEnrollmentInput, type MobileErrorCode, type MobileErrorEnvelope, type MobileNotice, type MobileProject, type MobileQuota, type MobileSession, type MobileStartInput } from '../shared/mobile-companion'
 import { MobileDeviceRegistry, MobileHostUnavailableError, MobileAuthorizationChangedError, READ_CAPABILITIES, type DeviceRecord, type MobileScope } from './mobile-device-auth'
 import { MobileTrustStore, type MobileTrustPersistence, type MobileTrustSnapshot } from './mobile-trust-store'
 import { MobileMutationLedger, MobileMutationRejectedError, type MobileMutationContext, type MobileMutationResult, type MobileMutationRoute } from './mobile-mutation-ledger'
@@ -253,17 +253,31 @@ export class MobileGateway {
       if (value !== undefined && typeof value !== 'boolean') throw new Error('Permiso inválido.')
       capabilities[key] = value === true
     }
-    const scopes: MobileScope[] = []
+    const scopes: MobileScope[] = [], unavailableProjects: MobileProject[] = []
+    const saved = this.deps.configurationSnapshot?.() || this.deps.snapshot()
     for (const projectId of new Set(input.projectIds)) {
-      const saved = this.deps.snapshot()
       const project = saved.projects.find(project => project.id === projectId)
       if (!project) throw new Error('Proyecto no autorizado.')
-      const binding = await this.actor(project.hostId)
-      if (!binding.allowedRoots.includes(project.root)) throw new Error('Proyecto no autorizado para esta identidad.')
-      scopes.push({ projectId, hostId: project.hostId, root: project.root, hostDigest: this.hostDigest(project.hostId), binding })
+      const metadata = { id: project.id, hostId: project.hostId, name: project.name }
+      if (this.deps.connection(project.hostId).status() !== 'connected') {
+        unavailableProjects.push({ ...metadata, availability: 'server-disconnected' })
+        continue
+      }
+      try {
+        const binding = await this.actor(project.hostId)
+        if (!binding.allowedRoots.includes(project.root)) {
+          unavailableProjects.push({ ...metadata, availability: 'authorization-required' })
+          continue
+        }
+        scopes.push({ projectId, hostId: project.hostId, root: project.root, hostDigest: this.hostDigest(project.hostId), binding })
+      } catch (error) {
+        if (error instanceof MobileHostUnavailableError) unavailableProjects.push({ ...metadata, availability: 'server-disconnected' })
+        else if (error instanceof MobileAuthorizationChangedError) unavailableProjects.push({ ...metadata, availability: 'authorization-required' })
+        else throw error
+      }
     }
     await this.validateScopes(scopes)
-    return this.registry.invite({ version, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities)
+    return this.registry.invite({ version, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities, unavailableProjects)
   }
 
   async start(input: string | MobileStartInput): Promise<MobileStatus> {
@@ -374,12 +388,17 @@ export class MobileGateway {
   private sameBinding(a: MobileActorBinding, b: MobileActorBinding): boolean {
     return a.actorId === b.actorId && a.generation === b.generation && a.operateOthers === b.operateOthers && (a.role === undefined || a.role === b.role) && JSON.stringify([...a.allowedRoots].sort()) === JSON.stringify([...b.allowedRoots].sort())
   }
-  private async validateScopes(scopes: MobileScope[]): Promise<void> {
+  private async validateScopes(scopes: MobileScope[], allowUnavailable = false): Promise<void> {
     for (const scope of scopes) {
-      this.validateConfig(scope)
-      const live = await this.actor(scope.hostId)
-      this.validateConfig(scope)
-      if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió. Volvé a emparejar.')
+      try {
+        this.validateConfig(scope)
+        const live = await this.actor(scope.hostId)
+        this.validateConfig(scope)
+        if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió. Volvé a emparejar.')
+      } catch (error) {
+        if (allowUnavailable && error instanceof MobileHostUnavailableError) continue
+        throw error
+      }
     }
   }
   private validateConfig(scope: MobileScope): void {
@@ -390,9 +409,17 @@ export class MobileGateway {
     this.ensureTrust()
     if (!this.registry.active(record)) throw new Error('Emparejamiento vencido o revocado.')
     if (!this.server) throw new MobileHostUnavailableError('Gateway pausado.')
-    try { await this.validateScopes(record.scopes) } catch (error) {
-      if (error instanceof MobileAuthorizationChangedError) this.revoke(record.device.id)
-      throw error
+    for (const scope of record.scopes) {
+      try {
+        this.validateConfig(scope)
+        const live = await this.actor(scope.hostId)
+        this.validateConfig(scope)
+        if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió.')
+      } catch (error) {
+        if (error instanceof MobileHostUnavailableError) continue
+        if (error instanceof MobileAuthorizationChangedError) this.revoke(record.device.id)
+        throw error
+      }
     }
     if (!this.registry.active(record)) throw new Error('Emparejamiento revocado.')
     if (!this.server) throw new MobileHostUnavailableError('Gateway pausado.')
@@ -426,19 +453,25 @@ export class MobileGateway {
   private canOperate(info: SessionInfo, binding: MobileActorBinding): boolean { return info.readOnly !== true && !!info.ownerId && (info.ownerId === binding.actorId || binding.operateOthers) }
   private async sessions(record: DeviceRecord, hostId: string, projectId?: string): Promise<MobileSession[]> {
     const scopes = record.scopes.filter(scope => scope.hostId === hostId && (!projectId || scope.projectId === projectId))
-    if (!scopes.length) throw new Error('Proyecto no autorizado.')
+    if (!scopes.length) {
+      if (record.device.unavailableProjects?.some(project => project.hostId === hostId && (!projectId || project.id === projectId))) return []
+      throw new Error('Proyecto no autorizado.')
+    }
+    if (this.deps.connection(hostId).status() !== 'connected') return []
     const values = await this.deps.connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
     await this.validateDevice(record)
+    if (this.deps.connection(hostId).status() !== 'connected') return []
     return values.filter(info => scopes.some(scope => scope.root === info.root)).map(info => this.safeSession(info, scopes, (record.device.capabilities.input || record.device.capabilities.close)))
   }
   private async allowedSession(hostId: string, sessionId: string, record?: DeviceRecord, write = false): Promise<{ connection: Connection; info: SessionInfo }> {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
     const scopes = record ? record.scopes : this.browserScopes
     if (record) await this.validateDevice(record); else await this.browserValid()
-    const saved = this.deps.snapshot()
+    const saved = this.deps.configurationSnapshot?.() || this.deps.snapshot()
     if (!saved.hosts.some(host => host.id === hostId)) throw new Error('Host no configurado.')
     if (record && !scopes.some(scope => scope.hostId === hostId)) throw new Error('Host no autorizado.')
     const connection = this.deps.connection(hostId)
+    if (connection.status() !== 'connected') throw new MobileHostUnavailableError('Servidor desconectado en Crow para Windows.')
     const sessions = await connection.api<SessionInfo[]>('GET', '/api/sessions')
     if (record) await this.validateDevice(record); else await this.browserValid()
     const info = sessions.find(info => info.id === sessionId && (record ? scopes.some(scope => scope.hostId === hostId && scope.root === info.root) : saved.projects.some(project => project.hostId === hostId && project.root === info.root)))
@@ -518,7 +551,7 @@ export class MobileGateway {
       const label = this.string(body, 'deviceName', 80)
       try {
         const scopes = this.registry.candidate(code, req.socket.remoteAddress || '')
-        await this.validateScopes(scopes)
+        await this.validateScopes(scopes, true)
         const { record, credential } = this.registry.pair(code, label)
         json(res, 200, { version: 1, device: record.device, credential, endpoints: this.endpoints })
       } catch (error) { const limited = error instanceof Error && error.message === 'RATE_LIMIT'; json(res, error instanceof MobileHostUnavailableError ? 503 : limited ? 429 : 401, mobileError(error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED', 'Invitación inválida o acceso no disponible.')) }
@@ -528,9 +561,14 @@ export class MobileGateway {
     try { record = await this.nativeAuth(req) } catch (error) { const unavailable = error instanceof MobileHostUnavailableError; json(res, unavailable ? 503 : 401, mobileError(unavailable ? 'HOST_UNAVAILABLE' : 'DEVICE_REJECTED', unavailable ? 'Acceso pausado. Reconectá el host o el gateway en Windows.' : 'Dispositivo revocado o identidad modificada. Volvé a emparejar.')); return }
     const route = url.pathname.slice('/api/v1/'.length)
     if (req.method === 'GET' && route === 'bootstrap') {
-      const saved = this.deps.snapshot()
-      const hostIds = new Set(record.scopes.map(scope => scope.hostId))
-      json(res, 200, { version: 1, device: record.device, hosts: saved.hosts.filter(host => hostIds.has(host.id)).map(host => ({ id: host.id, name: host.name, status: this.deps.connection(host.id).status() })), projects: saved.projects.filter(project => record.scopes.some(scope => scope.projectId === project.id)).map(({ id, hostId, name }) => ({ id, hostId, name })), actor: { label: this.deps.actorLabel?.() || 'Usuario vinculado' }, devices: [record.device], supportedFeatures: MOBILE_SUPPORTED_FEATURES }); return
+      const saved = this.deps.configurationSnapshot?.() || this.deps.snapshot()
+      const unavailable = (record.device.unavailableProjects || []).map(project => ({ ...project, availability: this.deps.connection(project.hostId).status() === 'connected' ? 'authorization-required' as const : 'server-disconnected' as const }))
+      const projects = [
+        ...saved.projects.filter(project => record.scopes.some(scope => scope.projectId === project.id)).map(({ id, hostId, name }) => ({ id, hostId, name, availability: this.deps.connection(hostId).status() === 'connected' ? 'available' as const : 'server-disconnected' as const })),
+        ...unavailable.filter(project => !record.scopes.some(scope => scope.projectId === project.id))
+      ]
+      const hostIds = new Set(projects.map(project => project.hostId))
+      json(res, 200, { version: 1, device: { ...record.device, unavailableProjects: unavailable.length ? unavailable : undefined }, hosts: saved.hosts.filter(host => hostIds.has(host.id)).map(host => ({ id: host.id, name: host.name, status: this.deps.connection(host.id).status() })), projects, actor: { label: this.deps.actorLabel?.() || 'Usuario vinculado' }, devices: [record.device], supportedFeatures: MOBILE_SUPPORTED_FEATURES }); return
     }
     if (req.method === 'GET' && route === 'sessions') { json(res, 200, await this.sessions(record, url.searchParams.get('hostId') || '', url.searchParams.get('projectId') || undefined)); return }
     if (req.method === 'GET' && route === 'quotas') {
@@ -579,6 +617,7 @@ export class MobileGateway {
       if (route === 'input' || route === 'resize') {
         if (!record.device.capabilities.input) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Entrada no habilitada.') }
         const stream = this.clients.get(this.string(body, 'streamId'))
+        if (!stream && record.scopes.some(scope => this.deps.connection(scope.hostId).status() !== 'connected')) throw new MobileHostUnavailableError('Servidor desconectado en Crow para Windows.')
         if (!stream || stream.device !== record || stream.client.readyState !== WebSocket.OPEN) throw new Error('Terminal desconectada.')
         this.validateStreamCredential(stream)
         await this.allowedSession(stream.hostId, stream.sessionId, record, true)
@@ -590,7 +629,11 @@ export class MobileGateway {
         if (!record.device.capabilities.create) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Creación no habilitada.') }
         const projectId = this.string(body, 'projectId')
         const scope = record.scopes.find(scope => scope.projectId === projectId && scope.hostId === hostId)
+        const unavailable = record.device.unavailableProjects?.find(project => project.id === projectId && project.hostId === hostId)
+        if (!scope && unavailable?.availability === 'server-disconnected') throw new MobileHostUnavailableError('Servidor desconectado en Crow para Windows.')
+        if (!scope && unavailable) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Proyecto no autorizado para la identidad activa.') }
         if (!scope || (body.agent !== 'claude' && body.agent !== 'codex') || body.mode !== undefined || body.root !== undefined || Object.keys(body).some(key => !['hostId', 'projectId', 'agent'].includes(key))) throw new Error('Creación inválida.')
+        if (this.deps.connection(hostId).status() !== 'connected') throw new MobileHostUnavailableError('Servidor desconectado en Crow para Windows.')
         await this.validateDevice(record)
         const info = await this.deps.connection(hostId).api<SessionInfo>('POST', '/api/sessions', { agent: body.agent, mode: 'normal', root: scope.root })
         await this.validateDevice(record)
@@ -617,7 +660,7 @@ export class MobileGateway {
       if (Object.keys(body).some(key => !fields.includes(key))) throw new Error('Solicitud inválida.')
       if (route === 'pair') {
         const code = this.string(body, 'invitationCode', 32).toUpperCase()
-        await this.validateScopes(this.registry.candidate(code, req.socket.remoteAddress || ''))
+        await this.validateScopes(this.registry.candidate(code, req.socket.remoteAddress || ''), true)
         const paired = this.registry.pairKey(code, this.string(body, 'deviceName', 80), this.string(body, 'publicKey', 124))
         json(res, 200, { version: 2, device: paired.record.device, credential: paired.credential, credentialExpiresAt: paired.credentialExpiresAt, endpoints: this.endpoints }); return
       }

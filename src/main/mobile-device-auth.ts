@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify, type KeyObject } from 'node:crypto'
-import type { MobileActorBinding, MobileCapabilities, MobileDevice, MobileDeviceChallenge, MobileEnrollment } from '../shared/mobile-companion'
+import type { MobileActorBinding, MobileCapabilities, MobileDevice, MobileDeviceChallenge, MobileEnrollment, MobileProject } from '../shared/mobile-companion'
 import type { MobileMutationContext } from './mobile-mutation-ledger'
 
 export const INVITATION_TTL = 5 * 60_000
@@ -12,7 +12,7 @@ export class MobileHostUnavailableError extends Error {}
 export class MobileAuthorizationChangedError extends Error {}
 export interface MobileScope { projectId: string; hostId: string; root: string; hostDigest: string; binding: MobileActorBinding }
 export interface DeviceRecord { device: MobileDevice; scopes: MobileScope[]; tokenHash: string; publicKey?: string }
-interface Invitation { value: MobileEnrollment; scopes: MobileScope[]; capabilities: MobileCapabilities; codeHash: string }
+interface Invitation { value: MobileEnrollment; scopes: MobileScope[]; unavailableProjects: MobileProject[]; capabilities: MobileCapabilities; codeHash: string }
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex')
 function matches(value: string, hash: string): boolean {
   const candidate = Buffer.from(digest(value), 'hex')
@@ -52,13 +52,13 @@ export class MobileDeviceRegistry {
     catch (error) { this.persistenceFailed = true; throw error }
   }
 
-  invite(value: Omit<MobileEnrollment, 'invitationCode' | 'expiresAt'>, scopes: MobileScope[], capabilities: MobileCapabilities): MobileEnrollment {
+  invite(value: Omit<MobileEnrollment, 'invitationCode' | 'expiresAt'>, scopes: MobileScope[], capabilities: MobileCapabilities, unavailableProjects: MobileProject[] = []): MobileEnrollment {
     this.assertAvailable()
     for (const record of this.records.values()) if (!this.active(record)) this.records.delete(record.device.id)
-    if (!scopes.length || this.records.size >= 16) throw new Error('Seleccioná proyectos autorizados (máximo 16 dispositivos).')
+    if ((!scopes.length && !unavailableProjects.length) || this.records.size >= 16) throw new Error('Seleccioná al menos un proyecto (máximo 16 dispositivos).')
     const invitationCode = randomBytes(6).toString('hex').toUpperCase()
     const enrollment: MobileEnrollment = { ...value, invitationCode, expiresAt: new Date(this.now() + INVITATION_TTL).toISOString() }
-    this.pending = { value: enrollment, scopes: structuredClone(scopes), capabilities: { ...capabilities }, codeHash: digest(invitationCode) }
+    this.pending = { value: enrollment, scopes: structuredClone(scopes), unavailableProjects: structuredClone(unavailableProjects), capabilities: { ...capabilities }, codeHash: digest(invitationCode) }
     return enrollment
   }
   invitation(): MobileEnrollment | undefined {
@@ -86,7 +86,7 @@ export class MobileDeviceRegistry {
     if (!label.trim() || label.length > 80 || /[\x00-\x1f\x7f]/.test(label)) throw new Error('Nombre de dispositivo inválido.')
     this.pending = undefined // Consume synchronously only after all asynchronous actor checks.
     const credential = randomBytes(32).toString('hex')
-    const device: MobileDevice = { id: randomUUID(), label: label.trim(), pairedAt: new Date(this.now()).toISOString(), expiresAt: new Date(this.now() + DEVICE_TTL).toISOString(), projectIds: pending.scopes.map(scope => scope.projectId), capabilities: pending.capabilities }
+    const device: MobileDevice = { id: randomUUID(), label: label.trim(), pairedAt: new Date(this.now()).toISOString(), expiresAt: new Date(this.now() + DEVICE_TTL).toISOString(), projectIds: pending.scopes.map(scope => scope.projectId), ...(pending.unavailableProjects.length ? { unavailableProjects: pending.unavailableProjects } : {}), capabilities: pending.capabilities }
     const record = { device, scopes: pending.scopes, tokenHash: digest(credential) }
     this.commit(new Map(this.records).set(device.id, record))
     return { record, credential }
@@ -100,7 +100,7 @@ export class MobileDeviceRegistry {
     if (pending.scopes.some(scope => scope.binding.role !== 'admin' && scope.binding.role !== 'member')) throw new Error('La autorización requiere un rol individual vigente.')
     if ([...this.records.values()].some(record => record.publicKey === publicKey)) throw new Error('La clave ya está vinculada. Usá una clave nueva para una nueva invitación.')
     this.pending = undefined
-    const device: MobileDevice = { id: randomUUID(), label: label.trim(), pairedAt: new Date(this.now()).toISOString(), expiresAt: null, projectIds: pending.scopes.map(scope => scope.projectId), capabilities: pending.capabilities }
+    const device: MobileDevice = { id: randomUUID(), label: label.trim(), pairedAt: new Date(this.now()).toISOString(), expiresAt: null, projectIds: pending.scopes.map(scope => scope.projectId), ...(pending.unavailableProjects.length ? { unavailableProjects: pending.unavailableProjects } : {}), capabilities: pending.capabilities }
     const record: DeviceRecord = { device, scopes: pending.scopes, tokenHash: '', publicKey }
     this.commit(new Map(this.records).set(device.id, record))
     return { record, ...this.issueCredential(record) }

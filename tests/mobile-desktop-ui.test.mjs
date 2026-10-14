@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-function harness(status = { running: true, url: 'https://192.168.1.3:1234', devices: [] }, startError = '', statusError = '', confirmation = false) {
+function harness(status = { running: true, url: 'https://192.168.1.3:1234', devices: [] }, startError = '', statusError = '', confirmation = false, projects = [{ id: 'project', name: 'Allowed', hostId: 'host' }]) {
   const slots = [], effects = [], layouts = [], calls = [], focused = [], confirmations = [], qrCalls = []
   let cursor = 0
   const react = { useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef: initial => { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] }, useEffect: effect => effects.push(effect), useLayoutEffect: (effect, deps) => { const index = cursor++; if (!slots[index] || deps.some((value, i) => value !== slots[index][i])) layouts.push(effect); slots[index] = deps } }
@@ -15,7 +15,7 @@ function harness(status = { running: true, url: 'https://192.168.1.3:1234', devi
   const module = { exports: {} }
   const localRequire = id => id === 'react' ? react : id === 'react/jsx-runtime' ? require(id) : id === 'qrcode' ? { toDataURL: async value => { qrCalls.push(value); return 'data:image/png;base64,mock' } } : id === './ConfirmDialog' ? { useConfirm: () => async input => { confirmations.push(input); return confirmation } } : {}
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, { module, exports: module.exports, require: localRequire, window: { crow: api }, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, Date, URL })
-  function render() { cursor = 0; return module.exports.MobileDialog({ projects: [{ id: 'project', name: 'Allowed', hostId: 'host' }], hosts: [{ id: 'host', name: 'Test' }], onClose() {} }) }
+  function render() { cursor = 0; return module.exports.MobileDialog({ projects, hosts: [{ id: 'host', name: 'Test' }], onClose() {} }) }
   function flatten(value) { if (Array.isArray(value)) return value.flatMap(flatten); if (!value || typeof value !== 'object') return []; return [value, ...flatten(value.props?.children)] }
   function commit(tree) { for (const node of flatten(tree)) if (node.props.ref) node.props.ref.current = { focus: () => focused.push(node.props.children) }; while (layouts.length) layouts.shift()() }
   return { calls, render, flatten, effects, commit, focused, confirmations, qrCalls }
@@ -75,18 +75,16 @@ test('initial status errors do not request focus and no timer races the React co
   assert.doesNotMatch(source, /setTimeout/)
 })
 
-test('invitation requires explicit project selection and defaults all write/quotas grants off', async () => {
-  const h = harness(); h.render(); h.effects[0](); await settle()
-  let nodes = h.flatten(h.render())
-  let button = nodes.find(node => node.type === 'button' && node.props.children === 'Generar invitación Android')
-  assert.equal(button.props.disabled, true)
-  const checkboxes = nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox')
-  assert.equal(checkboxes.length, 5); assert.ok(checkboxes.every(node => node.props.checked === false))
-  checkboxes[0].props.onChange({ target: { checked: true } })
-  nodes = h.flatten(h.render()); button = nodes.find(node => node.type === 'button' && node.props.children === 'Generar invitación Android')
+test('invitation selects every project by default and keeps write/quotas grants off', async () => {
+  const projects = [{ id: 'project', name: 'Allowed', hostId: 'host' }, { id: 'project-2', name: 'Other', hostId: 'host' }]
+  const h = harness(undefined, '', '', false, projects); h.render(); h.effects[0](); await settle()
+  const nodes = h.flatten(h.render())
+  const button = nodes.find(node => node.type === 'button' && node.props.children === 'Generar invitación Android')
   assert.equal(button.props.disabled, false)
+  const checkboxes = nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox')
+  assert.equal(checkboxes.length, 6); assert.ok(checkboxes.slice(0, 2).every(node => node.props.checked)); assert.ok(checkboxes.slice(2).every(node => node.props.checked === false))
   button.props.onClick(); await settle()
-  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [['invite', { projectIds: ['project'], capabilities: { input: false, create: false, close: false, quotas: false } }]])
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [['invite', { projectIds: ['project', 'project-2'], capabilities: { input: false, create: false, close: false, quotas: false } }]])
 })
 
 const linkedDevice = { id: 'phone', label: 'Mi Android', expiresAt: '2099-01-01T00:00:00Z', projectIds: ['project'], capabilities: { input: false, quotas: false } }
