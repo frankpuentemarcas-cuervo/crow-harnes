@@ -219,9 +219,11 @@ public class CrowGatewayPlugin extends Plugin {
             // non-exportable signing key still makes this profile unable to renew.
             try {
                 JSONObject saved = record(id), profile = saved.getJSONObject("profile");
-                if (saved.optInt("authVersion", 1) == 2) {
-                    String credential = accessCredential(id, saved, generation(id), epoch.get());
-                    http(profile.getJSONObject("endpoint"), "/api/v2/device-revoke", "POST", new JSONObject(), credential, id, saved.optJSONObject("proxyAuth"));
+                AccessCredential current = accessCredentials.get(id);
+                if (saved.optInt("authVersion", 1) == 2 && current != null && current.expires.isAfter(Instant.now())) {
+                    // Do not block unlink on a fresh network challenge. Destroying
+                    // the Keystore key locally is sufficient if the host is offline.
+                    http(profile.getJSONObject("endpoint"), "/api/v2/device-revoke", "POST", new JSONObject(), current.value, id, saved.optJSONObject("proxyAuth"));
                 }
             } catch (Exception offline) { /* Local unlink must work while Windows or a host is off. */ }
             forget(id); call.resolve();
