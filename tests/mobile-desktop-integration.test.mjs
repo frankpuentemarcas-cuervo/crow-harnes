@@ -18,7 +18,7 @@ function harness() {
   const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
-exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; attention={reset(){}}; registerIPC()};
+exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; gitLabTokens={remove(){},save(){},get(){}}; attention={reset(){}}; registerIPC()};
 exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; exports.quotas = mobileCachedQuotas; exports.notices = mobileCachedNotices; exports.invalidate = invalidateMobileHost; exports.suspend = suspendMobileHost;`
   const module = { exports: {} }
   const localRequire = id => {

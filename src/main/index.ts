@@ -184,7 +184,6 @@ function invalidateMobileHost(hostId: string): void {
   mobileHostGenerations.set(hostId, (mobileHostGenerations.get(hostId) || 0) + 1)
   mobile?.invalidateHost(hostId)
 }
-
 function suspendMobileHost(hostId: string): void {
   mobileActorRoots.delete(hostId)
   mobile?.suspendHost(hostId)
@@ -379,6 +378,7 @@ function registerIPC(): void {
     return store.saveHost(host)
   })
   handle('crow:remove-host', (id: string) => {
+    for (const project of store.snapshot().projects.filter(item => item.hostId === id)) gitLabTokens.remove(project.id)
     invalidateMobileHost(id)
     connections.get(id)?.stop()
     connections.delete(id)
@@ -415,7 +415,7 @@ function registerIPC(): void {
     if (!project?.allowGitLabRead || !project.gitlabUrl) throw new Error('Primero habilitá el permiso de lectura GitLab en la configuración del proyecto.')
     return readGitLabProjectFiles(project, files, gitLabTokens.get(project.id))
   })
-  handle('crow:remove-project', (id: string) => { gitLabTokens?.remove(id); return store.removeProject(id) })
+  handle('crow:remove-project', (id: string) => { gitLabTokens.remove(id); return store.removeProject(id) })
   handle('crow:save-workspace', (tabs: WorkspaceTab[], activeTabs: Record<string, string>, selectedProjectId: string) => store.saveWorkspace(tabs, activeTabs, selectedProjectId))
   handle('crow:connect', (hostId: string) => connection(hostId).connect())
   handle('crow:submit-passphrase', (hostId: string, passphrase: string) => connection(hostId).submitPassphrase(passphrase))
@@ -563,8 +563,8 @@ app.whenReady().then(() => {
   accountUsage = new AccountUsageService(app.getPath('userData'), createAccountUsageAdapters())
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
-  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask })
   gitLabTokens = new GitLabTokenStore(app.getPath('userData'), safeStorage)
+  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask })
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)
