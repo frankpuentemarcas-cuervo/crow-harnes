@@ -463,9 +463,14 @@ function registerIPC(): void {
     for (const host of hosts) {
       if (connection(host.id).status() !== 'connected') throw new Error(`${host.name}: conectá el host para crear el primer vínculo Android.`)
       const projects = selected.filter(project => project.hostId === host.id).map(project => ({ id: project.id, name: project.name, root: project.root }))
-      await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects })
-      const enrollment = await connection(host.id).api('POST', '/api/mobile/invite')
-      hostInvites.push({ hostId: host.id, hostName: host.name, enrollment })
+      try {
+        await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects })
+        const enrollment = await connection(host.id).api('POST', '/api/mobile/invite')
+        hostInvites.push({ hostId: host.id, hostName: host.name, enrollment })
+      } catch (error) {
+        const detail = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : String(error)
+        throw new Error(`${host.name}: ${detail}`, { cause: error })
+      }
     }
     const invite = await mobile.invite(input)
     const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: invite }, ...hostInvites] }

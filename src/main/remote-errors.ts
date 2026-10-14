@@ -5,6 +5,7 @@ const newerRuntimeRoutes = [
   /^DELETE \/api\/sessions\/[0-9a-f]{32}$/,
   /^POST \/api\/sessions\/[0-9a-f]{32}\/wake$/,
   /^POST \/api\/files\/upload$/,
+  /^POST \/api\/mobile\/(config|invite)$/,
   /^GET \/api\/files\/download$/
 ]
 

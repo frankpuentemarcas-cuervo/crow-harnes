@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url)
 const plain = value => JSON.parse(JSON.stringify(value))
 function harness() {
   const handlers = new Map(), invalidated = [], suspended = [], mobileInvites = [], qrPayloads = [], sender = { send() {} }
-  const host = { id: 'host', target: 'user@test', port: 22, remotePort: 7337 }
+  const host = { id: 'host', name: 'Test host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
   const store = { host: id => id === host.id ? host : undefined, snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
@@ -116,6 +116,12 @@ test('desktop-only mobile IPC forwards typed configuration and rejects foreign s
   assert.deepEqual(h.hostCalls.map(item => item[1]), ['/api/mobile/config', '/api/mobile/invite'])
   await h.invoke('crow:mobile-revoke', 'phone'); assert.deepEqual(h.invalidated, ['device:phone'])
   await assert.rejects(h.handlers.get('crow:mobile-invite')({ sender: {} }, grant), /no autorizada/)
+})
+
+test('mobile enrollment identifies the Linux host that lacks mobile routes', async () => {
+  const h = harness()
+  h.connection.api = async () => { throw new Error('El servicio crowd de Linux está desactualizado.') }
+  await assert.rejects(h.invoke('crow:mobile-invite', { projectIds: ['project'], capabilities: {} }), /Test host: El servicio crowd de Linux está desactualizado/)
 })
 
 test('credential-bearing Pangolin QR is encoded in the main process and returned only as a bitmap', async () => {

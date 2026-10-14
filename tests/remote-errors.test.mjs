@@ -8,6 +8,8 @@ test('missing new runtime routes explain that crowd must be updated', () => {
     ['GET', '/api/hooks'],
     ['DELETE', `/api/sessions/${'a'.repeat(32)}`],
     ['POST', '/api/files/upload'],
+    ['POST', '/api/mobile/config'],
+    ['POST', '/api/mobile/invite'],
     ['GET', '/api/files/download']
   ]) {
     assert.match(remoteApiError(404, '404 page not found\n', method, path).message, /desactualizado/)
