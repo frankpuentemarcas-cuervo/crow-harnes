@@ -4,7 +4,7 @@ export interface ERPCredentials { url: string; apiKey: string; apiSecret: string
 interface ReadBudget { remainingBytes: number }
 // Bound transfer and time, not a legitimate account's number of Tasks.
 const syncBytes = 32_000_000, syncTimeoutMs = 120_000
-const openTaskFilters = JSON.stringify([['status', '=', 'Open'], ['_assign', 'like', `%"${erpKanbanAssignee}"%`]])
+const openTaskFilters = JSON.stringify([['status', '=', 'Open'], ['_assign', 'like', `%${erpKanbanAssignee}%`]])
 export function validateERPURL(value: string): string {
   let url: URL
   try { url = new URL(value) } catch { throw new Error('Ingresá una URL HTTPS válida de ERPNext.') }
@@ -86,8 +86,8 @@ export class ERPNextClient {
       for (const value of body.data) {
         const task = record(value, false)
         if (task.status !== 'Open') throw new Error('ERPNext entregó una Task fuera del filtro Open. No se publicó un catálogo parcial.')
-        // _assign is JSON text, so the server-side LIKE narrows the query and
-        // this exact match prevents substring collisions from reaching Kanban.
+        // Match Frappe's list-view _assign LIKE filter. Formatting can vary;
+        // exact parsed membership below prevents substring collisions.
         if (task.assignedTo.includes(erpKanbanAssignee)) result.set(task.name, task)
       }
       if (body.data.length < 100) return [...result.values()]

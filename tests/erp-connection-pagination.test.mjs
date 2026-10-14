@@ -31,7 +31,7 @@ test('connection check validates identity and one name, without importing the Ta
     assert.equal(query.pathname, '/api/resource/Task')
     assert.equal(query.searchParams.get('limit_page_length'), '1')
     assert.deepEqual(JSON.parse(query.searchParams.get('fields')), ['name'])
-    assert.deepEqual(JSON.parse(query.searchParams.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%"carlospalacios@larael.com"%']])
+    assert.deepEqual(JSON.parse(query.searchParams.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%carlospalacios@larael.com%']])
     return json({ data: [{ name: 'TASK-1' }] })
   })
   try {
@@ -110,7 +110,7 @@ for (const total of [2000, 2001, 2501]) test(`complete pagination loads ${total}
     assert.equal(options.method, 'GET')
     const offset = Number(new URL(url).searchParams.get('limit_start')); offsets.push(offset)
     const query = new URL(url).searchParams
-    assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%"carlospalacios@larael.com"%']])
+    assert.deepEqual(JSON.parse(query.get('filters')), [['status', '=', 'Open'], ['_assign', 'like', '%carlospalacios@larael.com%']])
     assert.ok(!JSON.parse(query.get('fields')).includes('description'))
     return json({ data: records.slice(offset, offset + 100) })
   })
