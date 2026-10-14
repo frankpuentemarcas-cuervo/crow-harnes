@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-function harness(status = { running: false, devices: [] }, confirmation = false) {
+function harness(status = { running: false, devices: [] }, confirmation = false, skippedHosts = []) {
   const slots = [], effects = [], calls = [], confirmations = []
   let cursor = 0
   const react = {
@@ -16,7 +16,7 @@ function harness(status = { running: false, devices: [] }, confirmation = false)
   }
   const api = {
     mobileStatus: async () => status,
-    mobileInvite: async input => { calls.push(['invite', input]); return { enrollment: { expiresAt: '2099-01-01T00:00:00Z' }, hostCount: 2, qrDataUrl: 'data:image/png;base64,mock' } },
+    mobileInvite: async input => { calls.push(['invite', input]); return { enrollment: { expiresAt: '2099-01-01T00:00:00Z' }, hostCount: 2, skippedHosts, qrDataUrl: 'data:image/png;base64,mock' } },
     mobileRevoke: async id => { calls.push(['revoke', id]); return { ...status, devices: [] } },
   }
   const source = readFileSync(new URL('../src/renderer/src/MobileDialog.tsx', import.meta.url), 'utf8')
@@ -49,4 +49,13 @@ test('revocation is explicit and confirmed', async () => {
   await settle()
   assert.equal(h.confirmations[0].danger, true)
   assert.deepEqual(h.calls, [['revoke', 'phone']])
+})
+
+test('QR dialog explains when a selected host was excluded', async () => {
+  const h = harness(undefined, false, [{ name: 'FACTORY', reason: 'sin conexión' }]); h.render()
+  h.flatten(h.render()).find(node => node.type === 'button' && node.props.children === 'Generar QR para Android').props.onClick()
+  await settle()
+  const status = h.flatten(h.render()).find(node => node.props.role === 'status' && JSON.stringify(node.props.children).includes('FACTORY'))
+  assert.ok(status)
+  assert.match(JSON.stringify(status.props.children), /sin conexión/)
 })

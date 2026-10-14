@@ -458,27 +458,36 @@ function registerIPC(): void {
     const selected = saved.projects.filter(project => input.projectIds.includes(project.id))
     const hosts = saved.hosts.filter(host => selected.some(project => project.hostId === host.id))
     if (!hosts.length) throw new Error('No hay proyectos para vincular.')
-    if (hosts.length > 15) throw new Error('Un solo QR admite hasta 15 hosts Linux. Seleccioná menos proyectos para este vínculo.')
     const hostInvites: Array<{ hostId: string; hostName: string; enrollment: unknown }> = []
+    const skippedHosts: Array<{ name: string; reason: string }> = []
     for (const host of hosts) {
-      if (connection(host.id).status() !== 'connected') throw new Error(`${host.name}: conectá el host para crear el primer vínculo Android.`)
+      if (connection(host.id).status() !== 'connected') {
+        skippedHosts.push({ name: host.name, reason: 'sin conexión' })
+        continue
+      }
+      if (hostInvites.length >= 15) {
+        skippedHosts.push({ name: host.name, reason: 'límite de 15 hosts por QR' })
+        continue
+      }
       const projects = selected.filter(project => project.hostId === host.id).map(project => ({ id: project.id, name: project.name, root: project.root }))
       try {
         await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects })
         const enrollment = await connection(host.id).api('POST', '/api/mobile/invite')
         hostInvites.push({ hostId: host.id, hostName: host.name, enrollment })
       } catch (error) {
-        const detail = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : String(error)
-        throw new Error(`${host.name}: ${detail}`, { cause: error })
+        const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined
+        skippedHosts.push({ name: host.name, reason: status === 404 ? 'servicio desactualizado' : status === 403 ? 'acceso individual o permisos pendientes' : 'servicio no disponible' })
       }
     }
-    const invite = await mobile.invite(input)
+    if (!hostInvites.length) throw new Error(`Ningún host seleccionado está listo para generar el QR. ${skippedHosts.map(host => `${host.name}: ${host.reason}`).join('; ')}.`)
+    const readyHostIds = new Set(hostInvites.map(host => host.hostId))
+    const invite = await mobile.invite({ ...input, projectIds: selected.filter(project => readyHostIds.has(project.hostId)).map(project => project.id) })
     const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: invite }, ...hostInvites] }
     const bundleText = JSON.stringify(bundle)
     const qrPayload = bundleText.length > 2000 ? `crow3:${gzipSync(bundleText).toString('base64url')}` : bundleText
     const qrDataUrl = await QRCode.toDataURL(qrPayload, { width: 512, margin: 2, errorCorrectionLevel: 'L' })
     const enrollment = { ...invite, endpoints: invite.endpoints.map(({ proxyAuth: _secret, ...endpoint }) => endpoint) }
-    return { enrollment, qrDataUrl, hostCount: hostInvites.length }
+    return { enrollment, qrDataUrl, hostCount: hostInvites.length, skippedHosts }
   }))
   handle('crow:mobile-revoke', (deviceId: string) => { mobile.revoke(deviceId); return mobile.status() })
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))

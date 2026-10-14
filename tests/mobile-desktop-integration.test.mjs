@@ -13,13 +13,14 @@ function harness() {
   const host = { id: 'host', name: 'Test host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
-  const store = { host: id => id === host.id ? host : undefined, snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
+  const store = { host: id => state.hosts.find(item => item.id === id), snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
   const hostCalls = []
   const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, api: async (method, path, body) => { hostCalls.push([method, path, body]); return path === '/api/mobile/invite' ? { version: 2, gatewayId: 'linux', invitationCode: 'linux-once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } : {} }, stop() {}, setAccessCredential: async () => undefined }
   const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true, relayUrl: 'wss://crow.frabubu.com/v1/tunnel' }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
 exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; gitLabTokens={remove(){},save(){},get(){}}; attention={reset(){}}; registerIPC()};
+exports.addConnection = (id,c) => connections.set(id,c);
 exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; exports.quotas = mobileCachedQuotas; exports.notices = mobileCachedNotices; exports.invalidate = invalidateMobileHost; exports.suspend = suspendMobileHost;`
   const module = { exports: {} }
   const localRequire = id => {
@@ -32,7 +33,7 @@ exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; 
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, connection, hostCalls, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, state, connection, hostCalls, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -118,10 +119,28 @@ test('desktop-only mobile IPC forwards typed configuration and rejects foreign s
   await assert.rejects(h.handlers.get('crow:mobile-invite')({ sender: {} }, grant), /no autorizada/)
 })
 
-test('mobile enrollment identifies the Linux host that lacks mobile routes', async () => {
+test('mobile enrollment needs at least one ready Linux host', async () => {
   const h = harness()
-  h.connection.api = async () => { throw new Error('El servicio crowd de Linux está desactualizado.') }
-  await assert.rejects(h.invoke('crow:mobile-invite', { projectIds: ['project'], capabilities: {} }), /Test host: El servicio crowd de Linux está desactualizado/)
+  h.connection.status = () => 'disconnected'
+  await assert.rejects(h.invoke('crow:mobile-invite', { projectIds: ['project'], capabilities: {} }), /Ningún host seleccionado está listo.*Test host: sin conexión/)
+  assert.equal(h.mobileInvites.length, 0)
+})
+
+test('mobile QR omits disconnected and unauthorized hosts without including their projects', async () => {
+  for (const failure of ['disconnected', 'unauthorized']) {
+    const h = harness()
+    h.state.hosts.push({ id: 'factory', name: 'FACTORY', target: 'user@factory', port: 22, remotePort: 7337 })
+    h.state.projects.push({ id: 'factory-project', hostId: 'factory', name: 'Factory', root: '/srv/factory' })
+    const factory = { ...h.connection, status: () => failure === 'disconnected' ? 'disconnected' : 'connected', api: async () => { throw Object.assign(new Error('individual access required'), { status: 403 }) } }
+    h.addConnection('factory', factory)
+    const result = plain(await h.invoke('crow:mobile-invite', { projectIds: ['project', 'factory-project'], capabilities: {} }))
+    const qr = JSON.parse(h.qrPayloads[0])
+    assert.equal(result.hostCount, 1)
+    assert.equal(result.skippedHosts[0].name, 'FACTORY')
+    assert.equal(qr.enrollments.length, 2)
+    assert.equal(qr.enrollments[1].hostId, 'host')
+    assert.deepEqual(plain(h.mobileInvites[0].projectIds), ['project'])
+  }
 })
 
 test('credential-bearing Pangolin QR is encoded in the main process and returned only as a bitmap', async () => {
