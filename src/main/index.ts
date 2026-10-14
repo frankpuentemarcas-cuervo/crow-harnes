@@ -293,7 +293,29 @@ function registerIPC(): void {
 
   handle('crow:access-status', (hostId: string) => connection(hostId).accessStatus())
   handle('crow:access-identity', (hostId: string) => connection(hostId).accessIdentity())
-  handle('crow:access-enable', (hostId: string, label: string) => erpOperation(async () => { clearHostIdentityCaches(hostId); const result = await connection(hostId).enableAccess(label); clearHostIdentityCaches(hostId); return { principal: result.principal, credential: '' } }))
+  handle('crow:access-enable', (hostId: string, label: string) => erpOperation(async () => {
+    const prefix = `${hostId}:`
+    const namedSessions = Object.entries(store.snapshot().sessionNames).filter(([key, name]) => key.startsWith(prefix) && name.trim()).map(([key, name]) => [key.slice(prefix.length), name] as const)
+    clearHostIdentityCaches(hostId)
+    try {
+      const result = await connection(hostId).enableAccess(label)
+      clearHostIdentityCaches(hostId)
+      let sessions: SessionInfo[] = []
+      try { sessions = await connection(hostId).api<SessionInfo[]>('GET', '/api/sessions') } catch { /* Access is enabled; preserve names even if listing needs a retry. */ }
+      let claimedNamedSessions = 0
+      for (const [sessionId, name] of namedSessions) {
+        const session = sessions.find(item => item.id === sessionId)
+        if (session && !session.ownerId) {
+          try { await connection(hostId).assignSessionOwner(sessionId, result.principal.id); claimedNamedSessions++ } catch { /* Keep the name; owner can be assigned manually. */ }
+        }
+        store.renameSession(hostId, sessionId, name)
+      }
+      return { principal: result.principal, credential: '', claimedNamedSessions }
+    } catch (error) {
+      for (const [sessionId, name] of namedSessions) store.renameSession(hostId, sessionId, name)
+      throw error
+    }
+  }))
   handle('crow:access-import', (hostId: string, credential: string) => erpOperation(async () => { clearHostIdentityCaches(hostId); await connection(hostId).setAccessCredential(credential); clearHostIdentityCaches(hostId) }))
   handle('crow:access-users', (hostId: string) => connection(hostId).listAccessUsers())
   handle('crow:access-create-user', (hostId: string, input: CrowAccessUserInput) => connection(hostId).createAccessUser(input))
@@ -424,7 +446,13 @@ function registerIPC(): void {
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
   handle('crow:rename-session', async (hostId: string, sessionId: string, name: string) => {
     const sessions = await connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
-    if (!sessions.some(session => session.id === sessionId && !session.readOnly)) throw new Error('Terminal no permitida para renombrar.')
+    const session = sessions.find(item => item.id === sessionId)
+    if (!session || (session.readOnly && session.ownerId)) throw new Error('Terminal no permitida para renombrar.')
+    if (!session.ownerId && session.readOnly) {
+      const identity = await connection(hostId).accessIdentity()
+      if (identity.role !== 'admin' || !identity.id) throw new Error('Terminal no permitida para renombrar.')
+      await connection(hostId).assignSessionOwner(sessionId, identity.id)
+    }
     return store.renameSession(hostId, sessionId, name)
   })
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))

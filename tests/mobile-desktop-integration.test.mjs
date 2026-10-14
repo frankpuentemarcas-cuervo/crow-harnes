@@ -13,9 +13,9 @@ function harness() {
   const host = { id: 'host', name: 'Test host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
-  const store = { host: id => state.hosts.find(item => item.id === id), snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
-  const hostCalls = []
-  const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, api: async (method, path, body) => { hostCalls.push([method, path, body]); return path === '/api/mobile/invite' ? { version: 2, gatewayId: 'linux', invitationCode: 'linux-once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } : {} }, stop() {}, setAccessCredential: async () => undefined }
+  const store = { host: id => state.hosts.find(item => item.id === id), snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state, renameSession: (hostId, sessionId, name) => { state.sessionNames[`${hostId}:${sessionId}`] = name; return state } }
+  const hostCalls = [], sessionList = [], assigned = []
+  const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, assignSessionOwner: async (sessionId, ownerId) => { assigned.push([sessionId, ownerId]) }, api: async (method, path, body) => { hostCalls.push([method, path, body]); return path === '/api/mobile/invite' ? { version: 2, gatewayId: 'linux', invitationCode: 'linux-once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } : path === '/api/sessions' ? sessionList : {} }, stop() {}, setAccessCredential: async () => undefined }
   const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true, relayUrl: 'wss://crow.frabubu.com/v1/tunnel' }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
@@ -33,7 +33,7 @@ exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; 
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, state, connection, hostCalls, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, state, connection, hostCalls, sessionList, assigned, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -124,6 +124,25 @@ test('mobile enrollment needs at least one ready Linux host', async () => {
   h.connection.status = () => 'disconnected'
   await assert.rejects(h.invoke('crow:mobile-invite', { projectIds: ['project'], capabilities: {} }), /Ningún host seleccionado está listo.*Test host: sin conexión/)
   assert.equal(h.mobileInvites.length, 0)
+})
+
+test('renaming an unowned previous terminal assigns it to the current administrator', async () => {
+  const h = harness(), id = 'd'.repeat(32)
+  h.actor.role = 'admin'
+  h.sessionList.push({ id, agent: 'claude', root: '/srv/project', state: 'running', readOnly: true })
+  await h.invoke('crow:rename-session', 'host', id, 'Mi terminal')
+  assert.deepEqual(h.assigned, [[id, 'member-a']])
+  assert.equal(h.state.sessionNames[`host:${id}`], 'Mi terminal')
+})
+
+test('enabling individual access claims and preserves previously named unowned terminals', async () => {
+  const h = harness(), id = 'e'.repeat(32)
+  h.state.sessionNames[`host:${id}`] = 'Mi terminal anterior'
+  h.sessionList.push({ id, agent: 'shell', root: '/srv/project', state: 'running' })
+  h.connection.enableAccess = async label => { h.actor.role = 'admin'; return { principal: { id: h.actor.id, role: 'admin', label }, credential: 'f'.repeat(32) } }
+  await h.invoke('crow:access-enable', 'host', 'Erick')
+  assert.deepEqual(h.assigned, [[id, 'member-a']])
+  assert.equal(h.state.sessionNames[`host:${id}`], 'Mi terminal anterior')
 })
 
 test('mobile QR omits disconnected and unauthorized hosts without including their projects', async () => {

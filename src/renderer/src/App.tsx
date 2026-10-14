@@ -555,7 +555,7 @@ export function App(): React.JSX.Element {
               </button>
               <CacheBadge session={session} status={statuses[host.id] || 'disconnected'} now={clockNow} compact onOpen={() => setCacheDetail({ hostId: host.id, sessionId: session.id })} />
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
-              <button disabled={session.readOnly} className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
+              <button disabled={session.readOnly && !!session.ownerId} className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
               <button disabled={session.readOnly} className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>
             })}
@@ -670,7 +670,7 @@ export function App(): React.JSX.Element {
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}
     {accountsOpen && <AccountUsagePanel onClose={() => setAccountsOpen(false)} model={accountUsage} />}
-    {accessHost && <AccessPanel key={accessHost.id} host={accessHost} sessions={sessions[accessHost.id] || []} onClose={() => setAccessHost(null)} />}
+    {accessHost && <AccessPanel key={accessHost.id} host={accessHost} sessions={sessions[accessHost.id] || []} sessionNames={state.sessionNames} onClose={() => setAccessHost(null)} />}
     {erpOpen && <ERPTaskKanban onClose={() => setERPOpen(false)} onTerminal={(projectId, sessionId) => { setERPOpen(false); setSelectedProjectId(projectId); openTab({ id: crypto.randomUUID(), projectId, kind: "terminal", sessionId }); const project = state.projects.find(item => item.id === projectId); if (project) void refreshSessions(project.hostId) }} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {

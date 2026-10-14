@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import type { AccessIdentity } from '../../shared/access'
 import type { CrowAccessPrincipal, CrowAccessStatus, Host, SessionInfo } from '../../shared/types'
+import { sessionNameKey } from '../../shared/session-list'
 import { Modal } from './Modal'
 import './erp-access.css'
 
-export function AccessPanel({ host, sessions, onClose }: { host: Host; sessions: SessionInfo[]; onClose(): void }): React.JSX.Element {
+export function AccessPanel({ host, sessions, sessionNames, onClose }: { host: Host; sessions: SessionInfo[]; sessionNames: Record<string, string>; onClose(): void }): React.JSX.Element {
   const [status, setStatus] = useState<CrowAccessStatus | null>(null)
   const [identity, setIdentity] = useState<AccessIdentity | null>(null)
   const [users, setUsers] = useState<CrowAccessPrincipal[]>([])
@@ -56,7 +57,11 @@ export function AccessPanel({ host, sessions, onClose }: { host: Host; sessions:
       </form>
       {issued && <section><p>Credencial mostrada una sola vez. Compartila por un canal seguro, no por una terminal.</p><label>Credencial creada<input readOnly type="password" value={issued} /></label><button className="secondary-button" onClick={() => void run(() => window.crow.clipboardWriteText(issued))}>Copiar credencial</button><button className="secondary-button" onClick={() => setIssued('')}>Ocultar y descartar</button></section>}
       <h3>Usuarios</h3>{users.map(user => <div className="access-user-row" key={user.id}><span>{user.label} · {user.role}{user.revoked ? ' · revocado' : ''}</span><button className="secondary-button" disabled={busy || user.revoked || ('id' in identity && user.id === identity.id)} onClick={() => void run(() => window.crow.accessRevokeUser(host.id, user.id))}>Revocar</button></div>)}
-      <h3>Asignar terminales anteriores</h3>{sessions.filter(session => !session.ownerId).map(session => <label key={session.id}>{session.agent} · {session.id.slice(0, 8)}<select defaultValue="" disabled={busy} onChange={event => { const owner = event.target.value; if (owner) void run(() => window.crow.accessAssignSession(host.id, session.id, owner)) }}><option value="">Elegir propietario…</option>{users.filter(user => !user.revoked).map(user => <option key={user.id} value={user.id}>{user.label}</option>)}</select></label>)}
+      <h3>Terminales del host · {sessions.length}</h3>{sessions.map(session => {
+        const owner = users.find(user => user.id === session.ownerId)
+        const name = sessionNames[sessionNameKey(host.id, session.id)]?.trim() || `${session.agent} · ${session.id.slice(0, 8)}`
+        return <div className="access-user-row" key={session.id}><span>{name} · {owner?.label || (session.ownerId ? 'Otro propietario' : 'Sin propietario')}</span>{!session.ownerId && <select aria-label={`Asignar ${name}`} defaultValue="" disabled={busy || !admin} onChange={event => { const ownerId = event.target.value; if (ownerId) void run(() => window.crow.accessAssignSession(host.id, session.id, ownerId)) }}><option value="">Elegir propietario…</option>{users.filter(user => !user.revoked).map(user => <option key={user.id} value={user.id}>{user.label}</option>)}</select>}</div>
+      })}
     </>}
   </Modal>
 }
