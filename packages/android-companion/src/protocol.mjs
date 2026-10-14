@@ -24,6 +24,44 @@ export function parseEnrollment(raw, now = Date.now()) {
   }
   return value
 }
+export function parseEnrollmentBundle(raw, now = Date.now()) {
+  if (typeof raw !== 'string' || raw.length > 16384) throw new Error('El QR es demasiado grande.')
+  const value = JSON.parse(raw)
+  if (value?.version !== 3 || !Array.isArray(value.enrollments) || value.enrollments.length < 2 || value.enrollments.length > 16 || Object.keys(value).some(key => !['version', 'enrollments'].includes(key))) throw new Error('Este QR no contiene un vínculo completo de Crow.')
+  const ids = new Set()
+  const enrollments = value.enrollments.map(item => {
+    if (!item || typeof item !== 'object' || Object.keys(item).some(key => !['hostId', 'hostName', 'enrollment'].includes(key)) || typeof item.hostId !== 'string' || !/^[A-Za-z0-9._~-]{1,200}$/.test(item.hostId) || typeof item.hostName !== 'string' || item.hostName.length < 1 || item.hostName.length > 80) throw new Error('Host inválido en el QR.')
+    const enrollment = parseEnrollment(JSON.stringify(item.enrollment), now)
+    if (ids.has(enrollment.gatewayId)) throw new Error('El QR repite un gateway.')
+    ids.add(enrollment.gatewayId)
+    return { hostId: item.hostId, hostName: item.hostName, enrollment }
+  })
+  return enrollments
+}
+export async function decodeEnrollmentQR(raw, now = Date.now()) {
+  if (!raw.startsWith('crow3:')) return parseEnrollmentBundle(raw, now)
+  const encoded = raw.slice(6)
+  if (!/^[A-Za-z0-9_-]{1,12000}$/.test(encoded)) throw new Error('QR comprimido inválido.')
+  const binary = atob(encoded.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - encoded.length % 4) % 4))
+  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+  if (typeof DecompressionStream === 'undefined') throw new Error('Actualizá Android WebView para leer este QR.')
+  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader()
+  const chunks = []
+  let size = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.length
+      if (size > 16384) throw new Error('El QR descomprimido es demasiado grande.')
+      chunks.push(value)
+    }
+  } finally { reader.releaseLock() }
+  const result = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length }
+  return parseEnrollmentBundle(new TextDecoder().decode(result), now)
+}
 function validPangolinHeader(value, max) { return typeof value === 'string' && value.length > 0 && value.length <= max && /^[!-~]+$/.test(value) }
 export const MAX_INPUT_BYTES = 2048
 export function inputByteLength(text) { return new TextEncoder().encode(text).length }

@@ -125,7 +125,7 @@ public class CrowGatewayPlugin extends Plugin {
         if (credential != null) request.header("Authorization", "Bearer " + credential);
         PangolinAuth.headers(request, endpoint, proxyAuth);
         if (method.equals("POST")) request.post(RequestBody.create(body == null ? "{}" : body.toString(), JSON)); else request.get();
-        OkHttpClient client = client(endpoint);
+        OkHttpClient client = path.equals("/api/v2/device-revoke") ? client(endpoint).newBuilder().callTimeout(5, TimeUnit.SECONDS).build() : client(endpoint);
         try (Response response = client.newCall(request.build()).execute()) {
             if (response.code() == 401 || (proxyAuth != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API")))) {
                 if (profileId != null) accessCredentials.remove(profileId);
@@ -213,9 +213,19 @@ public class CrowGatewayPlugin extends Plugin {
         call.resolve(new JSObject().put("profiles", profiles));
     }); }
     @PluginMethod public void deleteProfile(PluginCall call) {
-        String id = call.getString("profileId", ""); generations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet(); accessCredentials.remove(id);
-        for (Stream stream : streams.values()) if (stream.profileId.equals(id)) stop(stream);
-        execute(call, () -> { forget(id); call.resolve(); });
+        String id = call.getString("profileId", "");
+        execute(call, () -> {
+            // Revoke at the gateway when reachable. When it is offline, deleting the
+            // non-exportable signing key still makes this profile unable to renew.
+            try {
+                JSONObject saved = record(id), profile = saved.getJSONObject("profile");
+                if (saved.optInt("authVersion", 1) == 2) {
+                    String credential = accessCredential(id, saved, generation(id), epoch.get());
+                    http(profile.getJSONObject("endpoint"), "/api/v2/device-revoke", "POST", new JSONObject(), credential, id, saved.optJSONObject("proxyAuth"));
+                }
+            } catch (Exception offline) { /* Local unlink must work while Windows or a host is off. */ }
+            forget(id); call.resolve();
+        });
     }
     @PluginMethod public void request(PluginCall call) {
         String id = call.getString("profileId", ""); long g = generation(id), e = epoch.get();

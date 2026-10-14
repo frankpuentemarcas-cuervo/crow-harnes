@@ -1,7 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseEnrollment, OutputCursor, encodeInput, decodeOutput, mayOperate, mayWake, staleQuota, agentLabel, sessionStateLabel, quotaStateLabel } from '../src/protocol.mjs'
+import { gzipSync } from 'node:zlib'
+import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, OutputCursor, encodeInput, decodeOutput, mayOperate, mayWake, staleQuota, agentLabel, sessionStateLabel, quotaStateLabel } from '../src/protocol.mjs'
 const valid = () => ({ version: 2, gatewayId: 'gateway-test', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: [{ kind: 'lan-pinned', url: 'https://192.168.1.10:9841', certSHA256: Array(32).fill('AB').join(':') }] })
+
+test('one QR validates every host invitation and rejects duplicate gateway identities', () => {
+  const windows = valid(), linux = { ...valid(), gatewayId: 'linux-gateway' }
+  const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: windows }, { hostId: 'ssd', hostName: 'SSD', enrollment: linux }] }
+  assert.equal(parseEnrollmentBundle(JSON.stringify(bundle)).length, 2)
+  assert.throws(() => parseEnrollmentBundle(JSON.stringify({ ...bundle, enrollments: [...bundle.enrollments, { hostId: 'factory', hostName: 'Factory', enrollment: linux }] })), /repite/)
+  assert.throws(() => parseEnrollmentBundle(JSON.stringify({ ...bundle, enrollments: [{ ...bundle.enrollments[0], token: 'leak' }, bundle.enrollments[1]] })), /Host inválido/)
+})
+test('compressed one-QR payload decodes with a strict expanded-size bound', async () => {
+  const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: valid() }, { hostId: 'ssd', hostName: 'SSD', enrollment: { ...valid(), gatewayId: 'linux' } }] }
+  assert.equal((await decodeEnrollmentQR(`crow3:${gzipSync(JSON.stringify(bundle)).toString('base64url')}`)).length, 2)
+  await assert.rejects(decodeEnrollmentQR(`crow3:${gzipSync('A'.repeat(17000)).toString('base64url')}`), /demasiado grande/)
+})
 
 test('Pangolin enrollment carries only a valid resource token bound to its exact HTTPS origin', () => {
   const endpoint = { kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true }
