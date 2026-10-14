@@ -41,6 +41,7 @@ type App struct {
 	eventMessages map[string]eventMessage
 	browsers      map[string]*browser
 	bridge        *bridge.Store
+	mobile        *mobileHostState
 }
 
 func randomID() (string, error) {
@@ -92,6 +93,9 @@ func Run() error {
 	if err := a.loadAccess(); err != nil {
 		return err
 	}
+	if err := a.loadMobile(); err != nil {
+		return err
+	}
 	if err := a.loadHookSettings(); err != nil {
 		return err
 	}
@@ -111,6 +115,8 @@ func Run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/access/me", a.handleAccessMe)
+	mux.HandleFunc("POST /api/mobile/config", a.handleMobileConfigure)
+	mux.HandleFunc("POST /api/mobile/invite", a.handleMobileInvite)
 	mux.HandleFunc("POST /api/access/enable", a.handleAccessEnable)
 	mux.HandleFunc("GET /api/access/users", a.handleAccessUsers)
 	mux.HandleFunc("POST /api/access/users", a.handleAccessUsers)
@@ -145,6 +151,10 @@ func Run() error {
 		return err
 	}
 	log.Printf("crowd listening on 127.0.0.1:%s", port)
+	if err := a.startMobileHost(); err != nil {
+		// A mobile-only port conflict must not stop existing terminals and SSH API.
+		log.Printf("crowd mobile listener unavailable: %v", err)
+	}
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
