@@ -1,5 +1,6 @@
 import { workspaceWindowPlacement } from '../shared/window-layout'
 import { app, BrowserWindow, screen, clipboard, dialog, ipcMain, Notification, safeStorage, shell } from 'electron'
+import QRCode from 'qrcode'
 import { autoUpdater } from 'electron-updater'
 import { basename, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
@@ -445,7 +446,13 @@ function registerIPC(): void {
   handle('crow:mobile-status', () => mobile.status())
   handle('crow:mobile-start', (input: string | MobileStartInput) => erpOperation(async () => { await refreshMobileWorkspace(); return mobile.start(input) }))
   handle('crow:mobile-stop', () => mobile.stop())
-  handle('crow:mobile-invite', (input: MobileEnrollmentInput) => erpOperation(async () => { await refreshMobileWorkspace(); return mobile.invite(input) }))
+  handle('crow:mobile-invite', (input: MobileEnrollmentInput) => erpOperation(async () => {
+    await refreshMobileWorkspace()
+    const invite = await mobile.invite(input)
+    const qrDataUrl = await QRCode.toDataURL(JSON.stringify(invite), { width: 384, margin: 2, errorCorrectionLevel: 'M' })
+    const enrollment = { ...invite, endpoints: invite.endpoints.map(({ proxyAuth: _secret, ...endpoint }) => endpoint) }
+    return { enrollment, qrDataUrl }
+  }))
   handle('crow:mobile-revoke', (deviceId: string) => { mobile.revoke(deviceId); return mobile.status() })
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))
   handle('crow:set-hook-settings', (hostId: string, enabled: boolean) => connection(hostId).api<{ enabled: boolean }>('PUT', '/api/hooks', { enabled }))

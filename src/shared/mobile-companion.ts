@@ -37,9 +37,14 @@ export const MOBILE_SUPPORTED_FEATURES: MobileSupportedFeatures = {
   fileBrowser: false,
   gitStatus: false,
 }
-export interface MobileEnrollmentInput { projectIds: string[]; capabilities?: Partial<MobileCapabilities> }
-/** No reusable credential in this desktop-only, single-use invitation. */
-export interface MobileEnrollment { version: 1 | 2; gatewayId: string; invitationCode: string; expiresAt: string; endpoints: MobileEndpoint[] }
+export interface MobilePangolinAuth { tokenId: string; token: string }
+export interface MobileEnrollmentInput { projectIds: string[]; capabilities?: Partial<MobileCapabilities>; pangolinAuth?: MobilePangolinAuth }
+/** Metadata retained by the gateway; deliberately excludes any reusable Pangolin credential. */
+export interface MobileEnrollmentMetadata { version: 1 | 2; gatewayId: string; invitationCode: string; expiresAt: string; endpoints: MobileEndpoint[] }
+/** Credential-bearing QR payload only; never persist, log, or return this value from gateway status. */
+export interface MobileEnrollment extends Omit<MobileEnrollmentMetadata, 'endpoints'> { endpoints: (MobileEndpoint & { proxyAuth?: { origin: string } & MobilePangolinAuth })[] }
+/** Renderer receives only a safe summary and the QR bitmap, never the credential-bearing QR text. */
+export interface MobileInviteResult { enrollment: MobileEnrollmentMetadata; qrDataUrl: string }
 /** null means key-based trust until explicit revocation, never a permanent bearer. */
 export interface MobileDevice { id: string; label: string; pairedAt: string; expiresAt: string | null; projectIds: string[]; unavailableProjects?: MobileProject[]; capabilities: MobileCapabilities }
 /** generation includes host target + current credential/access epoch, never raw credentials. */

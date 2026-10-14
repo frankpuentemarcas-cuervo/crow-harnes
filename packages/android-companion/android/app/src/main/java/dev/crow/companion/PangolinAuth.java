@@ -16,15 +16,12 @@ final class PangolinAuth {
         if (value == null || value.isEmpty() || value.length() > max) throw new IllegalArgumentException("ID/token del recurso inválido.");
         for (int i = 0; i < value.length(); i++) if (value.charAt(i) < 33 || value.charAt(i) > 126) throw new IllegalArgumentException("ID/token debe ser ASCII sin espacios ni saltos de línea.");
     }
-    static JSONObject credentials(JSONObject endpoint, String id, String token) throws Exception {
-        if (!required(endpoint)) throw new IllegalArgumentException("El endpoint no admite claves Pangolin.");
-        header(id, 128); header(token, 1024);
-        return new JSONObject().put("origin", EndpointPolicy.origin(endpoint)).put("tokenId", id).put("token", token);
-    }
     static void validate(JSONObject endpoint, JSONObject auth) throws Exception {
         boolean required = required(endpoint);
         if (!required && auth == null) return; // Old LAN/Tailscale profiles retain their original transport.
         if (!required || auth == null || !EndpointPolicy.origin(endpoint).equals(auth.optString("origin"))) throw new IllegalStateException("La autenticación Pangolin no coincide con el endpoint. Volvé a vincular.");
+        java.util.Iterator<String> fields = auth.keys();
+        while (fields.hasNext()) if (!fields.next().matches("origin|tokenId|token")) throw new IllegalArgumentException("El token Pangolin tiene campos inesperados.");
         header(auth.getString("tokenId"), 128); header(auth.getString("token"), 1024);
     }
     static void headers(Request.Builder request, JSONObject endpoint, JSONObject auth) throws Exception {

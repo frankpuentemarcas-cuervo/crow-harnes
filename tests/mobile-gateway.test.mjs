@@ -336,12 +336,16 @@ test('real local bind stays loopback and an occupied port is never replaced', as
   assert.equal(other.listening, false)
 })
 
-test('Pangolin invitation contains only provider flags, never proxy credentials', async () => {
+test('Pangolin token enters only the one-time QR payload and never status or pending invitation state', async () => {
   const c = fixture()
   c.gateway.endpoints.push({ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true })
-  const invite = await c.gateway.invite({ projectIds: ['p1'] }, 1)
+  const invite = await c.gateway.invite({ projectIds: ['p1'], pangolinAuth: { tokenId: 'resource-token-id', token: 'resource-secret' } })
   assert.equal(invite.endpoints[1].proxyAuthRequired, true)
+  assert.deepEqual(invite.endpoints[1].proxyAuth, { origin: 'https://crow.example.com', tokenId: 'resource-token-id', token: 'resource-secret' })
   assert.doesNotMatch(JSON.stringify(c.gateway.status()), /tokenId|proxyAuth"|P-Access-Token|credential/)
+  assert.doesNotMatch(JSON.stringify(c.gateway.registry.invitation()), /resource-token-id|resource-secret/)
+  await assert.rejects(c.gateway.invite({ projectIds: ['p1'] }), /Ingresá el ID y el token/)
+  await assert.rejects(c.gateway.invite({ projectIds: ['p1'], pangolinAuth: { tokenId: 'bad id', token: 'resource-secret' } }), /sin espacios/)
 })
 
 test('v2 enrollment cannot downgrade; signed fresh proof renews only scoped authorization', async () => {

@@ -12,7 +12,7 @@ import org.json.JSONObject;
 final class EndpointPolicy {
     static String origin(JSONObject endpoint) throws Exception {
         java.util.Iterator<String> fields = endpoint.keys();
-        while (fields.hasNext()) if (!fields.next().matches("kind|url|certSHA256|provider|proxyAuthRequired|relayUrl|relayRoute")) throw new IllegalArgumentException("El endpoint no puede incluir claves del recurso.");
+        while (fields.hasNext()) if (!fields.next().matches("kind|url|certSHA256|provider|proxyAuthRequired|relayUrl|relayRoute|proxyAuth")) throw new IllegalArgumentException("El endpoint de invitación contiene campos desconocidos.");
         String raw = endpoint.getString("url");
         URI uri = new URI(raw);
         if (!"https".equals(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null || !(uri.getRawPath().isEmpty() || "/".equals(uri.getRawPath())) || (uri.getPort() != -1 && (uri.getPort() < 1 || uri.getPort() > 65535))) throw new IllegalArgumentException("Exact HTTPS origin required");

@@ -10,7 +10,7 @@ function harness(status = { running: true, url: 'https://192.168.1.3:1234', devi
   const slots = [], effects = [], layouts = [], calls = [], focused = [], confirmations = [], qrCalls = []
   let cursor = 0
   const react = { useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef: initial => { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] }, useEffect: effect => effects.push(effect), useLayoutEffect: (effect, deps) => { const index = cursor++; if (!slots[index] || deps.some((value, i) => value !== slots[index][i])) layouts.push(effect); slots[index] = deps } }
-  const api = { mobileAddresses: async () => ['192.168.1.3'], mobileStatus: async () => { if (statusError) throw new Error(statusError); return status }, mobileStart: async input => { calls.push(['start', input]); if (startError) throw new Error(startError); return { running: true, devices: status.devices } }, mobileStop: async () => { calls.push(['stop']); return { running: false, devices: status.devices } }, mobileRevoke: async id => { calls.push(['revoke', id]); return { ...status, devices: status.devices.filter(device => device.id !== id) } }, mobileInvite: async input => { calls.push(['invite', input]); return { invitationCode: 'once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] } } }
+  const api = { mobileAddresses: async () => ['192.168.1.3'], mobileStatus: async () => { if (statusError) throw new Error(statusError); return status }, mobileStart: async input => { calls.push(['start', input]); if (startError) throw new Error(startError); return { running: true, devices: status.devices } }, mobileStop: async () => { calls.push(['stop']); return { running: false, devices: status.devices } }, mobileRevoke: async id => { calls.push(['revoke', id]); return { ...status, devices: status.devices.filter(device => device.id !== id) } }, mobileInvite: async input => { calls.push(['invite', input]); return { enrollment: { version: 2, gatewayId: 'gateway', invitationCode: 'once', expiresAt: '2099-01-01T00:00:00Z', endpoints: [] }, qrDataUrl: 'data:image/png;base64,mock' } } }
   const source = readFileSync(new URL('../src/renderer/src/MobileDialog.tsx', import.meta.url), 'utf8')
   const module = { exports: {} }
   const localRequire = id => id === 'react' ? react : id === 'react/jsx-runtime' ? require(id) : id === 'qrcode' ? { toDataURL: async value => { qrCalls.push(value); return 'data:image/png;base64,mock' } } : id === './ConfirmDialog' ? { useConfirm: () => async input => { confirmations.push(input); return confirmation } } : {}
@@ -85,6 +85,22 @@ test('invitation selects every project by default and keeps write/quotas grants 
   assert.equal(checkboxes.length, 6); assert.ok(checkboxes.slice(0, 2).every(node => node.props.checked)); assert.ok(checkboxes.slice(2).every(node => node.props.checked === false))
   button.props.onClick(); await settle()
   assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [['invite', { projectIds: ['project', 'project-2'], capabilities: { input: false, create: false, close: false, quotas: false } }]])
+})
+
+test('Pangolin QR requires a resource token, warns about sharing and clears form secrets after generation', async () => {
+  const h = harness({ running: true, remoteProvider: 'pangolin', devices: [] }); h.render(); h.effects[0](); await settle()
+  let nodes = h.flatten(h.render())
+  assert.match(textContent(nodes), /Quien obtenga el QR antes que vos podría vincular/)
+  assert.ok(nodes.some(node => node.type === 'input' && node.props.id === 'mobile-pangolin-token-id'))
+  const button = () => h.flatten(h.render()).find(node => node.type === 'button' && node.props.children === 'Generar invitación Android')
+  assert.equal(button().props.disabled, true)
+  nodes.find(node => node.type === 'input' && node.props.id === 'mobile-pangolin-token-id').props.onChange({ target: { value: 'resource-id' } })
+  nodes = h.flatten(h.render()); nodes.find(node => node.type === 'input' && node.props.id === 'mobile-pangolin-token').props.onChange({ target: { value: 'resource-token' } })
+  assert.equal(button().props.disabled, false)
+  button().props.onClick(); await settle()
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0])), ['invite', { projectIds: ['project'], capabilities: { input: false, create: false, close: false, quotas: false }, pangolinAuth: { tokenId: 'resource-id', token: 'resource-token' } }])
+  assert.ok(h.flatten(h.render()).some(node => node.type === 'img' && node.props.src === 'data:image/png;base64,mock'))
+  assert.ok(!h.flatten(h.render()).some(node => node.type === 'textarea'))
 })
 
 const linkedDevice = { id: 'phone', label: 'Mi Android', expiresAt: '2099-01-01T00:00:00Z', projectIds: ['project'], capabilities: { input: false, quotas: false } }

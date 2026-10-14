@@ -9,13 +9,13 @@ const mobileAuth = await import('data:text/javascript;base64,' + Buffer.from(str
 const require = createRequire(import.meta.url)
 const plain = value => JSON.parse(JSON.stringify(value))
 function harness() {
-  const handlers = new Map(), invalidated = [], suspended = [], sender = { send() {} }
+  const handlers = new Map(), invalidated = [], suspended = [], mobileInvites = [], qrPayloads = [], sender = { send() {} }
   const host = { id: 'host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
   const store = { host: id => id === host.id ? host : undefined, snapshot: () => state, saveHost: value => value, removeHost: () => state, removeSession: () => state, saveWorkspace: () => state }
   const connection = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => actor, stop() {}, setAccessCredential: async () => undefined }
-  const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => ({ invitationCode: 'one-use', input }), revoke: id => invalidated.push(`device:${id}`) }
+  const mobile = { invalidateHost: id => invalidated.push(id), suspendHost: id => suspended.push(id), start: async input => ({ running: true, input }), stop: async () => ({ running: false }), status: () => ({ running: true }), invite: async input => { mobileInvites.push(input); return { version: 2, gatewayId: 'gateway', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: input.pangolinAuth ? [{ kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true, proxyAuth: { origin: 'https://crow.example.com', ...input.pangolinAuth } }] : [] } }, revoke: id => invalidated.push(`device:${id}`) }
   const accounts = { list: () => [{ id: 'secret-account-id', provider: 'codex', label: 'PRIVATE account', identity: 'person@email', error: 'sensitive failure', status: 'ready', updatedAt: 1000, windows: [{ label: 'PRIVATE Weekly', usedPercent: 40, resetsAt: 2000 }] }] }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + `
 exports.setup = (s,c,m,a,w) => {store=s; connections.set('host',c); mobile=m; accountUsage=a; window=w; vault={forget(){}}; attention={reset(){}}; registerIPC()};
@@ -24,13 +24,14 @@ exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; 
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
     if (id === './mobile-device-auth') return mobileAuth
+    if (id === 'qrcode') return { default: { toDataURL: async value => { qrPayloads.push(value); return 'data:image/png;base64,invite' } } }
     if (id === 'electron') return { app: { whenReady: () => ({ then() {} }), on() {} }, ipcMain: { handle: (name, handler) => handlers.set(name, handler) } }
     if (id === '../shared/access-visibility') return { withoutHostWorkspace: value => value, projectVisibleSessions: value => value }
     return {}
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, connection, invalidated, suspended, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, connection, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -106,9 +107,23 @@ test('desktop-only mobile IPC forwards typed configuration and rejects foreign s
   const h = harness(), input = { address: '192.168.1.5', publicOrigin: 'https://test.ts.net' }
   assert.deepEqual(plain(await h.invoke('crow:mobile-start', input)).input, input)
   const grant = { projectIds: ['project'], capabilities: { quotas: false } }
-  assert.deepEqual(plain(await h.invoke('crow:mobile-invite', grant)).input, grant)
+  const invite = plain(await h.invoke('crow:mobile-invite', grant))
+  assert.deepEqual(plain(h.mobileInvites[0]), grant)
+  assert.equal(invite.qrDataUrl, 'data:image/png;base64,invite')
+  assert.equal(invite.enrollment.invitationCode, 'one-use')
   await h.invoke('crow:mobile-revoke', 'phone'); assert.deepEqual(h.invalidated, ['device:phone'])
   await assert.rejects(h.handlers.get('crow:mobile-invite')({ sender: {} }, grant), /no autorizada/)
+})
+
+test('credential-bearing Pangolin QR is encoded in the main process and returned only as a bitmap', async () => {
+  const h = harness(), input = { projectIds: ['project'], pangolinAuth: { tokenId: 'resource-id', token: 'secret-token' } }
+  const result = plain(await h.invoke('crow:mobile-invite', input))
+  const qr = JSON.parse(h.qrPayloads[0])
+  assert.equal(qr.endpoints[0].proxyAuth.token, 'secret-token')
+  assert.equal(qr.endpoints[0].proxyAuth.origin, 'https://crow.example.com')
+  assert.equal(result.qrDataUrl, 'data:image/png;base64,invite')
+  assert.equal(JSON.stringify(result).includes('secret-token'), false)
+  assert.equal(result.enrollment.endpoints[0].proxyAuth, undefined)
 })
 
 test('host edits, removal, and credential imports invalidate paired host grants', async () => {

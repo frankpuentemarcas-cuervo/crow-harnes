@@ -12,7 +12,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { Connection } from './connection'
 import { isPrivateLanIPv4 } from './mobile-network'
 import type { MobileStatus, SavedState, SessionInfo, TerminalFrame } from '../shared/types'
-import { MOBILE_SUPPORTED_FEATURES, type MobileActorBinding, type MobileCapabilities, type MobileDevice, type MobileEndpoint, type MobileEnrollment, type MobileEnrollmentInput, type MobileErrorCode, type MobileErrorEnvelope, type MobileNotice, type MobileProject, type MobileQuota, type MobileSession, type MobileStartInput } from '../shared/mobile-companion'
+import { MOBILE_SUPPORTED_FEATURES, type MobileActorBinding, type MobileCapabilities, type MobileDevice, type MobileEndpoint, type MobileEnrollment, type MobileEnrollmentInput, type MobileErrorCode, type MobileErrorEnvelope, type MobileNotice, type MobilePangolinAuth, type MobileProject, type MobileQuota, type MobileSession, type MobileStartInput } from '../shared/mobile-companion'
 import { MobileDeviceRegistry, MobileHostUnavailableError, MobileAuthorizationChangedError, READ_CAPABILITIES, type DeviceRecord, type MobileScope } from './mobile-device-auth'
 import { MobileTrustStore, type MobileTrustPersistence, type MobileTrustSnapshot } from './mobile-trust-store'
 import { MobileMutationLedger, MobileMutationRejectedError, type MobileMutationContext, type MobileMutationResult, type MobileMutationRoute } from './mobile-mutation-ledger'
@@ -157,6 +157,15 @@ function readJSON(req: IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
+function validatePangolinAuth(value: unknown): MobilePangolinAuth {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Ingresá el ID y el token de acceso del recurso Pangolin para incluirlos en el QR.')
+  const auth = value as Record<string, unknown>
+  if (Object.keys(auth).some(key => !['tokenId', 'token'].includes(key)) || typeof auth.tokenId !== 'string' || typeof auth.token !== 'string') throw new Error('Credenciales Pangolin inválidas.')
+  const validHeader = (part: string, max: number): boolean => part.length > 0 && part.length <= max && /^[!-~]+$/.test(part)
+  if (!validHeader(auth.tokenId, 128) || !validHeader(auth.token, 1024)) throw new Error('El ID/token Pangolin debe estar completo, sin espacios ni saltos de línea.')
+  return { tokenId: auth.tokenId, token: auth.token }
+}
+
 export class MobileGateway {
   private server?: HttpsServer
   private loopback?: HttpServer
@@ -246,7 +255,12 @@ export class MobileGateway {
   async invite(input: MobileEnrollmentInput, version: 1 | 2 = 2): Promise<MobileEnrollment> {
     this.ensureTrust()
     if (!this.server) throw new Error('Activá primero el gateway móvil.')
+    if (!input || typeof input !== 'object' || Object.keys(input).some(key => !['projectIds', 'capabilities', 'pangolinAuth'].includes(key))) throw new Error('Solicitud de invitación inválida.')
     if (!Array.isArray(input.projectIds) || input.projectIds.length < 1 || input.projectIds.length > 64 || input.projectIds.some(id => typeof id !== 'string')) throw new Error('Proyectos inválidos.')
+    const pangolinEndpoint = this.endpoints.find(endpoint => endpoint.provider === 'pangolin')
+    let pangolinAuth: MobilePangolinAuth | undefined
+    if (pangolinEndpoint) pangolinAuth = validatePangolinAuth(input.pangolinAuth)
+    else if (input.pangolinAuth !== undefined) throw new Error('Este gateway no usa Pangolin; no se aceptan claves de recurso.')
     const capabilities = { ...READ_CAPABILITIES }
     for (const key of Object.keys(capabilities) as (keyof MobileCapabilities)[]) {
       const value = input.capabilities?.[key]
@@ -277,7 +291,14 @@ export class MobileGateway {
       }
     }
     await this.validateScopes(scopes)
-    return this.registry.invite({ version, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities, unavailableProjects)
+    const safeEnrollment = this.registry.invite({ version, gatewayId: this.gatewayId, endpoints: this.endpoints }, scopes, capabilities, unavailableProjects)
+    if (!pangolinEndpoint || !pangolinAuth) return safeEnrollment
+    return {
+      ...safeEnrollment,
+      endpoints: safeEnrollment.endpoints.map(endpoint => endpoint.provider === 'pangolin'
+        ? { ...endpoint, proxyAuth: { origin: endpoint.url.replace(/\/$/, ''), ...pangolinAuth } }
+        : endpoint),
+    }
   }
 
   async start(input: string | MobileStartInput): Promise<MobileStatus> {

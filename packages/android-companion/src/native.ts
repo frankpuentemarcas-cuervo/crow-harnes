@@ -4,7 +4,7 @@ import type { MobileDevice, MobileEnrollment, MobileEndpoint } from '../../../sr
 export interface GatewayProfile { id: string; version?: 2; gatewayId: string; endpoint: MobileEndpoint; device: MobileDevice }
 export interface StreamEvent { connectionId: string; profileId: string; status?: 'connected' | 'disconnected' | 'revoked'; data?: string }
 interface NativeGateway {
-  pair(input: { enrollment: MobileEnrollment; endpointIndex: number; deviceName: string; fingerprintConfirmed: boolean }): Promise<{ profile: GatewayProfile }>
+  pair(input: { enrollment: MobileEnrollment; endpointIndex: number; deviceName: string; destinationConfirmed: boolean }): Promise<{ profile: GatewayProfile }>
   listProfiles(): Promise<{ profiles: GatewayProfile[] }>
   deleteProfile(input: { profileId: string }): Promise<void>
   request(input: { profileId: string; path: string; method: 'GET' | 'POST'; body?: unknown }): Promise<{ data: unknown }>

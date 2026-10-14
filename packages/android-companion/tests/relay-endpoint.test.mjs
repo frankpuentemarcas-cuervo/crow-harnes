@@ -13,6 +13,6 @@ test('relay endpoint layers pinned inner TLS over a separate default-CA WSS tunn
   assert.match(plugin, /EndpointPolicy\.pinnedTrust\(endpoint\.getString\("certSHA256"\)\)/)
   assert.match(plugin, /builder\.socketFactory\(new CrowRelayTunnelSocket\.Factory\(new OkHttpClient\(\), endpoint\.getString\("relayUrl"\), endpoint\.getString\("relayRoute"\)\)\)/)
   assert.match(plugin, /EndpointPolicy\.origin\(endpoint\)/)
-  assert.match(plugin, /endpoint\.getString\("kind"\)\.equals\("relay"\)\) && !call\.getBoolean\("fingerprintConfirmed", false\)/)
+  assert.match(plugin, /endpoint\.getString\("kind"\)\.equals\("lan-pinned"\) \|\| endpoint\.getString\("kind"\)\.equals\("relay"\) \|\| pangolin\) && !call\.getBoolean\("destinationConfirmed", false\)/)
   assert.match(plugin, /approvedEndpoint\.put\("relayUrl", endpoint\.getString\("relayUrl"\)\)\.put\("relayRoute", endpoint\.getString\("relayRoute"\)\)/)
 })

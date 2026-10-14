@@ -35,15 +35,12 @@ test('bundled UI only, camera user gesture, no fake keyboard/direct fetch creden
 })
 test('complete official native project contains Gradle wrapper and registered bridge', () => { for (const path of ['android/gradlew', 'android/gradlew.bat', 'android/gradle/wrapper/gradle-wrapper.jar', 'android/settings.gradle', 'android/capacitor.settings.gradle', 'android/app/capacitor.build.gradle']) assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), true, path); assert.match(source('MainActivity'), /registerPlugin\(CrowGatewayPlugin\.class\)/) })
 
-test('Pangolin source gates: native prompt, both transports, encrypted private record and cancellation', () => {
-  const native = source('CrowGatewayPlugin'), auth = source('PangolinAuth'), prompt = source('PangolinPrompt')
-  assert.match(native, /runOnUiThread/); assert.match(native, /PangolinPrompt\.show/)
-  assert.match(prompt, /Destino exacto:/); assert.match(prompt, /confirmed\.isChecked\(\)/)
-  assert.match(prompt, /TYPE_TEXT_VARIATION_PASSWORD/); assert.match(prompt, /IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS/); assert.match(prompt, /FLAG_SECURE/)
-  assert.match(prompt, /ScrollView/); assert.match(prompt, /SOFT_INPUT_ADJUST_RESIZE/); assert.match(prompt, /token\.requestFocus\(\)/)
-  assert.match(prompt, /setOnDismissListener[\s\S]*id\.setText\(""\); token\.setText\(""\)/)
-  assert.match(native, /finally \{ auth\.remove\("token"\); auth\.remove\("tokenId"\)/)
-  assert.match(native, /handleOnPause\(\)[^\n]*cancelProxyPrompt/)
+test('Pangolin QR auth is origin-bound, confirmed on Android, encrypted at rest and never returned in the public profile', () => {
+  const native = source('CrowGatewayPlugin'), auth = source('PangolinAuth'), policy = source('EndpointPolicy'), ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
+  assert.match(native, /PangolinAuth\.validate\(endpoint, proxyAuth\)/)
+  assert.match(native, /destinationConfirmed/); assert.match(ui, /El dominio coincide exactamente con Windows/)
+  assert.match(policy, /relayRoute\|proxyAuth/)
+  assert.match(native, /finally \{ if \(proxyAuth != null\) \{ proxyAuth\.remove\("token"\); proxyAuth\.remove\("tokenId"\); proxyAuth\.remove\("origin"\)/)
   assert.match(native, /PangolinAuth\.headers\(request, endpoint, proxyAuth\)/)
   assert.match(native, /PangolinAuth\.headers\(requestBuilder, endpoint, record\.optJSONObject\("proxyAuth"\)\)/)
   assert.match(auth, /target\.host\(\)\.equals\(allowed\.host\(\)\)/); assert.match(auth, /target\.port\(\) != allowed\.port\(\)/); assert.match(auth, /!target\.isHttps\(\)/)
@@ -54,7 +51,8 @@ test('Pangolin source gates: native prompt, both transports, encrypted private r
   assert.doesNotMatch(native, /catch \(Exception invalid\) \{ forget\(id\)/)
   assert.match(native, /PangolinAuth\.rejected\(response\.code\(\), response\.header\("X-Crow-Mobile-API"\)\)/)
   assert.match(auth, /status == 403 && !"1"\.equals\(crowMarker\)/)
-  assert.doesNotMatch(prompt + auth, /Log\.|System\.out|call\.resolve|notifyListeners/)
+  assert.doesNotMatch(native + auth + ui, /Log\.|System\.out|console\.(?:log|debug|info)\(/)
+  assert.equal(existsSync(new URL('../android/app/src/main/java/dev/crow/companion/PangolinPrompt.java', import.meta.url)), false)
 })
 
 test('native gateway translates only bounded known Crow error codes without changing auth or retry behavior', () => {

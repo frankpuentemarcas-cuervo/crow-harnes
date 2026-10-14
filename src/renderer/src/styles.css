@@ -111,7 +111,7 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .mobile-dialog { max-height: min(90vh, 720px); overflow-y: auto; }
 .mobile-qr-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; border: 1px solid #424b59; border-radius: 8px; background: #171b21; text-align: center; }
 .mobile-qr-panel strong { color: #e9eef5; font-size: 12px; }
-.mobile-qr-panel img { width: min(256px, 100%); height: auto; aspect-ratio: 1; border: 8px solid white; border-radius: 7px; }
+.mobile-qr-panel img { width: min(384px, 100%); height: auto; aspect-ratio: 1; border: 8px solid white; border-radius: 7px; }
 .mobile-qr-panel small { color: #a8b4c2; font-size: 11px; }
 .mobile-qr-done { padding: 14px; border: 1px solid #4b7356; border-radius: 7px; color: #b7dfc0; background: #26412c42; font-size: 12px; }
 .mobile-manual { color: #b8c2ce; font-size: 11px; }
@@ -125,6 +125,10 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .mobile-credentials code { color: #e2e9f2; font-size: 11px; overflow-wrap: anywhere; user-select: all; }
 .mobile-credentials p { margin: 0; }
 .mobile-security-note { color: #e4c58a !important; }
+.mobile-pangolin-fields { display: grid; gap: 7px; }
+.mobile-pangolin-fields small { color: #e4c58a; line-height: 1.45; }
+.mobile-pangolin-token { display: flex; gap: 8px; align-items: center; }
+.mobile-pangolin-token input { flex: 1; min-width: 0; }
 .connection-pill { border: 1px solid #50555d; border-radius: 10px; color: #9aa2ad; font-size: 10px; padding: 3px 8px; white-space: nowrap; margin-left: 4px; }
 .connection-pill.connected { border-color: #4b7356; color: #a5d4ae; background: #26412c42; }
 .connection-pill.connecting { border-color: #88734b; color: #e2c486; background: #54412442; }

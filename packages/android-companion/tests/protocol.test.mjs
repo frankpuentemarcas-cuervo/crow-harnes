@@ -3,11 +3,13 @@ import assert from 'node:assert/strict'
 import { parseEnrollment, OutputCursor, encodeInput, decodeOutput, mayOperate, mayWake, staleQuota, agentLabel, sessionStateLabel, quotaStateLabel } from '../src/protocol.mjs'
 const valid = () => ({ version: 2, gatewayId: 'gateway-test', invitationCode: 'one-use', expiresAt: '2099-01-01T00:00:00Z', endpoints: [{ kind: 'lan-pinned', url: 'https://192.168.1.10:9841', certSHA256: Array(32).fill('AB').join(':') }] })
 
-test('Pangolin metadata requests native authentication, never accepts resource secrets in QR', () => {
+test('Pangolin enrollment carries only a valid resource token bound to its exact HTTPS origin', () => {
   const endpoint = { kind: 'remote-public', url: 'https://crow.example.com', provider: 'pangolin', proxyAuthRequired: true }
   const enrollment = updates => JSON.stringify({ ...valid(), endpoints: [{ ...endpoint, ...updates }] })
-  assert.equal(parseEnrollment(enrollment({})).endpoints[0].proxyAuthRequired, true)
-  for (const changes of [{ proxyAuthRequired: false }, { proxyAuthRequired: 'true' }, { provider: 'unknown' }, { kind: 'lan-pinned', certSHA256: valid().endpoints[0].certSHA256 }, { url: 'https://crow.example.com:443' }, { url: 'https://127.0.0.1' }, { token: 'fake' }, { tokenId: 'fake' }, { proxyAuth: {} }]) assert.throws(() => parseEnrollment(enrollment(changes)))
+  const proxyAuth = { origin: endpoint.url, tokenId: 'resource-token-id', token: 'resource-secret' }
+  assert.equal(parseEnrollment(enrollment({ proxyAuth })).endpoints[0].proxyAuth.tokenId, 'resource-token-id')
+  assert.throws(() => parseEnrollment(enrollment({})), /token Pangolin/)
+  for (const changes of [{ proxyAuthRequired: false }, { proxyAuthRequired: 'true' }, { provider: 'unknown' }, { kind: 'lan-pinned', certSHA256: valid().endpoints[0].certSHA256 }, { url: 'https://crow.example.com:443' }, { url: 'https://127.0.0.1' }, { token: 'fake' }, { tokenId: 'fake' }, { proxyAuth: {} }, { proxyAuth: { ...proxyAuth, origin: 'https://other.example.com' } }, { proxyAuth: { ...proxyAuth, token: 'bad token' } }, { proxyAuth: { ...proxyAuth, extra: 'field' } }]) assert.throws(() => parseEnrollment(enrollment(changes)))
   assert.throws(() => parseEnrollment(JSON.stringify({ ...valid(), proxyAuth: { token: 'fake' } })))
 })
 test('new links require valid future v2 invitations; old QR requires explicit Windows regeneration', () => {

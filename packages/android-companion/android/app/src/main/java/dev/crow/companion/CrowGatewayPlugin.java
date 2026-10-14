@@ -13,7 +13,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
 import okhttp3.Call;
@@ -32,8 +31,6 @@ import org.json.JSONObject;
 @CapacitorPlugin(name = "CrowGateway")
 public class CrowGatewayPlugin extends Plugin {
     private CredentialStore store;
-    private volatile android.app.AlertDialog proxyDialog;
-    private final AtomicBoolean proxyPromptActive = new AtomicBoolean();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicLong epoch = new AtomicLong();
     private final ConcurrentHashMap<String, AtomicLong> generations = new ConcurrentHashMap<>();
@@ -167,24 +164,18 @@ public class CrowGatewayPlugin extends Plugin {
             JSONObject invitation = call.getObject("enrollment");
             if (invitation != null && invitation.getInt("version") == 1) throw new IllegalArgumentException("Actualizá Crow en Windows y generá un nuevo QR. Este vínculo requiere el protocolo nuevo.");
             if (invitation == null || invitation.getInt("version") != 2 || !Instant.parse(invitation.getString("expiresAt")).isAfter(Instant.now()) || invitation.getString("gatewayId").isEmpty()) throw new IllegalArgumentException("Invitación inválida o vencida.");
-            java.util.Iterator<String> fields = invitation.keys(); while (fields.hasNext()) if (!fields.next().matches("version|gatewayId|invitationCode|expiresAt|endpoints")) throw new IllegalArgumentException("El QR no puede incluir claves del recurso.");
+            java.util.Iterator<String> fields = invitation.keys(); while (fields.hasNext()) if (!fields.next().matches("version|gatewayId|invitationCode|expiresAt|endpoints")) throw new IllegalArgumentException("La invitación contiene campos desconocidos.");
             JSONArray endpoints = invitation.getJSONArray("endpoints"); int index = call.getInt("endpointIndex", -1);
             if (endpoints.length() > 8 || index < 0 || index >= endpoints.length()) throw new IllegalArgumentException("Seleccioná un endpoint de la invitación.");
             JSONObject endpoint = endpoints.getJSONObject(index); EndpointPolicy.origin(endpoint);
-            if ((endpoint.getString("kind").equals("lan-pinned") || endpoint.getString("kind").equals("relay")) && !call.getBoolean("fingerprintConfirmed", false)) throw new IllegalArgumentException("Confirmá la huella desde Windows antes de vincular.");
+            boolean pangolin = PangolinAuth.required(endpoint);
+            if ((endpoint.getString("kind").equals("lan-pinned") || endpoint.getString("kind").equals("relay") || pangolin) && !call.getBoolean("destinationConfirmed", false)) throw new IllegalArgumentException("Confirmá el dominio o la huella desde Windows antes de vincular.");
             String label = call.getString("deviceName", "Android").trim(); if (label.isEmpty() || label.length() > 80) throw new IllegalArgumentException("Nombre de dispositivo inválido.");
-            if (PangolinAuth.required(endpoint)) {
-                if (!proxyPromptActive.compareAndSet(false, true)) throw new IllegalStateException("Ya hay una vinculación pendiente.");
-                getActivity().runOnUiThread(() -> {
-                    try { if (epoch.get() != e) throw new IllegalStateException("Conexión cancelada."); proxyDialog = PangolinPrompt.show(getActivity(), endpoint, auth -> {
-                        proxyDialog = null; proxyPromptActive.set(false);
-                        if (auth == null) { call.reject("Vinculación cancelada; no se guardaron claves."); return; }
-                        execute(call, () -> { try { completePair(call, invitation, endpoint, label, e, auth); } finally { auth.remove("token"); auth.remove("tokenId"); } });
-                    }); } catch (Exception invalid) { proxyPromptActive.set(false); call.reject("No se pudo abrir el diálogo nativo Pangolin."); }
-                });
-                return;
-            }
-            completePair(call, invitation, endpoint, label, e, null);
+            JSONObject proxyAuth = endpoint.optJSONObject("proxyAuth");
+            if (pangolin) { if (proxyAuth == null) throw new IllegalArgumentException("El QR no incluye las credenciales Pangolin del recurso."); PangolinAuth.validate(endpoint, proxyAuth); }
+            else if (endpoint.has("proxyAuth")) throw new IllegalArgumentException("Las credenciales del recurso solo se admiten para Pangolin.");
+            try { completePair(call, invitation, endpoint, label, e, proxyAuth); }
+            finally { if (proxyAuth != null) { proxyAuth.remove("token"); proxyAuth.remove("tokenId"); proxyAuth.remove("origin"); } }
         });
     }
     private void completePair(PluginCall call, JSONObject invitation, JSONObject endpoint, String label, long e, JSONObject proxyAuth) throws Exception {
@@ -288,7 +279,6 @@ public class CrowGatewayPlugin extends Plugin {
         });
     }
     @PluginMethod public void closeStream(PluginCall call) { String id = call.getString("connectionId", ""); streamGenerations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet(); Stream stream = streams.get(id); if (stream != null) stop(stream); call.resolve(); }
-    private void cancelProxyPrompt() { android.app.AlertDialog dialog = proxyDialog; if (dialog != null) getActivity().runOnUiThread(dialog::cancel); }
-    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); accessCredentials.clear(); cancelProxyPrompt(); for (Stream stream : streams.values()) stop(stream); }
-    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); cancelProxyPrompt(); for (Stream stream : streams.values()) stop(stream); worker.shutdownNow(); }
+    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); }
+    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); worker.shutdownNow(); }
 }

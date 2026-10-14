@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify, type KeyObject } from 'node:crypto'
-import type { MobileActorBinding, MobileCapabilities, MobileDevice, MobileDeviceChallenge, MobileEnrollment, MobileProject } from '../shared/mobile-companion'
+import type { MobileActorBinding, MobileCapabilities, MobileDevice, MobileDeviceChallenge, MobileEnrollmentMetadata, MobileProject } from '../shared/mobile-companion'
 import type { MobileMutationContext } from './mobile-mutation-ledger'
 
 export const INVITATION_TTL = 5 * 60_000
@@ -12,7 +12,7 @@ export class MobileHostUnavailableError extends Error {}
 export class MobileAuthorizationChangedError extends Error {}
 export interface MobileScope { projectId: string; hostId: string; root: string; hostDigest: string; binding: MobileActorBinding }
 export interface DeviceRecord { device: MobileDevice; scopes: MobileScope[]; tokenHash: string; publicKey?: string }
-interface Invitation { value: MobileEnrollment; scopes: MobileScope[]; unavailableProjects: MobileProject[]; capabilities: MobileCapabilities; codeHash: string }
+interface Invitation { value: MobileEnrollmentMetadata; scopes: MobileScope[]; unavailableProjects: MobileProject[]; capabilities: MobileCapabilities; codeHash: string }
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex')
 function matches(value: string, hash: string): boolean {
   const candidate = Buffer.from(digest(value), 'hex')
@@ -52,16 +52,16 @@ export class MobileDeviceRegistry {
     catch (error) { this.persistenceFailed = true; throw error }
   }
 
-  invite(value: Omit<MobileEnrollment, 'invitationCode' | 'expiresAt'>, scopes: MobileScope[], capabilities: MobileCapabilities, unavailableProjects: MobileProject[] = []): MobileEnrollment {
+  invite(value: Omit<MobileEnrollmentMetadata, 'invitationCode' | 'expiresAt'>, scopes: MobileScope[], capabilities: MobileCapabilities, unavailableProjects: MobileProject[] = []): MobileEnrollmentMetadata {
     this.assertAvailable()
     for (const record of this.records.values()) if (!this.active(record)) this.records.delete(record.device.id)
     if ((!scopes.length && !unavailableProjects.length) || this.records.size >= 16) throw new Error('Seleccioná al menos un proyecto (máximo 16 dispositivos).')
     const invitationCode = randomBytes(6).toString('hex').toUpperCase()
-    const enrollment: MobileEnrollment = { ...value, invitationCode, expiresAt: new Date(this.now() + INVITATION_TTL).toISOString() }
+    const enrollment: MobileEnrollmentMetadata = { ...value, invitationCode, expiresAt: new Date(this.now() + INVITATION_TTL).toISOString() }
     this.pending = { value: enrollment, scopes: structuredClone(scopes), unavailableProjects: structuredClone(unavailableProjects), capabilities: { ...capabilities }, codeHash: digest(invitationCode) }
     return enrollment
   }
-  invitation(): MobileEnrollment | undefined {
+  invitation(): MobileEnrollmentMetadata | undefined {
     if (this.pending && Date.parse(this.pending.value.expiresAt) <= this.now()) this.pending = undefined
     return this.pending?.value
   }
