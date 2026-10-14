@@ -44,8 +44,13 @@ jobs:
           path: linux-dist/*
           if-no-files-found: error
 
+  android:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/android-validation.yml
+
   release:
-    needs: linux
+    needs: [linux, android]
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -98,6 +103,12 @@ jobs:
           name: crowd-linux
           path: dist
 
+      - name: Download Android test APK
+        uses: actions/download-artifact@v4
+        with:
+          name: crow-android
+          path: dist
+
       - name: Publish and verify release assets
         shell: pwsh
         env:
@@ -107,9 +118,11 @@ jobs:
           $installer = "dist/Crow-Harness-Setup-$version-x64.exe"
           $blockmap = "$installer.blockmap"
           $metadata = 'dist/latest.yml'
+          $apk = "dist/Crow-Companion-$version-debug.apk"
+          $apkChecksum = "$apk.sha256"
           $linux = @('amd64', 'arm64') | ForEach-Object { "dist/crowd-linux-$_" }
           $checksums = $linux | ForEach-Object { "$_.sha256" }
-          $files = @($installer, $blockmap, $metadata) + $linux + $checksums
+          $files = @($installer, $blockmap, $metadata, $apk, $apkChecksum) + $linux + $checksums
           foreach ($file in $files) {
             if (-not (Test-Path -LiteralPath $file)) { throw "Missing release asset: $file" }
           }
@@ -118,14 +131,34 @@ jobs:
             $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             if ($expected -ne $actual) { throw "Linux checksum mismatch: $file" }
           }
+          $apkName = Split-Path $apk -Leaf
+          $apkSum = (Get-Content -LiteralPath $apkChecksum -Raw).Trim()
+          if ($apkSum -notmatch "^([a-fA-F0-9]{64})\s+\*?$([regex]::Escape($apkName))$") {
+            throw 'Android checksum file has an invalid hash or filename'
+          }
+          if ($Matches[1] -ne (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash) {
+            throw 'Android APK checksum mismatch'
+          }
           if (-not ((Get-Content -LiteralPath $metadata -Raw) -match "(?m)^version: $version\r?`$")) {
             throw 'latest.yml does not match the release version'
           }
+          $androidNotes = @"
+          ## Android companion: APK debug de prueba
+
+          - Asset: ``$apkName`` y su suma SHA-256.
+          - APK debug para evaluación, NO es una versión de producción ni de Google Play.
+          - La firma debug de CI es efímera; una compilación futura puede requerir reinstalar y volver a vincular.
+          - No se validó el funcionamiento en un teléfono real.
+          "@
           $existingRelease = gh release view $env:GITHUB_REF_NAME --json id,body 2>$null
           if ($LASTEXITCODE -eq 0) {
+            $notesPath = 'dist/release-notes.md'
+            "$androidNotes`n`n$(($existingRelease | ConvertFrom-Json).body)" | Set-Content -LiteralPath $notesPath -Encoding utf8
+            gh release edit $env:GITHUB_REF_NAME --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update release notes' }
             gh release upload $env:GITHUB_REF_NAME @files --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME @files --title $version --generate-notes --verify-tag --latest
+            gh release create $env:GITHUB_REF_NAME @files --title $version --notes $androidNotes --generate-notes --verify-tag --latest
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release upload failed' }
 
