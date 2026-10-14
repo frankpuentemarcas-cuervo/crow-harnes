@@ -11,7 +11,7 @@ test('relay Compose is locked to Node 22 and installs production dependencies fr
   assert.match(compose, /image:\s*node:22-alpine/)
   assert.match(compose, /"npm",\s*"ci",\s*"--omit=dev",\s*"--ignore-scripts"/)
   assert.match(compose, /condition:\s*service_completed_successfully/)
-  assert.match(compose, /MAX_ROUTES:\s*["']?2["']?\s*\n\s*MAX_DEVICE_STREAMS_PER_ROUTE:\s*["']?4/)
+  assert.match(compose, /MAX_ROUTES:\s*["']?16["']?\s*\n\s*MAX_DEVICE_STREAMS_PER_ROUTE:\s*["']?4/)
   assert.match(compose, /cpus:\s*["']?0\.25["']?\s*\n\s*mem_limit:\s*128m\s*\n\s*pids_limit:\s*32/)
   assert.match(compose, /mobile-relay-node-modules:/)
   assert.equal(lock.lockfileVersion, 3)

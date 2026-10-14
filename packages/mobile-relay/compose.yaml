@@ -28,7 +28,7 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: "8080"
-      MAX_ROUTES: "2"
+      MAX_ROUTES: "16"
       MAX_DEVICE_STREAMS_PER_ROUTE: "4"
     depends_on:
       mobile-relay-deps:
