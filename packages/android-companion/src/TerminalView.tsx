@@ -10,8 +10,9 @@ import { OutputCursor, encodeInput, decodeOutput, mayOperate, inputByteLength, M
 import '@xterm/xterm/css/xterm.css'
 
 export function TerminalView({ profile, hostId, session, onBack, onError, onState }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onError(message: string): void; onState(info: MobileSession): void }) {
-  const surface = useRef<HTMLDivElement>(null), terminal = useRef<Terminal | null>(null), fit = useRef<FitAddon | null>(null), connection = useRef(''), live = useRef(false)
+  const surface = useRef<HTMLDivElement>(null), terminal = useRef<Terminal | null>(null), fit = useRef<FitAddon | null>(null), connection = useRef(''), live = useRef(false), retryConnection = useRef<() => void>(() => {})
   const [connected, setConnected] = useState(false), [streamState, setStreamState] = useState<'connecting' | 'connected' | 'reconnecting' | 'disconnected'>('connecting'), [resizeMessage, setResizeMessage] = useState(''), [outputGap, setOutputGap] = useState(false), [prompt, setPrompt] = useState(''), [pending, setPending] = useState(false), [paste, setPaste] = useState<string | null>(null)
+  const [resizing, setResizing] = useState(false)
   const canInput = mayOperate(session, profile.device), writable = useRef(canInput)
   writable.current = canInput
   async function send(text: string) {
@@ -19,7 +20,7 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
     if (!live.current || !writable.current) { onError('La terminal no está lista para recibir texto.'); return false }
     const id = connection.current
     try { await Gateway.send({ connectionId: id, type: 'input', data: encodeInput(text) }); return connection.current === id }
-    catch (error) { if (connection.current !== id) return false; live.current = false; setConnected(false); onError(`${String(error)} Verificá el resultado antes de repetir el envío.`); return false }
+    catch (error) { if (connection.current !== id) return false; onError(`${String(error)} Verificá el resultado antes de repetir el envío.`); retryConnection.current(); return false }
   }
   useEffect(() => {
     if (!surface.current) return
@@ -29,6 +30,7 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
     const handles: { remove(): Promise<void> }[] = []
     function detach() { const id = connection.current; connection.current = ''; live.current = false; setConnected(false); if (id) void Gateway.closeStream({ connectionId: id }) }
     function schedule() { if (disposed || !active) return; clearTimeout(retryTimer); retryTimer = setTimeout(() => void connect(), Math.min(15000, 1000 * 2 ** Math.min(retries++, 4))) }
+    retryConnection.current = () => { if (disposed || !active) return; detach(); setStreamState('reconnecting'); schedule() }
     async function connect() {
       if (disposed || !active) return
       detach(); setStreamState(retries ? 'reconnecting' : 'connecting'); const id = crypto.randomUUID(); connection.current = id
@@ -62,15 +64,18 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
     const input = instance.onData(data => { if (data.includes('\n') || data.includes('\r') && data.length > 1) setPaste(data); else void send(data) })
     const observer = new ResizeObserver(() => sizing.fit()); observer.observe(surface.current)
     // Local fitting never changes the shared remote PTY; only the explicit Adaptar action does.
-    return () => { disposed = true; active = false; clearTimeout(retryTimer); detach(); input.dispose(); observer.disconnect(); for (const handle of handles) void handle.remove(); instance.dispose(); terminal.current = null; fit.current = null }
+    return () => { disposed = true; active = false; retryConnection.current = () => {}; clearTimeout(retryTimer); detach(); input.dispose(); observer.disconnect(); for (const handle of handles) void handle.remove(); instance.dispose(); terminal.current = null; fit.current = null }
   }, [profile.id, hostId, session.id])
   useEffect(() => { if (terminal.current) terminal.current.options.disableStdin = !canInput }, [canInput])
   async function submit() { if (!prompt || pending) return; setPending(true); const text = prompt; if (await send(text + '\r')) setPrompt(previous => previous === text ? '' : previous); setPending(false) }
   async function resizeRemote() {
     const term = terminal.current
-    if (!term || !connected) return
-    try { await Gateway.send({ connectionId: connection.current, type: 'resize', cols: term.cols, rows: term.rows }); setResizeMessage('Tamaño ajustado para Android y Crow Windows.') }
-    catch { onError('No se pudo ajustar el tamaño compartido. La terminal sigue abierta; reintentá cuando esté conectada.') }
+    if (!term || !connected || resizing) return
+    const id = connection.current
+    setResizing(true)
+    try { fit.current?.fit(); await Gateway.send({ connectionId: id, type: 'resize', cols: term.cols, rows: term.rows }); if (connection.current === id) setResizeMessage('Tamaño ajustado para Android y Crow Windows.') }
+    catch (error) { if (connection.current === id) { onError(`No se pudo ajustar el tamaño compartido. ${String(error)} No se repite la acción automáticamente.`); retryConnection.current() } }
+    finally { setResizing(false) }
   }
   return <section className="terminal-page">
     <div className="terminal-heading">
@@ -97,11 +102,11 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
       <div className="terminal-tools" role="group" aria-label="Herramientas de terminal">
         <button onClick={() => { const text = terminal.current?.getSelection(); if (text) void Clipboard.write({ string: text }).catch(error => onError(String(error))); else onError('Seleccioná texto de la salida primero.') }}>Copiar selección</button>
         <button disabled={!connected || !canInput} onClick={() => void Clipboard.read().then(value => setPaste(value.value)).catch(error => onError(String(error)))}>Pegar…</button>
-        <button className="terminal-resize" title="Ajusta las filas y columnas compartidas también en Crow Windows" disabled={!connected || !canInput} onClick={() => void resizeRemote()}>Ajustar + Windows</button>
+        <button className="terminal-resize" title="Ajusta las filas y columnas compartidas también en Crow Windows" disabled={!connected || !canInput || resizing} aria-busy={resizing} onClick={() => void resizeRemote()}>{resizing ? 'Ajustando…' : 'Ajustar + Windows'}</button>
       </div>
       <p>Volver no cierra el proceso. Ajustar tamaño modifica esta terminal también en Crow Windows.</p>
     </details>
-    {canInput && <form className="compose" onSubmit={event => { event.preventDefault(); if (prompt.includes('\n')) setPaste(prompt + '\r'); else void submit() }}><label className="sr-only" htmlFor="prompt">Mensaje al agente</label><textarea id="prompt" rows={2} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Escribí al agente…" /><button className="primary" disabled={!connected || pending || !prompt}>Enviar</button></form>}
+    {canInput && <form className="compose" onSubmit={event => { event.preventDefault(); if (prompt.includes('\n')) setPaste(prompt + '\r'); else void submit() }}><label className="sr-only" htmlFor="prompt">Mensaje al agente</label><textarea id="prompt" rows={2} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Escribí al agente…" /><button className="primary" disabled={!connected || pending || !prompt}>{pending ? 'Enviando…' : 'Enviar'}</button></form>}
     {paste !== null && <PasteConfirmation text={paste} onCancel={() => setPaste(null)} onConfirm={() => { const text = paste; setPaste(null); void send(text).then(sent => { if (sent) setPrompt('') }) }} />}
   </section>
 }
