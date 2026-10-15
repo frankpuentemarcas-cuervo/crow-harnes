@@ -197,7 +197,11 @@ async function mobileAuthSnapshot(hostId: string): Promise<MobileActorBinding> {
   const revision = mobileHostGenerations.get(hostId) || 0
   const accessRevision = accessGeneration
   let status: Awaited<ReturnType<Connection['accessStatus']>>, identity: Awaited<ReturnType<Connection['accessIdentity']>>
-  try { status = await current.accessStatus(); identity = await current.accessIdentity() }
+  try {
+    const installation = current.installationIdentity?.()
+    if (installation) { status = { enabled: false, credentialRequired: false, version: 1 }; identity = installation }
+    else { status = await current.accessStatus(); identity = await current.accessIdentity() }
+  }
   catch (error) {
     if ([401, 403, 404].includes((error as { status?: number })?.status || 0)) throw new MobileAuthorizationChangedError('La identidad Crow fue rechazada o el servicio ya no admite acceso individual.')
     throw new MobileHostUnavailableError('No se pudo comprobar la identidad del host. El acceso está pausado.')

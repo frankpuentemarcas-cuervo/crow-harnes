@@ -137,6 +137,39 @@ test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).headers['X-Crow-Mobile-API'], '1')
   assert.equal((await c.request('/api/state', 'GET', undefined, paired.credential, {}, true)).status, 404)
 })
+
+test('multi-project device authorization checks the host once per validation', async () => {
+  const c = fixture(), original = c.gateway.deps.authSnapshot
+  let checks = 0
+  c.gateway.deps.authSnapshot = async id => { checks++; return original(id) }
+  const invitation = await c.gateway.invite({ projectIds: ['p1', 'p2'] }, 1)
+  const paired = await c.request('/api/v1/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android' })
+  assert.equal(paired.status, 200)
+  checks = 0
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.body.credential)).status, 200)
+  assert.equal(checks, 1)
+})
+
+test('v2 installation input and resize preserve owner checks and dispatch once', async () => {
+  const c = fixture(), owner = `installation:${'d'.repeat(32)}`
+  c.binding({ actorId: owner, generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'installation' })
+  c.sessions([{ id: SESSION, agent: 'claude', root: '/work', ownerId: owner, state: 'running', readOnly: false }])
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'], capabilities: { input: true } })
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+  assert.equal(paired.status, 200)
+  const client = await c.socket(paired.body.credential), streamId = client.frames.find(frame => frame.type === 'ready').streamId
+  for (const [route, value] of [['input', { data: 'aGk=' }], ['resize', { cols: 80, rows: 24 }]]) {
+    const body = { streamId, requestId: randomUUID(), ...value }
+    assert.equal((await c.request(`/api/v1/${route}`, 'POST', body, paired.body.credential)).status, 200)
+    assert.equal((await c.request(`/api/v1/${route}`, 'POST', body, paired.body.credential)).status, 200)
+    assert.equal(c.calls.filter(call => call.stream && call.body.type === route).length, 1)
+  }
+  c.sessions([{ id: SESSION, agent: 'claude', root: '/work', ownerId: `installation:${'e'.repeat(32)}`, readOnly: true }])
+  const denied = await c.request('/api/v1/input', 'POST', { streamId, requestId: randomUUID(), data: 'aGk=' }, paired.body.credential)
+  assert.notEqual(denied.status, 200)
+  assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 1)
+})
 test('offline or unauthorized selected projects remain visible but receive no operational scope', async () => {
   const c = fixture()
   c.hostStatus('disconnected')
@@ -294,6 +327,24 @@ test('output is sequenced, allowlisted and backpressure closes slow consumers', 
   client.bufferedAmount = 1024 * 1024 + 1
   emit({ type: 'output', seq: 7, data: 'ZA==' })
   assert.equal(client.ended, true)
+})
+
+test('terminal replay bursts pause upstream and render without disconnecting or dropping frames', async () => {
+  const c = fixture(), paired = await c.pair({ input: true }), client = await c.socket(paired.credential)
+  const stream = [...c.gateway.clients.values()][0]
+  let pauses = 0, resumes = 0
+  stream.connection.pauseStream = () => pauses++
+  stream.connection.resumeStream = () => resumes++
+  const emit = c.streams.get(stream.streamId).emit
+  for (let seq = 5; seq < 517; seq++) emit({ type: 'output', seq, data: 'aGk=' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(client.ended, false)
+  assert.equal(pauses, 1)
+  assert.equal(resumes, 1)
+  assert.deepEqual(client.frames.filter(frame => frame.type === 'output').map(frame => frame.seq), Array.from({ length: 512 }, (_, i) => i + 5))
+  assert.equal((await c.request('/api/v1/resize', 'POST', { streamId: stream.streamId, cols: 80, rows: 24 }, paired.credential)).status, 200)
+  emit({ type: 'output', seq: 517, data: 'x'.repeat(1024 * 1024) })
+  assert.equal(client.ended, true, 'byte-based memory limit is still enforced')
 })
 test('stop cancels invitations and streams but preserves device trust; legacy cookies expire', async () => {
   const c = fixture(), paired = await c.pair(), client = await c.socket(paired.credential)

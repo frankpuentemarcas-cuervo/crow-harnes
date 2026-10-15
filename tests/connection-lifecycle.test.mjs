@@ -21,6 +21,7 @@ function fixture(mode = 'healthy') {
     } } }
     if (id === './transport-failure') return { isTransportFailure: () => false }
     if (id === './installation-identity') return { getInstallationId: () => 'c'.repeat(32) }
+    if (id === 'ws') return { default: require(id) }
     if (id === './connection-diagnostics') return { safeFailureReason: value => /ECONNRESET/.test(value?.message || '') ? 'network-reset' : 'unknown', safeConnectionCode: () => undefined }
     if (id === 'node:child_process') return { spawn() { throw new Error('External SSH forbidden') }, execFile() {} }
     if (id.startsWith('node:')) return require(id)
@@ -32,7 +33,7 @@ function fixture(mode = 'healthy') {
     fetch: async url => {
       state.fetches++
       if (state.mode === 'hold-access' && state.fetches === 2) await new Promise(resolve => { state.release = resolve })
-      return new Response(JSON.stringify(url.includes('/api/events') ? [] : url.includes('/api/access/me') ? { role: 'installation', id: `installation:${'c'.repeat(32)}`, allowedRoots: [] } : { enabled: false }))
+      return new Response(JSON.stringify(url.includes('/api/events') ? [] : url.includes('/api/access/me') ? { role: 'installation', id: `installation:${(state.mode === 'foreign-installation' ? 'd' : 'c').repeat(32)}`, allowedRoots: [] } : { enabled: false }))
     }
   }
   vm.runInNewContext(compiled, globals)
@@ -94,4 +95,60 @@ test('stopping and starting again permits a fresh retry instead of retaining a c
     await assert.rejects(f.connection.connect()); assert.equal(f.retries().length, 1)
     f.state.mode = 'healthy'; f.retry(); await tick(); assert.equal(f.connection.status(), 'connected')
   } finally { f.connection.stop() }
+})
+
+test('installation identity snapshot is verified per transport and disappears on loss', async () => {
+  const f = fixture()
+  assert.equal(f.connection.installationIdentity(), undefined)
+  await f.connection.connect()
+  const fetches = f.state.fetches
+  const identity = f.connection.installationIdentity()
+  assert.equal(identity.role, 'installation')
+  assert.equal(identity.id, `installation:${'c'.repeat(32)}`)
+  identity.allowedRoots.push('/not-a-grant')
+  assert.deepEqual(Array.from(f.connection.installationIdentity().allowedRoots), [])
+  assert.equal(f.state.fetches, fetches, 'reading a verified snapshot requires no new SSH API requests')
+  f.state.attempts[0].lost()
+  assert.equal(f.connection.installationIdentity(), undefined)
+  f.connection.stop()
+})
+
+test('another installation cannot become the verified identity of this transport', async () => {
+  const f = fixture('foreign-installation')
+  try {
+    await assert.rejects(f.connection.connect(), /identidad automática/)
+    assert.equal(f.connection.status(), 'disconnected')
+    assert.equal(f.connection.installationIdentity(), undefined)
+  } finally { f.connection.stop() }
+})
+
+test('remote stream backpressure pauses and resumes without discarding output', { timeout: 5000 }, async t => {
+  const { WebSocketServer } = require('ws')
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise(resolve => server.once('listening', resolve))
+  const f = fixture(), output = []
+  t.after(async () => {
+    f.connection.stop()
+    for (const client of server.clients) client.terminate()
+    await new Promise(resolve => server.close(resolve))
+  })
+  await f.connection.connect()
+  f.connection.localPort = server.address().port
+  let finish, paused
+  const complete = new Promise(resolve => { finish = resolve })
+  const firstBatch = new Promise(resolve => { paused = resolve })
+  await f.connection.attach('stream', 'a'.repeat(32), 0, frame => {
+    if (frame.type !== 'output') return
+    output.push(frame.seq)
+    if (output.length === 2) { f.connection.pauseStream('stream'); paused() }
+    if (output.length === 20) finish()
+  })
+  for (let seq = 1; seq <= 2; seq++) [...server.clients][0].send(JSON.stringify({ type: 'output', seq, data: 'aGk=' }))
+  await firstBatch
+  for (let seq = 3; seq <= 20; seq++) [...server.clients][0].send(JSON.stringify({ type: 'output', seq, data: 'aGk=' }))
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(output.length, 2)
+  f.connection.resumeStream('stream')
+  await complete
+  assert.deepEqual(output, Array.from({ length: 20 }, (_, i) => i + 1))
 })

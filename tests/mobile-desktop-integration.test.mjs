@@ -65,6 +65,19 @@ test('automatic installation identity enrolls Android and sees its local project
   assert.equal(binding.role, 'installation')
 })
 
+test('mobile installation validation uses the authenticated tunnel without identity HTTP fan-out', async () => {
+  const h = harness()
+  h.connection.installationIdentity = () => ({ id: `installation:${'d'.repeat(32)}`, role: 'installation', allowedRoots: [], operateOthers: false })
+  h.connection.accessStatus = h.connection.accessIdentity = async () => { throw new Error('No extra SSH requests') }
+  const first = plain(await h.auth('host'))
+  assert.equal(first.role, 'installation')
+  assert.deepEqual(first.allowedRoots, ['/srv/project'])
+  h.state.projects[0].root = '/srv/moved'
+  assert.deepEqual(plain(await h.auth('host')).allowedRoots, ['/srv/moved'], 'project grants are recomputed, not cached')
+  h.connection.status = () => 'disconnected'
+  await assert.rejects(h.auth('host'), error => error instanceof mobileAuth.MobileHostUnavailableError)
+})
+
 test('legacy bootstrap and disconnected hosts cannot enroll Android', async () => {
   const h = harness(); h.connection.accessIdentity = async () => ({ role: 'legacy', label: 'Bootstrap' })
   await assert.rejects(h.auth('host'), /identidad automática/)

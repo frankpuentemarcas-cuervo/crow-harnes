@@ -50,6 +50,7 @@ export class Connection {
   private token = ''
   private credentialVault: HostCredentialVault
   private installationId = getInstallationId()
+  private verifiedInstallation?: AccessPrincipal
   private currentStatus: ConnectionStatus = 'disconnected'
   private desired = false
   private connecting?: Promise<void>
@@ -74,6 +75,12 @@ export class Connection {
   }
 
   status(): ConnectionStatus { return this.currentStatus }
+
+  /** Immutable installation identity verified by this live SSH transport, never a cached member grant. */
+  installationIdentity(): AccessPrincipal | undefined {
+    if (this.currentStatus !== 'connected' || !this.verifiedInstallation) return
+    return { ...this.verifiedInstallation, allowedRoots: [...this.verifiedInstallation.allowedRoots] }
+  }
 
   connect(): Promise<void> {
     this.desired = true
@@ -103,6 +110,7 @@ export class Connection {
   }
 
   private closeTransport(): void {
+    this.verifiedInstallation = undefined
     const tunnel = this.tunnel
     this.tunnel = undefined
     tunnel?.kill()
@@ -197,8 +205,9 @@ export class Connection {
       const identityResponse = await fetch(this.baseURL('/api/access/me'), { headers: this.headers(), signal: AbortSignal.timeout(2500) })
       if (!identityResponse.ok) throw new Error('El host no pudo identificar esta instalación de Crow. Actualizá crowd en el servidor y volvé a conectar.')
       const identity = await identityResponse.json() as AccessIdentity
-      if (identity.role !== 'installation' || !identity.id.startsWith('installation:')) throw new Error('El host remoto no admite identidad automática. Actualizá crowd para separar las terminales por instalación.')
+      if (identity.role !== 'installation' || identity.id !== `installation:${this.installationId}` || identity.revoked) throw new Error('El host remoto no admite identidad automática. Actualizá crowd para separar las terminales por instalación.')
       if (!this.desired || transport !== (this.encryptedTunnel ?? this.tunnel)) throw new Error('Conexión cancelada o perdida durante la apertura.')
+      this.verifiedInstallation = { id: identity.id, label: 'Este Crow', role: 'installation', operateOthers: false, allowedRoots: [] }
       if (passphrase && this.host.identity) this.vault.set(this.host.id, this.host.identity, passphrase)
       this.delay = 1000
       this.setStatus('connected')
@@ -387,6 +396,8 @@ export class Connection {
   }
 
   ownsStream(id: string): boolean { return this.streams.has(id) }
+  pauseStream(id: string): void { this.streams.get(id)?.pause() }
+  resumeStream(id: string): void { this.streams.get(id)?.resume() }
   detach(id: string): void { this.streams.get(id)?.close(); this.streams.delete(id) }
 
   send(id: string, value: unknown): void {

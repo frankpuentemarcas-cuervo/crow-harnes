@@ -195,6 +195,7 @@ export class MobileGateway {
   private relayLocalPort = 0
   private failures = new Map<string, { count: number; until: number }>()
   private monitor?: NodeJS.Timeout
+  private auditing = false
   private trustStore?: MobileTrustPersistence
   private trustLoaded = false
   private trustFault?: Error
@@ -412,10 +413,12 @@ export class MobileGateway {
     return a.actorId === b.actorId && a.generation === b.generation && a.operateOthers === b.operateOthers && (a.role === undefined || a.role === b.role) && JSON.stringify([...a.allowedRoots].sort()) === JSON.stringify([...b.allowedRoots].sort())
   }
   private async validateScopes(scopes: MobileScope[], allowUnavailable = false): Promise<void> {
+    const actors = new Map<string, Promise<MobileActorBinding>>()
     for (const scope of scopes) {
       try {
         this.validateConfig(scope)
-        const live = await this.actor(scope.hostId)
+        if (!actors.has(scope.hostId)) actors.set(scope.hostId, this.actor(scope.hostId))
+        const live = await actors.get(scope.hostId)!
         this.validateConfig(scope)
         if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió. Volvé a emparejar.')
       } catch (error) {
@@ -432,10 +435,12 @@ export class MobileGateway {
     this.ensureTrust()
     if (!this.registry.active(record)) throw new Error('Emparejamiento vencido o revocado.')
     if (!this.server) throw new MobileHostUnavailableError('Gateway pausado.')
+    const actors = new Map<string, Promise<MobileActorBinding>>()
     for (const scope of record.scopes) {
       try {
         this.validateConfig(scope)
-        const live = await this.actor(scope.hostId)
+        if (!actors.has(scope.hostId)) actors.set(scope.hostId, this.actor(scope.hostId))
+        const live = await actors.get(scope.hostId)!
         this.validateConfig(scope)
         if (!this.sameBinding(live, scope.binding) || !live.allowedRoots.includes(scope.root)) throw new MobileAuthorizationChangedError('La identidad o autorización cambió.')
       } catch (error) {
@@ -747,9 +752,13 @@ export class MobileGateway {
     } catch { json(res, 404, { error: 'Vista móvil no disponible.' }) }
   }
   private async auditStreams(): Promise<void> {
-    for (const stream of this.clients.values()) {
-      try { this.validateStreamCredential(stream); await this.allowedSession(stream.hostId, stream.sessionId, stream.device) } catch { stream.client.terminate() }
-    }
+    if (this.auditing) return
+    this.auditing = true
+    try {
+      for (const stream of this.clients.values()) {
+        try { this.validateStreamCredential(stream); await this.allowedSession(stream.hostId, stream.sessionId, stream.device) } catch { stream.client.terminate() }
+      }
+    } finally { this.auditing = false }
   }
   private async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, proxy: boolean): Promise<void> {
     try {
@@ -798,10 +807,14 @@ export class MobileGateway {
         client.on('close', () => { connection.detach(streamId); this.clients.delete(streamId) })
         let queued = 0
         let queueBytes = 0
+        let outputPaused = false
         let frames = Promise.resolve()
         void connection.attach(streamId, sessionId, from, frame => {
           const bytes = Buffer.byteLength(JSON.stringify(frame))
-          if (++queued > 128 || (queueBytes += bytes) > 1024 * 1024 || client.bufferedAmount > 1024 * 1024) { client.close(1013, 'Consumidor lento'); return }
+          // Pause the backend before the queue fills. ws may still deliver frames
+          // already decoded from the current TCP packet; retain that bounded burst.
+          if (++queued > 4096 || (queueBytes += bytes) > 1024 * 1024 || client.bufferedAmount > 1024 * 1024) { client.close(1013, 'Consumidor lento'); return }
+          if (!outputPaused && queued >= 64) { outputPaused = true; connection.pauseStream?.(streamId) }
           frames = frames.then(async () => {
             try {
               if (device) await this.validateDevice(device); else await this.browserValid()
@@ -818,7 +831,10 @@ export class MobileGateway {
                 else throw new Error('Salida inválida.')
               }
               client.send(JSON.stringify(output))
-            } catch { client.close(1008, 'Identidad revocada') } finally { --queued; queueBytes -= bytes }
+            } catch { client.close(1008, 'Identidad revocada') } finally {
+              --queued; queueBytes -= bytes
+              if (outputPaused && queued <= 32 && client.readyState === WebSocket.OPEN) { outputPaused = false; connection.resumeStream?.(streamId) }
+            }
           })
         }).then(async () => {
           if (device) await this.validateDevice(device); else await this.browserValid()
