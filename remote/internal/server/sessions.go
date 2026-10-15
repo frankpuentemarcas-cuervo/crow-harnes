@@ -347,10 +347,14 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 	if a.access.data.Enabled {
 		valid := false
 		if principal != nil {
-			for _, u := range a.access.data.Users {
-				if u.ID == principal.ID && !u.Revoked {
-					valid = true
-					break
+			if principal.Role == "installation" {
+				_, valid = installationIDFromOwner(principal.ID)
+			} else {
+				for _, u := range a.access.data.Users {
+					if u.ID == principal.ID && !u.Revoked {
+						valid = true
+						break
+					}
 				}
 			}
 		}

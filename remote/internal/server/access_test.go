@@ -28,6 +28,7 @@ func accessFixture(t *testing.T) (*App, http.Handler, string) {
 	a.events = []Event{{ID: "e1", SessionID: "one", Seq: 1}, {ID: "e2", SessionID: "two", Seq: 2}, {ID: "e3", SessionID: "legacy", Seq: 3}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
+	mux.HandleFunc("POST /api/sessions", a.handleSessions)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
@@ -97,6 +98,20 @@ func TestInstallationIdentityWorksBeforeIndividualAccessIsEnabled(t *testing.T) 
 		t.Fatalf("installation did not scope legacy-mode sessions: %d %s", w.Code, w.Body)
 	}
 }
+
+func TestInstallationIdentityCanCreateSessionWithIndividualAccessEnabled(t *testing.T) {
+	_, h, root := accessFixture(t)
+	id := strings.Repeat("d", 32)
+	body, err := json.Marshal(map[string]string{"agent": "unsupported", "mode": "normal", "root": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := installationRequest(h, "admin-token", id, "POST", "/api/sessions", string(body))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unsupported agent") {
+		t.Fatalf("installation request failed before agent validation: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestAccessOwnershipMatrix(t *testing.T) {
 	_, h, _ := accessFixture(t)
 	for _, tc := range []struct {
