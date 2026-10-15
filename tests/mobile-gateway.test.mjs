@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { stripTypeScriptTypes } from 'node:module'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -12,6 +14,7 @@ const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).t
 const registryURL = dataURL(ts('../src/main/mobile-device-auth.ts'))
 const mobileAuth = await import(registryURL)
 const trustStoreURL = dataURL(ts('../src/main/mobile-trust-store.ts').replace("from './mobile-device-auth'", `from '${registryURL}'`))
+const { MobileTrustStore } = await import(trustStoreURL)
 const ledgerURL = dataURL(ts('../src/main/mobile-mutation-ledger.ts'))
 const mobileSharedURL = dataURL(ts('../src/shared/mobile-companion.ts'))
 class Client extends EventEmitter {
@@ -34,7 +37,7 @@ const source = ts('../src/main/mobile-gateway.ts')
   .replace("from './mobile-mutation-ledger'", `from '${ledgerURL}'`)
 const { MobileGateway, mobileRemoteConfig, mobileRelayConfig, listenMobileLoopback } = await import(dataURL(source))
 const SESSION = 'a'.repeat(32), FOREIGN = 'b'.repeat(32), OUTSIDE = 'c'.repeat(32)
-function fixture() {
+function fixture(trustStore = { load: () => undefined, save() {} }) {
   const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: { [`host:${SESSION}`]: 'Mi terminal de QA', [`host:${FOREIGN}`]: 'Sesión privada' }, notices: [] }
   let binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'member' }
   let hostStatus = 'connected'
@@ -58,7 +61,7 @@ function fixture() {
     detach: id => streams.delete(id),
     send: (id, body) => calls.push({ stream: id, body })
   }
-  const gateway = new MobileGateway({ trustStore: { load: () => undefined, save() {} }, snapshot: () => state, configurationSnapshot: () => state, connection: () => connection, authSnapshot: async () => { if (!binding) throw new mobileAuth.MobileAuthorizationChangedError('legacy'); return structuredClone(binding) }, quotas: () => [{ id: 'safe', label: 'Trabajo', provider: 'claude', state: 'ready', windows: [], sampledAt: null }], notices: () => [{ id: 'event', hostId: 'host', sessionId: SESSION, kind: 'turn-complete', at: 'now', message: 'SECRET', classification: { detail: 'SECRET' } }, { id: 'hidden', hostId: 'host', sessionId: OUTSIDE, kind: 'turn-complete', at: 'now' }] })
+  const gateway = new MobileGateway({ trustStore, snapshot: () => state, configurationSnapshot: () => state, connection: () => connection, authSnapshot: async () => { if (!binding) throw new mobileAuth.MobileAuthorizationChangedError('legacy'); return structuredClone(binding) }, quotas: () => [{ id: 'safe', label: 'Trabajo', provider: 'claude', state: 'ready', windows: [], sampledAt: null }], notices: () => [{ id: 'event', hostId: 'host', sessionId: SESSION, kind: 'turn-complete', at: 'now', message: 'SECRET', classification: { detail: 'SECRET' } }, { id: 'hidden', hostId: 'host', sessionId: OUTSIDE, kind: 'turn-complete', at: 'now' }] })
   gateway.server = { close: cb => cb(), closeAllConnections() {} }; gateway.origin = 'https://192.168.1.8:4000'; gateway.gatewayId = 'test'; gateway.endpoints = [{ kind: 'lan-pinned', url: gateway.origin, certSHA256: 'pin' }]; gateway.cookieToken = 'cookie'; gateway.cookieExpires = Date.now() + 10000; gateway.pairingCode = '1234567890ABCDEF'; gateway.pairingExpires = Date.now() + 10000; gateway.browserSnapshot = gateway.snapshotDigest()
   async function request(path, method = 'GET', body, credential, headers = {}, proxy = false) {
     const req = new PassThrough(); req.url = path; req.method = method; req.headers = { ...headers, ...(credential ? { authorization: `Bearer ${credential}` } : {}) }; req.socket = { remoteAddress: 'mock' }
@@ -83,6 +86,47 @@ function fixture() {
   }
   return { state, gateway, calls, streams, request, pair, socket, binding: value => binding = value, hostStatus: value => hostStatus = value, sessions: value => sessions = value, apiHook: value => apiHook = value }
 }
+test('v2 installation pairing persists encrypted trust and renews after restart', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crow-mobile-installation-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const path = join(directory, 'mobile-trust.enc')
+  const codec = value => Buffer.from([...value].map(byte => byte ^ 0x55)) // Test double only.
+  const secure = { isEncryptionAvailable: () => true, encryptString: value => codec(Buffer.from(value)), decryptString: value => codec(value).toString() }
+  const store = new MobileTrustStore(path, secure), c = fixture(store)
+  const binding = { actorId: `installation:${'d'.repeat(32)}`, generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'installation' }
+  c.binding(binding)
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'] })
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+  assert.equal(paired.status, 200, JSON.stringify(paired.body))
+  assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.body.credential)).status, 200)
+  assert.equal(readFileSync(path).includes(Buffer.from(binding.actorId)), false)
+  assert.equal(readFileSync(path).includes(Buffer.from(paired.body.credential)), false)
+  const saved = new MobileTrustStore(path, secure).load()
+  assert.deepEqual(saved.records[0].scopes[0].binding, binding)
+
+  const restarted = fixture(new MobileTrustStore(path, secure))
+  restarted.binding(binding)
+  const challenge = await restarted.request('/api/v2/device-challenge', 'POST', { deviceId: paired.body.device.id })
+  assert.equal(challenge.status, 200)
+  const renewed = await restarted.request('/api/v2/device-renew', 'POST', { deviceId: paired.body.device.id, challengeId: challenge.body.challengeId, signature: sign('sha256', mobileAuth.deviceProofPayload(challenge.body), keys.privateKey).toString('base64') })
+  assert.equal(renewed.status, 200)
+  assert.equal((await restarted.request('/api/v1/bootstrap', 'GET', undefined, renewed.body.credential)).status, 200)
+  restarted.gateway.revoke(paired.body.device.id)
+  assert.deepEqual(store.load().records, [])
+})
+
+test('pairing persistence failures report gateway unavailable instead of a disconnected host', async () => {
+  const c = fixture({ load: () => undefined, save(value) { if (value.records.length) throw new Error('private disk failure') } })
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const invitation = await c.gateway.invite({ projectIds: ['p1'] })
+  const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
+  assert.equal(paired.status, 503)
+  assert.equal(paired.body.code, 'GATEWAY_UNAVAILABLE')
+  assert.equal(JSON.stringify(paired.body).includes('private disk failure'), false)
+  assert.equal(c.gateway.registry.records.size, 0)
+})
+
 test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or roots', async () => {
   const c = fixture(), paired = await c.pair()
   const boot = await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential)

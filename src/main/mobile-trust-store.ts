@@ -32,7 +32,8 @@ export function validateMobileTrust(value: unknown): asserts value is MobileTrus
     for (const scope of record.scopes) {
       if (!object(scope) || !keys(scope, ['projectId', 'hostId', 'root', 'hostDigest', 'binding']) || !text(scope.projectId) || !text(scope.hostId) || !root(scope.root) || typeof scope.hostDigest !== 'string' || !/^[0-9a-f]{64}$/.test(scope.hostDigest) || !object(scope.binding)) throw new Error(recovery)
       const binding = scope.binding
-      if (!keys(binding, ['actorId', 'generation', 'allowedRoots', 'operateOthers', 'role']) || !text(binding.actorId) || !text(binding.generation, 4096) || typeof binding.operateOthers !== 'boolean' || (binding.role !== undefined && binding.role !== 'admin' && binding.role !== 'member') || (keyBased && binding.role !== 'admin' && binding.role !== 'member') || !strings(binding.allowedRoots, 1024, root) || !binding.allowedRoots.includes(scope.root)) throw new Error(recovery)
+      const validRole = binding.role === 'admin' || binding.role === 'member' || binding.role === 'installation'
+      if (!keys(binding, ['actorId', 'generation', 'allowedRoots', 'operateOthers', 'role']) || !text(binding.actorId) || !text(binding.generation, 4096) || typeof binding.operateOthers !== 'boolean' || ((binding.role !== undefined || keyBased) && !validRole) || !strings(binding.allowedRoots, 1024, root) || !binding.allowedRoots.includes(scope.root)) throw new Error(recovery)
       projects.push(scope.projectId)
     }
     const unavailableIds: string[] = []

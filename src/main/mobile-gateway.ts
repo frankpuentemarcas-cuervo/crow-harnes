@@ -709,7 +709,15 @@ export class MobileGateway {
       const record = this.registry.prove(id, this.string(body, 'challengeId'), this.string(body, 'signature', 112))
       await this.validateDevice(record)
       json(res, 200, { version: 2, ...this.registry.issueCredential(record) })
-    } catch (error) { const limited = error instanceof Error && error.message === 'RATE_LIMIT'; json(res, error instanceof MobileHostUnavailableError ? 503 : limited ? 429 : 401, mobileError(error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED', error instanceof MobileHostUnavailableError ? 'Acceso pausado. Comprobá Crow y el host en Windows.' : 'Dispositivo o prueba no autorizados. La invitación o el desafío pueden haber vencido.')) }
+    } catch (error) {
+      const limited = error instanceof Error && error.message === 'RATE_LIMIT'
+      const unavailable = error instanceof MobileHostUnavailableError
+      const gatewayUnavailable = unavailable && !!this.trustFault
+      json(res, unavailable ? 503 : limited ? 429 : 401, mobileError(
+        gatewayUnavailable ? 'GATEWAY_UNAVAILABLE' : unavailable ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED',
+        gatewayUnavailable ? 'No se pudo guardar el vínculo en Crow Windows. El acceso está bloqueado.' : unavailable ? 'Acceso pausado. Comprobá Crow y el host en Windows.' : 'Dispositivo o prueba no autorizados. La invitación o el desafío pueden haber vencido.'
+      ))
+    }
   }
   private validateStreamCredential(stream: StreamRecord): void {
     // V2 bearer authenticates the upgrade only. Established streams remain bound to

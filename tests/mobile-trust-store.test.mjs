@@ -40,6 +40,23 @@ test('encrypted trust accepts display-only projects while no server is connected
   store.save(value)
   assert.deepEqual(f.newStore().load(), value)
 })
+
+test('installation trust still rejects unknown roles and out-of-grant roots without overwriting', async t => {
+  const f = await fixture(t), store = f.newStore(), value = snapshot()
+  value.records[0].scopes[0].binding.role = 'installation'
+  store.save(value)
+  const original = readFileSync(f.path)
+  for (const role of [null, '', 'legacy', 'unknown']) {
+    const invalid = structuredClone(value)
+    invalid.records[0].scopes[0].binding.role = role
+    assert.throws(() => store.save(invalid), /bloqueado/)
+    assert.deepEqual(readFileSync(f.path), original)
+  }
+  const outside = structuredClone(value)
+  outside.records[0].scopes[0].root = '/outside'
+  assert.throws(() => store.save(outside), /bloqueado/)
+  assert.deepEqual(store.load(), value)
+})
 test('unavailable encryption, corrupt or unsupported stores block access without overwriting', async t => {
   const f = await fixture(t), store = f.newStore()
   store.save(snapshot()); const original = readFileSync(f.path)
