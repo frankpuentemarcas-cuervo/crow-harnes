@@ -30,6 +30,12 @@ test('preload exposes explicit approval but no secrets readback or generic IPC b
   assert.doesNotMatch(source, /getERPSecret|erpSecret|sendIPC|invokeIPC/)
 })
 
+test('legacy unowned read-only terminals expose an actionable delete control for admin claim', () => {
+  const source = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+  assert.match(source, /disabled=\{session\.readOnly && !!session\.ownerId\}/)
+  assert.match(source, /Terminal anterior sin propietario; un administrador puede reclamarla y eliminarla/)
+})
+
 test('renderer requires exact prompt review and separate manual completion; readonly input blocked', () => {
   const source = readFileSync(new URL('../src/renderer/src/ERPTaskKanban.tsx', import.meta.url), 'utf8')
   assert.match(source, /DocType.*<strong>Task<\/strong>/)

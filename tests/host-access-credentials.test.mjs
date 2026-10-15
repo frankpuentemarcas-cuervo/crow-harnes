@@ -41,11 +41,10 @@ test('host credentials fail closed on unavailable encryption, bad credential and
   assert.throws(() => new HostCredentialVault(path))
   assert.equal(readFileSync(path, 'utf8'), '{invalid')
 })
-test('tunnels check access before reading bootstrap and bypass bootstrap retrieval with supplied credential', () => {
+test('tunnels use the local installation identity and bootstrap transport credential', () => {
   const connection = readFileSync(new URL('../src/main/connection.ts', import.meta.url), 'utf8')
-  const encrypted = readFileSync(new URL('../src/main/encrypted-ssh.ts', import.meta.url), 'utf8')
-  assert.ok(connection.indexOf('const accessResponse = await fetch') < connection.indexOf("'cat ~/.local/share/crow-harness/token'"))
-  assert.match(connection, /if \(!individualCredential\) throw new AccessCredentialRequiredError/)
-  assert.match(connection, /if \(!\(error instanceof AccessCredentialRequiredError\)\) this\.scheduleRetry/)
-  assert.match(encrypted, /tunnel\.token = individualCredential \?\? await tunnel\.readToken\(\)/)
+  assert.match(connection, /getInstallationId\(\)/)
+  assert.match(connection, /'X-Crow-Installation-ID': this\.installationId/)
+  assert.ok(connection.indexOf("'cat ~/.local/share/crow-harness/token'") < connection.indexOf("this\.baseURL\('/api/access/me'"))
+  assert.match(connection, /identity\.role !== 'installation'/)
 })

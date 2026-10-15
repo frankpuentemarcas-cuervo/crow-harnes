@@ -13,13 +13,14 @@ function fixture(mode = 'healthy') {
   class PassphraseRequiredError extends Error {}
   const localRequire = id => {
     if (id === './encrypted-ssh') return { isEncryptedKey: () => true, PassphraseRequiredError, EncryptedSshTunnel: { open: async (_host, _phrase, lost) => {
-      const handle = { token: 'a'.repeat(32), port: 47000, closed: false, lost, close() { this.closed = true } }
+      const handle = { token: 'a'.repeat(32), port: 47000, closed: false, lost, readBootstrapToken: async () => 'a'.repeat(32), close() { this.closed = true } }
       state.attempts.push(handle)
       if (state.mode === 'fail') throw new Error('ECONNRESET')
       if (state.mode === 'lost-before-return') { handle.close(); lost() }
       return handle
     } } }
     if (id === './transport-failure') return { isTransportFailure: () => false }
+    if (id === './installation-identity') return { getInstallationId: () => 'c'.repeat(32) }
     if (id === './connection-diagnostics') return { safeFailureReason: value => /ECONNRESET/.test(value?.message || '') ? 'network-reset' : 'unknown', safeConnectionCode: () => undefined }
     if (id === 'node:child_process') return { spawn() { throw new Error('External SSH forbidden') }, execFile() {} }
     if (id.startsWith('node:')) return require(id)
@@ -31,7 +32,7 @@ function fixture(mode = 'healthy') {
     fetch: async url => {
       state.fetches++
       if (state.mode === 'hold-access' && state.fetches === 2) await new Promise(resolve => { state.release = resolve })
-      return new Response(JSON.stringify(url.includes('/api/events') ? [] : { enabled: false }))
+      return new Response(JSON.stringify(url.includes('/api/events') ? [] : url.includes('/api/access/me') ? { role: 'installation', id: `installation:${'c'.repeat(32)}`, allowedRoots: [] } : { enabled: false }))
     }
   }
   vm.runInNewContext(compiled, globals)

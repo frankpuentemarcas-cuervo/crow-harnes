@@ -34,12 +34,23 @@ test('mobile dialog provisions all selected projects from one button without man
   const h = harness(); h.render(); h.effects[0](); await settle()
   const nodes = h.flatten(h.render())
   assert.equal(h.calls.length, 0, 'opening does not expose a gateway')
-  assert.equal(nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox').length, 2)
+  assert.equal(nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox').length, 3)
   assert.equal(nodes.some(node => ['mobile-provider', 'mobile-port', 'mobile-pangolin-token'].includes(node.props.id)), false)
   nodes.find(node => node.type === 'button' && node.props.children === 'Generar QR para Android').props.onClick()
   await settle()
   assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [['invite', { projectIds: ['project', 'second'], capabilities: { input: true, create: true, close: false, quotas: false } }]])
   assert.ok(h.flatten(h.render()).some(node => node.type === 'img' && node.props.src === 'data:image/png;base64,mock'))
+})
+
+test('quota access is opt-in and is included only after explicit consent', async () => {
+  const h = harness(); h.render()
+  const checkboxes = h.flatten(h.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox')
+  const quota = checkboxes.at(-1)
+  assert.equal(quota.props.checked, false)
+  quota.props.onChange({ target: { checked: true } })
+  h.flatten(h.render()).find(node => node.type === 'button' && node.props.children === 'Generar QR para Android').props.onClick()
+  await settle()
+  assert.equal(h.calls[0][1].capabilities.quotas, true)
 })
 
 test('revocation is explicit and confirmed', async () => {

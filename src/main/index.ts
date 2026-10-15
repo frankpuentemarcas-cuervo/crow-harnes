@@ -136,9 +136,9 @@ async function authorizeERPProject(projectId: string, hostId: string): Promise<{
   if (current.status() !== 'connected') throw new Error('Conectá el host antes de autorizar la Task.')
   const status = await current.accessStatus(), identity = await current.accessIdentity()
   if (!status.enabled && identity.role === 'legacy') return { actorId: `legacy:${hostId}`, root: posix.normalize(project.root) }
-  if (!status.enabled || identity.role === 'legacy' || identity.revoked) throw new Error('Identidad Crow no válida.')
+  if ((!status.enabled && identity.role !== 'installation') || identity.role === 'legacy' || identity.revoked) throw new Error('Identidad Crow no válida.')
   const canonicalRoot = posix.normalize(project.root)
-  if (canonicalRoot !== project.root || !canonicalRoot.startsWith('/') || !identity.allowedRoots.some(root => canonicalRoot === root || canonicalRoot.startsWith(root.replace(/\/$/, '') + '/'))) throw new Error('La identidad Crow no permite este proyecto.')
+  if (canonicalRoot !== project.root || !canonicalRoot.startsWith('/') || (identity.role !== 'installation' && !identity.allowedRoots.some(root => canonicalRoot === root || canonicalRoot.startsWith(root.replace(/\/$/, '') + '/')))) throw new Error('La identidad Crow no permite este proyecto.')
   return { actorId: identity.id, root: canonicalRoot }
 }
 
@@ -204,10 +204,10 @@ async function mobileAuthSnapshot(hostId: string): Promise<MobileActorBinding> {
   }
   if (revision !== (mobileHostGenerations.get(hostId) || 0) || accessRevision !== accessGeneration || connections.get(hostId) !== current) throw new MobileAuthorizationChangedError('La identidad cambió. Generá otra invitación.')
   if (current.status() !== 'connected') throw new MobileHostUnavailableError('Conectá el host en Windows antes de vincular Android.')
-  if (!status.enabled || identity.role === 'legacy') throw new MobileAuthorizationChangedError('Android requiere acceso individual Crow. Activá Acceso individual e importá tu credencial en Windows.')
+  if ((!status.enabled && identity.role !== 'installation') || identity.role === 'legacy') throw new MobileAuthorizationChangedError('El host no admite identidad automática. Actualizá Crow en el servidor y volvé a conectar.')
   if (identity.revoked || !identity.id || !Array.isArray(identity.allowedRoots)) throw new MobileAuthorizationChangedError('La identidad Crow no está autorizada.')
   const principalRoots = identity.allowedRoots.filter(root => typeof root === 'string' && root.startsWith('/') && posix.normalize(root) === root)
-  const allowedRoots = [...new Set(store.snapshot().projects.filter(project => project.hostId === hostId && project.root.startsWith('/') && posix.normalize(project.root) === project.root && (identity.role === 'admin' || principalRoots.some(root => project.root === root || project.root.startsWith(root.replace(/\/$/, '') + '/')))).map(project => project.root))]
+  const allowedRoots = [...new Set(store.snapshot().projects.filter(project => project.hostId === hostId && project.root.startsWith('/') && posix.normalize(project.root) === project.root && (identity.role === 'admin' || identity.role === 'installation' || principalRoots.some(root => project.root === root || project.root.startsWith(root.replace(/\/$/, '') + '/')))).map(project => project.root))]
   if (!allowedRoots.length) throw new MobileAuthorizationChangedError('La identidad Crow no tiene proyectos permitidos.')
   mobileActorRoots.set(hostId, allowedRoots)
   return { actorId: identity.id, generation: JSON.stringify([mobile?.hostAuthorizationEpoch?.(hostId) ?? revision, host.target, host.port, host.remotePort, host.identity || '']), allowedRoots, operateOthers: identity.role === 'admin' && identity.operateOthers === true, role: identity.role }
@@ -275,7 +275,7 @@ async function visibleAuditRecords<T extends { hostId: string; sessionId: string
     if (!store.host(hostId) || current?.status() !== 'connected') return
     try {
       const identity = await current.accessIdentity()
-      if (identity.role === 'admin' || identity.role === 'legacy') { allowedHosts.add(hostId); return }
+      if (identity.role === 'admin' || identity.role === 'installation' || identity.role === 'legacy') { allowedHosts.add(hostId); return }
       if (identity.revoked) return
       for (const session of await current.api<SessionInfo[]>('GET', '/api/sessions')) sessions.add(`${hostId}:${session.id}`)
     } catch { /* Historical diagnostics also require current permission. */ }
@@ -455,7 +455,7 @@ function registerIPC(): void {
     if (!session || (session.readOnly && session.ownerId)) throw new Error('Terminal no permitida para renombrar.')
     if (!session.ownerId && session.readOnly) {
       const identity = await connection(hostId).accessIdentity()
-      if (identity.role !== 'admin' || !identity.id) throw new Error('Terminal no permitida para renombrar.')
+      if ((identity.role !== 'admin' && identity.role !== 'installation') || !identity.id) throw new Error('Terminal no permitida para renombrar.')
       await connection(hostId).assignSessionOwner(sessionId, identity.id)
     }
     return store.renameSession(hostId, sessionId, name)
@@ -532,7 +532,20 @@ function registerIPC(): void {
   })
   handle('crow:delete-session', async (hostId: string, sessionId: string) => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
-    await connection(hostId).api('DELETE', `/api/sessions/${sessionId}`)
+    const remote = connection(hostId)
+    const sessions = await remote.api<SessionInfo[]>('GET', '/api/sessions')
+    const session = sessions.find(item => item.id === sessionId)
+    if (!session) {
+      terminalCheckpoints.remove(hostId, sessionId)
+      return store.removeSession(hostId, sessionId)
+    }
+    if (session.readOnly) {
+      if (session.ownerId) throw new Error('Terminal no permitida para eliminar.')
+      const identity = await remote.accessIdentity()
+      if (identity.role !== 'admin' || !identity.id) throw new Error('Solo un administrador puede reclamar y eliminar una terminal anterior sin propietario.')
+      await remote.assignSessionOwner(sessionId, identity.id)
+    }
+    await remote.api('DELETE', `/api/sessions/${sessionId}`)
     terminalCheckpoints.remove(hostId, sessionId)
     return store.removeSession(hostId, sessionId)
   })

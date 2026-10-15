@@ -38,6 +38,9 @@ func mobileAPIError(w http.ResponseWriter, status int, code, detail string) {
 }
 
 func (a *App) mobileOwner(id string) *AccessPrincipal {
+	if _, ok := installationIDFromOwner(id); ok {
+		return &AccessPrincipal{ID: id, Label: "Este Crow", Role: "installation", AllowedRoots: []string{}}
+	}
 	a.access.mu.Lock()
 	defer a.access.mu.Unlock()
 	if !a.access.data.Enabled {

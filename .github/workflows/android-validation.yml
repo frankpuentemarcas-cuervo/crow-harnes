@@ -59,11 +59,12 @@ jobs:
       - name: Verify debug signature, manifest and bundled assets
         run: |
           apk=android/app/build/outputs/apk/debug/app-debug.apk
+          version=$(node -p 'require("../../package.json").version')
           tools="$ANDROID_HOME/build-tools/36.0.0"
           "$tools/apksigner" verify --verbose --print-certs "$apk" | tee android-signature.txt
           grep -q 'CN=Android Debug' android-signature.txt
           "$tools/aapt" dump badging "$apk" | tee android-badging.txt
-          grep -q "package: name='dev.crow.companion'.*versionName='0.1.46'" android-badging.txt
+          grep -q "package: name='dev.crow.companion'.*versionName='$version'" android-badging.txt
           "$tools/aapt" dump xmltree "$apk" AndroidManifest.xml > android-manifest.txt
           grep -Eq 'android:debuggable.*0xffffffff' android-manifest.txt
           grep -Eq 'android:allowBackup.*0x0' android-manifest.txt
@@ -91,12 +92,13 @@ jobs:
 
       - name: Package APK and checksum
         run: |
+          version=$(node -p 'require("../../package.json").version')
           mkdir -p android-dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk android-dist/Crow-Companion-0.1.46-debug.apk
-          (cd android-dist && sha256sum Crow-Companion-0.1.46-debug.apk > Crow-Companion-0.1.46-debug.apk.sha256)
-          (cd android-dist && sha256sum --check Crow-Companion-0.1.46-debug.apk.sha256)
+          cp android/app/build/outputs/apk/debug/app-debug.apk "android-dist/Crow-Companion-$version-debug.apk"
+          (cd android-dist && sha256sum "Crow-Companion-$version-debug.apk" > "Crow-Companion-$version-debug.apk.sha256")
+          (cd android-dist && sha256sum --check "Crow-Companion-$version-debug.apk.sha256")
           echo '## Crow Android test APK' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Artifact: crow-android / Crow-Companion-0.1.46-debug.apk + SHA256. Debug-signed and debuggable, NOT a Play Store/production build. Runner debug key is ephemeral: reinstall may be needed between builds and uninstall removes pairing. No emulator/phone tests were run.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifact: crow-android / Crow-Companion-$version-debug.apk + SHA256. Debug-signed and debuggable, NOT a Play Store/production build. Runner debug key is ephemeral: reinstall may be needed between builds and uninstall removes pairing. No emulator/phone tests were run." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Store debug test APK
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

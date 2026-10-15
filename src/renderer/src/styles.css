@@ -366,3 +366,5 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 @media (max-width: 560px) { .toolbar-right .files-toggle span { display: none; } .toolbar-right { gap: 4px; } .toolbar-right select { font-size: 11px; max-width: 123px; } .files-pane { width: 160px; flex-basis: 160px; } .top-actions { gap: 3px; } }
 .mobile-project-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
 .mobile-project-actions button { min-height: 32px; padding: 5px 9px; font-size: 11px; }
+.mobile-dialog .mobile-quota-consent { display: flex; flex-direction: row; align-items: center; gap: 10px; margin-top: 12px; color: #e9eef5; font-size: 12px; }
+.mobile-quota-consent input { width: 18px; height: 18px; flex: 0 0 auto; accent-color: var(--accent); }

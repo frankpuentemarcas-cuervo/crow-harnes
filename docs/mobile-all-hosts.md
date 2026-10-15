@@ -5,8 +5,8 @@
 ## Recorrido del usuario
 
 1. Instalá la versión compatible de `crowd` en cada host con el [instalador habitual](../remote/install.sh). El servicio queda activo con `systemd --user` y *linger*.
-2. En Windows, conectá los hosts con tu identidad individual y abrí **Acceso móvil**. Los proyectos están seleccionados inicialmente.
-3. Tocá **Generar QR para Android** y escanealo desde Crow Android. La primera vinculación exige que cada host seleccionado esté conectado; después no depende de Windows.
+2. En Windows, conectá los hosts; Crow identifica automáticamente esta instalación. Abrí **Acceso móvil**. Los proyectos están seleccionados inicialmente.
+3. Si querés ver las cuotas de cuentas Claude y Codex en Android, activá el permiso opcional antes de generar el QR. Esas muestras provienen de Crow Windows y no están disponibles cuando la PC está apagada. Tocá **Generar QR para Android** y escanealo desde Crow Android. La primera vinculación exige que cada host seleccionado esté conectado; después las terminales de los hosts no dependen de Windows.
 4. En Android, elegí el equipo desde **Equipo**. Windows ofrece las funciones completas; cada host Linux permite listar, leer y enviar entrada a sus terminales existentes.
 5. Para terminar el vínculo, usá **Desvincular** en Android. Si el equipo está conectado, se revoca también allí. Si está apagado, se destruye la clave no exportable del teléfono, por lo que ese perfil no puede renovar credenciales.
 

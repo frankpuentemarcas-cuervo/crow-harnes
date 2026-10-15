@@ -48,6 +48,55 @@ func accessRequest(handler http.Handler, token, method, path, body string) *http
 	handler.ServeHTTP(w, r)
 	return w
 }
+
+func installationRequest(handler http.Handler, token, installationID, method, path, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("X-Crow-Installation-ID", installationID)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	return w
+}
+
+func TestInstallationIdentityScopesSessionsEvenWithSharedBootstrapOrAdminCredential(t *testing.T) {
+	a, h, root := accessFixture(t)
+	a.sessions["install-a"] = &session{info: SessionInfo{ID: "install-a", OwnerID: "installation:" + strings.Repeat("a", 32), Root: root, State: "running"}, subs: map[chan Frame]struct{}{}, activeSubagents: map[string]struct{}{}}
+	a.sessions["install-b"] = &session{info: SessionInfo{ID: "install-b", OwnerID: "installation:" + strings.Repeat("b", 32), Root: root, State: "running"}, subs: map[chan Frame]struct{}{}, activeSubagents: map[string]struct{}{}}
+
+	for _, tc := range []struct{ token, installationID, expected string }{
+		{"bootstrap", strings.Repeat("a", 32), "install-a"},
+		{"admin-token", strings.Repeat("a", 32), "install-a"},
+		{"bootstrap", strings.Repeat("b", 32), "install-b"},
+	} {
+		w := installationRequest(h, tc.token, tc.installationID, "GET", "/api/sessions", "")
+		var sessions []SessionInfo
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &sessions) != nil || len(sessions) != 1 || sessions[0].ID != tc.expected {
+			t.Fatalf("installation %s saw wrong sessions: %d %s", tc.installationID, w.Code, w.Body)
+		}
+	}
+	if w := installationRequest(h, "admin-token", strings.Repeat("a", 32), "DELETE", "/api/sessions/install-b", ""); w.Code != 404 {
+		t.Fatalf("installation could operate another Crow's terminal: %d %s", w.Code, w.Body)
+	}
+	identity := installationRequest(h, "bootstrap", strings.Repeat("a", 32), "GET", "/api/access/me", "")
+	if identity.Code != 200 || !strings.Contains(identity.Body.String(), `"role":"installation"`) {
+		t.Fatalf("installation identity missing: %d %s", identity.Code, identity.Body)
+	}
+}
+
+func TestInstallationIdentityWorksBeforeIndividualAccessIsEnabled(t *testing.T) {
+	a, h, root := accessFixture(t)
+	a.access.data = accessFile{}
+	id := strings.Repeat("c", 32)
+	a.sessions["owned"] = &session{info: SessionInfo{ID: "owned", OwnerID: "installation:" + id, Root: root, State: "running"}, subs: map[chan Frame]struct{}{}, activeSubagents: map[string]struct{}{}}
+	if w := installationRequest(h, "bootstrap", id, "GET", "/api/access/me", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"role":"installation"`) {
+		t.Fatalf("installation identity without access registry missing: %d %s", w.Code, w.Body)
+	}
+	w := installationRequest(h, "bootstrap", id, "GET", "/api/sessions", "")
+	var sessions []SessionInfo
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &sessions) != nil || len(sessions) != 1 || sessions[0].ID != "owned" {
+		t.Fatalf("installation did not scope legacy-mode sessions: %d %s", w.Code, w.Body)
+	}
+}
 func TestAccessOwnershipMatrix(t *testing.T) {
 	_, h, _ := accessFixture(t)
 	for _, tc := range []struct {

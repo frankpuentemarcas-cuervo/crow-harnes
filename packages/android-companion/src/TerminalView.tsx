@@ -84,16 +84,23 @@ export function TerminalView({ profile, hostId, session, onBack, onError, onStat
     {resizeMessage && <p className="terminal-resize-notice" role="status">{resizeMessage}</p>}
     <div className="terminal-surface" ref={surface} aria-label="Salida de terminal remota" />
     {outputGap && <p className="terminal-recovery-warning" role="status" aria-live="polite" aria-atomic="true">Parte de la salida anterior no se pudo recuperar. El búfer remoto es limitado; la terminal continúa desde la salida disponible.</p>}
-    <div className="keys" aria-label="Teclas rápidas">
-      {[['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl+C', '\x03'], ['↑', '\x1b[A'], ['↓', '\x1b[B']].map(([label, data]) => <button key={label} disabled={!connected || !canInput} onClick={() => void send(data)}>{label}</button>)}
-      <button onClick={() => terminal.current?.focus()} disabled={!canInput}>Teclado</button>
+    <div className="terminal-scroll" role="group" aria-label="Desplazamiento de salida">
+      <button aria-label="Desplazar salida hacia arriba" onClick={() => terminal.current?.scrollLines(-12)}>↑ Subir</button>
+      <button aria-label="Desplazar salida hacia abajo" onClick={() => terminal.current?.scrollLines(12)}>↓ Bajar</button>
+      <button aria-label="Ir al final de la salida" onClick={() => terminal.current?.scrollToBottom()}>Ir al final</button>
     </div>
-    <div className="terminal-tools" aria-label="Herramientas de terminal">
-      <button onClick={() => { const text = terminal.current?.getSelection(); if (text) void Clipboard.write({ string: text }).catch(error => onError(String(error))); else onError('Seleccioná texto de la salida primero.') }}>Copiar selección</button>
-      <button disabled={!connected || !canInput} onClick={() => void Clipboard.read().then(value => setPaste(value.value)).catch(error => onError(String(error)))}>Pegar…</button>
-      <button className="terminal-resize" title="Ajusta las filas y columnas compartidas también en Crow Windows" disabled={!connected || !canInput} onClick={() => void resizeRemote()}>Ajustar + Windows</button>
+    <div className="keys" role="group" aria-label="Teclas para el proceso remoto">
+      {[['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl+C', '\x03'], ['↑', '\x1b[A'], ['↓', '\x1b[B']].map(([label, data]) => <button key={label} aria-label={label === '↑' ? 'Enviar tecla flecha arriba al proceso' : label === '↓' ? 'Enviar tecla flecha abajo al proceso' : undefined} disabled={!connected || !canInput} onClick={() => void send(data)}>{label}</button>)}
+      <button onClick={() => terminal.current?.focus()} disabled={!canInput} aria-label="Abrir teclado para la terminal">Teclado</button>
     </div>
-    <details className="terminal-help"><summary>Acerca de esta terminal</summary><p>El agente sigue en ejecución aunque vuelvas. “Ajustar tamaño” adapta la sesión en Android y Crow Windows.</p></details>
+    <details className="terminal-actions"><summary>Más acciones de terminal</summary>
+      <div className="terminal-tools" role="group" aria-label="Herramientas de terminal">
+        <button onClick={() => { const text = terminal.current?.getSelection(); if (text) void Clipboard.write({ string: text }).catch(error => onError(String(error))); else onError('Seleccioná texto de la salida primero.') }}>Copiar selección</button>
+        <button disabled={!connected || !canInput} onClick={() => void Clipboard.read().then(value => setPaste(value.value)).catch(error => onError(String(error)))}>Pegar…</button>
+        <button className="terminal-resize" title="Ajusta las filas y columnas compartidas también en Crow Windows" disabled={!connected || !canInput} onClick={() => void resizeRemote()}>Ajustar + Windows</button>
+      </div>
+      <p>Volver no cierra el proceso. Ajustar tamaño modifica esta terminal también en Crow Windows.</p>
+    </details>
     {canInput && <form className="compose" onSubmit={event => { event.preventDefault(); if (prompt.includes('\n')) setPaste(prompt + '\r'); else void submit() }}><label className="sr-only" htmlFor="prompt">Mensaje al agente</label><textarea id="prompt" rows={2} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Escribí al agente…" /><button className="primary" disabled={!connected || pending || !prompt}>Enviar</button></form>}
     {paste !== null && <PasteConfirmation text={paste} onCancel={() => setPaste(null)} onConfirm={() => { const text = paste; setPaste(null); void send(text).then(sent => { if (sent) setPrompt('') }) }} />}
   </section>

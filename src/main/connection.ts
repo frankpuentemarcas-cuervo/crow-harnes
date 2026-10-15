@@ -11,6 +11,7 @@ import WebSocket from 'ws'
 import type { ConnectionStatus, Host, RemoteEvent, TerminalFrame } from '../shared/types'
 import { Store } from './store'
 import { HostCredentialVault } from './host-credential-vault'
+import { getInstallationId } from './installation-identity'
 import type { AccessStatus, AccessIdentity, AccessUserInput, AccessCredentialResult, AccessPrincipal } from '../shared/access'
 import { EncryptedSshTunnel, isEncryptedKey, PassphraseRequiredError } from './encrypted-ssh'
 import { PassphraseVault } from './passphrase-vault'
@@ -48,6 +49,7 @@ export class Connection {
   private localPort = 0
   private token = ''
   private credentialVault: HostCredentialVault
+  private installationId = getInstallationId()
   private currentStatus: ConnectionStatus = 'disconnected'
   private desired = false
   private connecting?: Promise<void>
@@ -133,7 +135,6 @@ export class Connection {
     const wasUserSubmission = this.pendingPassphrase !== undefined
     try {
       let stdout: string
-      const individualCredential = this.credentialVault.get(this.host.id, this.credentialTarget())
       let passphrase: string | undefined
       if (this.host.identity && isEncryptedKey(this.host.identity)) {
         this.diagnosticTransport = 'ssh2'
@@ -146,7 +147,7 @@ export class Connection {
           opened = await EncryptedSshTunnel.open(this.host, passphrase, error => {
             lostDuringOpening = true
             if (opened && this.encryptedTunnel === opened) this.lost(error)
-          }, individualCredential || '')
+          })
           if (lostDuringOpening) { opened.close(); throw new Error('La conexión SSH se cerró antes de completar la apertura.') }
           this.encryptedTunnel = opened
         } catch (error) {
@@ -159,7 +160,7 @@ export class Connection {
         this.localPort = this.encryptedTunnel.port
       } else {
         this.diagnosticTransport = 'openssh'
-        stdout = individualCredential || ''
+        stdout = ''
         this.localPort = await freePort()
         const args = [...this.sshOptions(), '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-N', '-L', `127.0.0.1:${this.localPort}:127.0.0.1:${this.host.remotePort}`, this.host.target]
         const tunnel = spawn('ssh', args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
@@ -191,16 +192,12 @@ export class Connection {
       }
       if (!ready) throw new Error('No se pudo abrir el túnel SSH o el servicio remoto no responde.')
       if (!this.desired) throw new Error('Conexión cancelada.')
-      const accessResponse = await fetch(this.baseURL('/api/access'), { signal: AbortSignal.timeout(2500) })
-      if (accessResponse.ok && (await accessResponse.json() as AccessStatus).enabled) {
-        if (!individualCredential) throw new AccessCredentialRequiredError()
-        const identity = await fetch(this.baseURL('/api/access/me'), { headers: this.headers(), signal: AbortSignal.timeout(2500) })
-        if (!identity.ok) throw new AccessCredentialRequiredError()
-      }
-      if (!individualCredential) {
-        this.token = this.encryptedTunnel ? await this.encryptedTunnel.readBootstrapToken() : (await execFileAsync('ssh', [...this.sshOptions(), this.host.target, 'cat ~/.local/share/crow-harness/token'], { timeout: 15000, maxBuffer: 1024, windowsHide: true })).stdout.trim()
-        if (!/^[0-9a-f]{32}$/.test(this.token)) throw new Error('Token remoto invalido.')
-      }
+      this.token = this.encryptedTunnel ? await this.encryptedTunnel.readBootstrapToken() : (await execFileAsync('ssh', [...this.sshOptions(), this.host.target, 'cat ~/.local/share/crow-harness/token'], { timeout: 15000, maxBuffer: 1024, windowsHide: true })).stdout.trim()
+      if (!/^[0-9a-f]{32}$/.test(this.token)) throw new Error('Token remoto inválido.')
+      const identityResponse = await fetch(this.baseURL('/api/access/me'), { headers: this.headers(), signal: AbortSignal.timeout(2500) })
+      if (!identityResponse.ok) throw new Error('El host no pudo identificar esta instalación de Crow. Actualizá crowd en el servidor y volvé a conectar.')
+      const identity = await identityResponse.json() as AccessIdentity
+      if (identity.role !== 'installation' || !identity.id.startsWith('installation:')) throw new Error('El host remoto no admite identidad automática. Actualizá crowd para separar las terminales por instalación.')
       if (!this.desired || transport !== (this.encryptedTunnel ?? this.tunnel)) throw new Error('Conexión cancelada o perdida durante la apertura.')
       if (passphrase && this.host.identity) this.vault.set(this.host.id, this.host.identity, passphrase)
       this.delay = 1000
@@ -265,7 +262,7 @@ export class Connection {
   async assignSessionOwner(id: string, ownerId: string): Promise<void> { await this.api('POST', `/api/access/sessions/${encodeURIComponent(id)}/owner`, { ownerId }) }
 
   private baseURL(path: string): string { return `http://127.0.0.1:${this.localPort}${path}` }
-  private headers(): Record<string, string> { return { Authorization: `Bearer ${this.token}` } }
+  private headers(): Record<string, string> { return { Authorization: `Bearer ${this.token}`, 'X-Crow-Installation-ID': this.installationId } }
 
   private async recoverTransport(error: unknown): Promise<void> {
     if (!isTransportFailure(error) || this.currentStatus !== 'connected' || !this.desired) return

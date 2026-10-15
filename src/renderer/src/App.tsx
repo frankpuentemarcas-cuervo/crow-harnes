@@ -13,7 +13,6 @@ import { AccountUsagePanel } from './AccountUsagePanel'
 import { AccountUsageDock } from './AccountUsageDock'
 import { useAccountUsage } from './useAccountUsage'
 import { WorkspaceMenu } from './WorkspaceMenu'
-import { AccessPanel } from './AccessPanel'
 import { ERPTaskKanban } from './ERPTaskKanban'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
 import { freeLLMStartupReady, type FreeLLMRuntimeStatus } from '../../shared/free-llm-startup'
@@ -101,7 +100,6 @@ export function App(): React.JSX.Element {
   const [alertAuditOpen, setAlertAuditOpen] = useState(false)
   const [accountsOpen, setAccountsOpen] = useState(false)
   const [erpOpen, setERPOpen] = useState(false)
-  const [accessHost, setAccessHost] = useState<Host | null>(null)
   const [alertAISettings, setAlertAISettings] = useState<AlertAISettings | null>(null)
   const [alertAIStatus, setAlertAIStatus] = useState<AlertAIStatus>({ state: 'idle', detail: 'Sin análisis todavía.' })
   const [freeLLMStatus, setFreeLLMStatus] = useState<FreeLLMRuntimeStatus | null>(null)
@@ -532,7 +530,6 @@ export function App(): React.JSX.Element {
           <div className="host-row">
             <Server size={15} className="muted-icon" /><span className={`status-dot ${statuses[host.id] || 'disconnected'}`} title={statuses[host.id] || 'Desconectado'} />
             <span className="host-name">{host.name}</span>
-            <button className="icon-button ghost-action" title="Identidad y permisos Crow" aria-label={`Acceso ${host.name}`} onClick={() => setAccessHost(host)}><Settings2 size={13} /></button>
             <button className="icon-button ghost-action" title="Conectar" aria-label={`Conectar ${host.name}`} onClick={() => void connect(host.id)}><RefreshCw size={13} /></button>
             <button className="icon-button ghost-action" title="Editar host" aria-label={`Editar ${host.name}`} onClick={() => { setEditingHost(host); setDialog('host') }}><MoreHorizontal size={15} /></button>
           </div>
@@ -556,7 +553,7 @@ export function App(): React.JSX.Element {
               <CacheBadge session={session} status={statuses[host.id] || 'disconnected'} now={clockNow} compact onOpen={() => setCacheDetail({ hostId: host.id, sessionId: session.id })} />
               {unreadNoticesForSession(state.notices, host.id, session.id).length > 0 && <button className="session-notice" title="Abrir terminal y marcar alerta como leída" aria-label={`Abrir terminal ${sessionDisplayName(host.id, session.id, session.agent)} y marcar alerta como leída`} onClick={() => openTab({ id: crypto.randomUUID(), projectId: project.id, kind: 'terminal', sessionId: session.id })}><Bell size={14} fill="currentColor" aria-hidden="true" /></button>}
               <button disabled={session.readOnly && !!session.ownerId} className="session-rename" title="Renombrar terminal" aria-label={`Renombrar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void renameSession(host.id, session)}><Pencil size={13} /></button>
-              <button disabled={session.readOnly} className="session-delete" title="Eliminar terminal y procesos remotos" aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
+              <button disabled={session.readOnly && !!session.ownerId} className="session-delete" title={session.readOnly && !session.ownerId ? 'Terminal anterior sin propietario; un administrador puede reclamarla y eliminarla' : 'Eliminar terminal y procesos remotos'} aria-label={`Eliminar terminal ${sessionDisplayName(host.id, session.id, session.agent)}`} onClick={() => void deleteSession(host.id, session)}><Trash2 size={13} /></button>
             </div>
             })}
           </div>
@@ -670,7 +667,6 @@ export function App(): React.JSX.Element {
     {alertAIOpen && <AlertAISettingsDialog onClose={() => setAlertAIOpen(false)} onSaved={setAlertAISettings} />}
     {alertAuditOpen && <AlertAuditDialog hosts={state.hosts} sessionNames={state.sessionNames} onClose={() => setAlertAuditOpen(false)} />}
     {accountsOpen && <AccountUsagePanel onClose={() => setAccountsOpen(false)} model={accountUsage} />}
-    {accessHost && <AccessPanel key={accessHost.id} host={accessHost} sessions={sessions[accessHost.id] || []} sessionNames={state.sessionNames} onClose={() => setAccessHost(null)} />}
     {erpOpen && <ERPTaskKanban onClose={() => setERPOpen(false)} onTerminal={(projectId, sessionId) => { setERPOpen(false); setSelectedProjectId(projectId); openTab({ id: crypto.randomUUID(), projectId, kind: "terminal", sessionId }); const project = state.projects.find(item => item.id === projectId); if (project) void refreshSessions(project.hostId) }} />}
     {cacheDetailSession && cacheDetail && <CacheDetailsDialog session={cacheDetailSession} status={statuses[cacheDetail.hostId] || 'disconnected'} now={clockNow} onClose={() => setCacheDetail(null)} />}
     {renamingSession && <RenameTerminalDialog key={sessionNameKey(renamingSession.hostId, renamingSession.sessionId)} initialName={renamingSession.initialName} onSave={async (name) => {

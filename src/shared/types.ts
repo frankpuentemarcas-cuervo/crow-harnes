@@ -6,7 +6,7 @@ import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPr
 import type { AccessIdentity } from './access'
 import type { MobileDevice, MobileEnrollmentMetadata, MobileEnrollmentInput, MobileInviteResult, MobileStartInput, MobileRemoteProvider } from './mobile-companion'
 
-export interface CrowAccessPrincipal { id: string; label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[]; revoked?: boolean }
+export interface CrowAccessPrincipal { id: string; label: string; role: 'admin' | 'member' | 'installation'; operateOthers: boolean; allowedRoots: string[]; revoked?: boolean }
 export interface CrowAccessStatus { enabled: boolean; credentialRequired: boolean; version?: number }
 export interface CrowAccessUserInput { label: string; role: 'admin' | 'member'; operateOthers: boolean; allowedRoots: string[] }
 

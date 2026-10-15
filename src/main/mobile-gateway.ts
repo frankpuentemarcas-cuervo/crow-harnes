@@ -473,7 +473,11 @@ export class MobileGateway {
     if (!scope) throw new Error('Sesión fuera del proyecto autorizado.')
     const ownsSession = this.canOperate(info, scope.binding)
     const canOperate = input && ownsSession
-    const name = ownsSession ? this.deps.snapshot().sessionNames[`${scope.hostId}:${info.id}`] : undefined
+    // Older sessions may predate Crow ownership metadata. An administrator can
+    // still identify them by their locally saved alias, but never expose an
+    // alias belonging to another explicitly assigned owner.
+    const legacyAdminSession = !info.ownerId && scope.binding.role === 'admin'
+    const name = ownsSession || legacyAdminSession ? this.deps.snapshot().sessionNames[`${scope.hostId}:${info.id}`] : undefined
     return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate }
   }
   private canOperate(info: SessionInfo, binding: MobileActorBinding): boolean { return info.readOnly !== true && !!info.ownerId && (info.ownerId === binding.actorId || binding.operateOthers) }

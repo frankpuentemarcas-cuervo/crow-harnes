@@ -53,9 +53,21 @@ test('Android snapshot binds a current individual actor without exposing credent
   h.actor.revoked = true; await assert.rejects(h.auth('host'), /no está autorizada/)
 })
 
+test('automatic installation identity enrolls Android and sees its local projects without individual access setup', async () => {
+  const h = harness()
+  h.actor.id = `installation:${'d'.repeat(32)}`
+  h.actor.role = 'installation'
+  h.actor.allowedRoots = []
+  h.connection.accessStatus = async () => ({ enabled: false })
+  const binding = plain(await h.auth('host'))
+  assert.equal(binding.actorId, h.actor.id)
+  assert.deepEqual(binding.allowedRoots, ['/srv/project'])
+  assert.equal(binding.role, 'installation')
+})
+
 test('legacy bootstrap and disconnected hosts cannot enroll Android', async () => {
   const h = harness(); h.connection.accessIdentity = async () => ({ role: 'legacy', label: 'Bootstrap' })
-  await assert.rejects(h.auth('host'), /acceso individual Crow/)
+  await assert.rejects(h.auth('host'), /identidad automática/)
   h.connection.status = () => 'disconnected'
   await assert.rejects(h.auth('host'), /Conectá el host/)
 })

@@ -53,7 +53,7 @@ export class BridgeService {
     if (conn.status() !== 'connected') throw new Error('No se pudo validar la identidad actual de Crow.')
     const identity = await conn.api<{ role: string; id?: string; revoked?: boolean }>('GET', '/api/access/me')
     if (identity.role === 'legacy') return `legacy:${hostRevision(this.workspace.snapshot().hosts.find(host => host.id === hostId)!)}`
-    if (!['member', 'admin'].includes(identity.role) || !identity.id || identity.revoked) throw new Error('Identidad Crow no autorizada.')
+    if (!['member', 'admin', 'installation'].includes(identity.role) || !identity.id || identity.revoked) throw new Error('Identidad Crow no autorizada.')
     return identity.id
   }
 

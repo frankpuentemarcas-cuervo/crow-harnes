@@ -8,15 +8,15 @@ import { projectVisibleSessions, withoutHostWorkspace } from '../src/shared/acce
 
 const require = createRequire(import.meta.url)
 function harness() {
-  const handlers = new Map(), sender = { send() {} }, dispatches = []
+  const handlers = new Map(), sender = { send() {} }, dispatches = [], remoteCalls = [], ownerAssignments = []
   const principal = { id: 'actor-a', label: 'A', role: 'member', operateOthers: false, allowedRoots: ['/srv/allowed'] }
   const project = { id: 'project', name: 'Allowed', hostId: 'host', root: '/srv/allowed' }
   const state = { hosts: [{ id: 'host' }], projects: [project], notices: [], sessionNames: {}, tabs: [], activeTabs: {}, selectedProjectId: '', eventCursors: {} }
-  const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, api: async (method, path, body) => { if (path === '/api/sessions') return []; dispatches.push(body); return { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
-  const store = { project: id => id === project.id ? project : undefined, host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: () => state, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
+  const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, sessionList: [], assignSessionOwner: async (sessionId, ownerId) => { ownerAssignments.push([sessionId, ownerId]) }, api: async (method, path, body) => { remoteCalls.push([method, path, body]); if (method === 'GET' && path === '/api/sessions') return current.sessionList; dispatches.push(body); return { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
+  const store = { project: id => id === project.id ? project : undefined, host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; return state }, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
   const erp = { snapshot: () => ({ connection: {}, tasks: [], links: {} }), approve: async () => ({}) }
   const module = { exports: {} }
-  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.auditRecords = visibleAuditRecords;'
+  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.auditRecords = visibleAuditRecords;'
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
@@ -26,7 +26,7 @@ function harness() {
   }
   vm.runInNewContext(compiled, { require: localRequire, exports: module.exports, module, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.testSetup(store, current, erp, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, principal, project, state, current, erp, handlers, dispatches, invoke: (channel, ...args) => handlers.get(channel)({ sender }, ...args) }
+  return { ...module.exports, principal, project, state, current, erp, handlers, dispatches, remoteCalls, ownerAssignments, invoke: (channel, ...args) => handlers.get(channel)({ sender }, ...args) }
 }
 
 test('main authorizes current server principal and canonical root, not renderer project IDs', async () => {
@@ -93,6 +93,27 @@ test('local rename cannot modify an invisible or read-only foreign terminal', as
   h.current.api = async () => [{ id, readOnly: false }]
   await h.invoke('crow:rename-session', 'host', id, 'own')
   assert.equal(h.state.renamed, true)
+})
+
+test('admin can claim and delete a legacy unowned terminal after remote restart', async () => {
+  const h = harness(), id = 'a'.repeat(32)
+  h.principal.role = 'admin'
+  h.current.sessionList = [{ id, readOnly: true, state: 'interrupted' }]
+  await h.invoke('crow:delete-session', 'host', id)
+  assert.deepEqual(h.ownerAssignments, [[id, 'actor-a']])
+  assert.deepEqual(h.remoteCalls.slice(0, 2).map(([method, path]) => [method, path]), [['GET', '/api/sessions'], ['DELETE', `/api/sessions/${id}`]])
+  assert.deepEqual(h.state.removedSession, ['host', id])
+})
+
+test('delete refuses an owned read-only terminal but cleans a stale local entry absent remotely', async () => {
+  const h = harness(), id = 'b'.repeat(32)
+  h.current.sessionList = [{ id, ownerId: 'actor-b', readOnly: true }]
+  await assert.rejects(h.invoke('crow:delete-session', 'host', id), /no permitida/)
+  assert.equal(h.state.removedSession, undefined)
+  h.current.sessionList = []
+  await h.invoke('crow:delete-session', 'host', id)
+  assert.deepEqual(h.state.removedSession, ['host', id])
+  assert.equal(h.remoteCalls.some(([method]) => method === 'DELETE'), false)
 })
 
 test('reconnection returns only permitted saved aliases without deleting offline or foreign metadata', async () => {

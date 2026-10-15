@@ -129,6 +129,15 @@ test('read-only enrollment denies create/wake/close/quotas and returns foreign s
   assert.equal((await c.request('/api/v1/sessions', 'POST', { hostId: 'host', projectId: 'p1', agent: 'claude' }, paired.credential)).status, 403)
   assert.equal((await c.request('/api/v1/quotas', 'GET', undefined, paired.credential)).status, 403)
 })
+test('admin sees Crow aliases for legacy unowned terminals without exposing foreign aliases', async () => {
+  const c = fixture()
+  c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/work'], operateOthers: false, role: 'admin' })
+  c.sessions([{ id: SESSION, agent: 'claude', mode: 'normal', root: '/work', state: 'running', seq: 4, startedAt: 'now', updatedAt: 'now' }, { id: FOREIGN, agent: 'codex', mode: 'normal', ownerId: 'bob', root: '/work', state: 'running', seq: 4, startedAt: 'now', updatedAt: 'now', readOnly: true }])
+  const paired = await c.pair()
+  const result = await c.request('/api/v1/sessions?hostId=host', 'GET', undefined, paired.credential)
+  assert.equal(result.body.find(session => session.id === SESSION).name, 'Mi terminal de QA')
+  assert.equal(result.body.find(session => session.id === FOREIGN).name, undefined)
+})
 test('write grants remain narrowed by owner, project scope, agent enum and normal mode', async () => {
   const c = fixture(), paired = await c.pair({ input: true, create: true, close: true })
   const post = (route, body) => c.request(`/api/v1/${route}`, 'POST', body, paired.credential)

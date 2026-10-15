@@ -8,6 +8,7 @@ import { useConfirm } from './ConfirmDialog'
 export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]; hosts: Host[]; onClose(): void }): React.JSX.Element {
   const [status, setStatus] = useState<MobileStatus>({ running: false })
   const [selected, setSelected] = useState<string[]>(projects.map(project => project.id))
+  const [shareQuotas, setShareQuotas] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [qr, setQR] = useState('')
@@ -30,7 +31,7 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     if (busy) return
     setBusy(true); setError(''); setQR(''); setSkippedHosts([])
     try {
-      const result = await window.crow.mobileInvite({ projectIds: selected, capabilities: { input: true, create: true, close: false, quotas: false } })
+      const result = await window.crow.mobileInvite({ projectIds: selected, capabilities: { input: true, create: true, close: false, quotas: shareQuotas } })
       setQR(result.qrDataUrl); setExpiresAt(result.enrollment.expiresAt); setHostCount(result.hostCount || 0); setSkippedHosts(result.skippedHosts || [])
       setStatus(await window.crow.mobileStatus())
     } catch (reason) { setError(String(reason)) }
@@ -52,6 +53,8 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
       <div className="mobile-project-actions"><button type="button" onClick={() => setSelected(projects.map(project => project.id))}>Seleccionar todos</button><button type="button" onClick={() => setSelected([])}>Quitar selección</button></div>
       {projects.map(project => <label key={project.id}><input type="checkbox" checked={selected.includes(project.id)} onChange={event => setSelected(current => event.target.checked ? [...current, project.id] : current.filter(id => id !== project.id))} /> {hosts.find(host => host.id === project.hostId)?.name || project.hostId} · {project.name}</label>)}
     </fieldset>
+    <label className="mobile-quota-consent"><input type="checkbox" checked={shareQuotas} disabled={busy} onChange={event => setShareQuotas(event.target.checked)} /> Mostrar uso de cuentas Claude y Codex en este Android</label>
+    <small className="mobile-security-note">Opcional. El dispositivo podrá consultar los porcentajes y horarios de renovación de las cuentas de Crow Windows mientras la PC esté encendida; no recibe las credenciales. Los hosts Linux no proporcionan estas cuotas.</small>
     <button className="primary-button" disabled={busy || !selected.length} onClick={() => void generate()}>{busy ? 'Preparando hosts…' : validQR ? 'Renovar QR' : 'Generar QR para Android'}</button>
     {validQR && <div className="mobile-qr-panel"><strong>Escaneá una sola vez en Crow Android</strong><img src={qr} width="384" height="384" alt={`QR temporal para Crow Windows y ${hostCount} hosts`} /><small>{hostCount} hosts Linux · vence {new Date(expiresAt).toLocaleTimeString()}. No compartas esta imagen.</small></div>}
     {validQR && skippedHosts.length > 0 && <p role="status" className="mobile-security-note">No incluidos en este QR: {skippedHosts.map(host => `${host.name} (${host.reason})`).join(', ')}.</p>}

@@ -19,12 +19,13 @@ function MobileApp() {
   const [bootstrap, setBootstrap] = useState<MobileBootstrap | null>(null), [hostId, setHostId] = useState(''), [sessions, setSessions] = useState<MobileSession[]>([]), [terminal, setTerminal] = useState<MobileSession | null>(null)
   const [notices, setNotices] = useState<MobileNotice[]>([]), [quotas, setQuotas] = useState<MobileQuota[]>([]), [error, setError] = useState(''), [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'revoked'>('disconnected')
   const [enrolling, setEnrolling] = useState(false), [search, setSearch] = useState(''), [newProject, setNewProject] = useState<MobileProject | null>(null), [closing, setClosing] = useState<MobileSession | null>(null), [unlinking, setUnlinking] = useState<GatewayProfile[] | null>(null), [busy, setBusy] = useState(false)
-  const generation = useRef(0), active = useRef(''), back = useRef(() => {}), profileListGeneration = useRef(0)
+  const generation = useRef(0), active = useRef(''), back = useRef(() => {}), profileListGeneration = useRef(0), foreground = useRef(true), retryRequested = useRef(false), retryAttempt = useRef(0)
   const profile = profiles.find(item => item.id === profileId)
   const native = Capacitor.isNativePlatform()
-  const changeProfile = useCallback((id: string) => { generation.current++; active.current = id; setProfileId(id); setBootstrap(null); setSessions([]); setQuotas([]); setNotices([]); setTerminal(null); setHostId(''); setError(''); setStatus('connecting') }, [])
+  const changeProfile = useCallback((id: string) => { generation.current++; active.current = id; retryRequested.current = false; retryAttempt.current = 0; setProfileId(id); setBootstrap(null); setSessions([]); setQuotas([]); setNotices([]); setTerminal(null); setHostId(''); setError(''); setStatus('connecting') }, [])
   const selectedHost = bootstrap?.hosts.find(host => host.id === hostId)
-  const fail = useCallback((text: string) => { setError(text); if (/revocado|vencido|forgotten/i.test(text)) { setStatus('revoked'); setBootstrap(null); setSessions([]); setNotices([]); setQuotas([]); setTerminal(null) } else if (/sin conexión|desconectad|TLS:|network/i.test(text)) setStatus('disconnected') }, [])
+  const hostProjects = bootstrap?.projects.filter(project => project.hostId === hostId) || []
+  const fail = useCallback((text: string) => { setError(previous => { const warning = previous.includes('No se repite automáticamente') && !text.includes('No se repite automáticamente') ? ' No se repite automáticamente. Verificá la sesión antes de volver a intentar.' : ''; return `${text}${warning}` }); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { retryRequested.current = false; setStatus('revoked'); setBootstrap(null); setSessions([]); setNotices([]); setQuotas([]); setTerminal(null) } else if (/sin conexión con crow en windows|sin conexión|desconectad|network/i.test(text)) { retryRequested.current = true; setStatus('disconnected') } }, [])
   const loadProfiles = useCallback(async () => {
     const version = ++profileListGeneration.current
     try { const result = await Gateway.listProfiles(); if (profileListGeneration.current !== version) return; setProfiles(result.profiles); if (!active.current && result.profiles[0]) changeProfile(result.profiles[0].id) }
@@ -36,12 +37,33 @@ function MobileApp() {
     try {
       const data = await api<MobileBootstrap>(id, '/api/v1/bootstrap'); if (active.current !== id || generation.current !== version) return
       if (data.version !== 1 || !data.device || !Array.isArray(data.projects) || !Array.isArray(data.hosts)) throw new Error('Protocolo incompatible con este companion.')
-      setBootstrap(data); setProfiles(previous => previous.map(item => item.id === id ? { ...item, device: data.device } : item)); setHostId(previous => data.hosts.some(host => host.id === previous) ? previous : data.hosts[0]?.id || ''); setStatus('connected'); setError('')
-      const authorizedNotices = await api<MobileNotice[]>(id, '/api/v1/notices'); if (active.current !== id || generation.current !== version) return; setNotices(authorizedNotices)
-      if (data.device.capabilities.quotas) { const dataQuotas = await api<MobileQuota[]>(id, '/api/v1/quotas'); if (active.current === id && generation.current === version) setQuotas(dataQuotas) }
-    } catch (reason) { if (active.current === id && generation.current === version) fail(message(reason)) }
+      setBootstrap(data); setProfiles(previous => previous.map(item => item.id === id ? { ...item, device: data.device } : item)); setHostId(previous => data.hosts.some(host => host.id === previous) ? previous : data.hosts[0]?.id || '')
+      retryRequested.current = false; retryAttempt.current = 0; setStatus('connected'); setError(previous => previous.includes('No se repite automáticamente') ? previous : '')
+      try {
+        const authorizedNotices = await api<MobileNotice[]>(id, '/api/v1/notices'); if (active.current !== id || generation.current !== version) return; setNotices(authorizedNotices)
+      } catch (reason) {
+        if (active.current !== id || generation.current !== version) return
+        const text = message(reason); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { fail(text); return }
+        setError(`No se pudieron actualizar los avisos: ${text}`)
+      }
+      if (data.device.capabilities.quotas) {
+        try {
+          const dataQuotas = await api<MobileQuota[]>(id, '/api/v1/quotas'); if (active.current === id && generation.current === version) setQuotas(dataQuotas)
+        } catch (reason) {
+          if (active.current !== id || generation.current !== version) return
+          const text = message(reason); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { fail(text); return }
+          setError(`No se pudo actualizar el uso de cuentas: ${text}`)
+        }
+      }
+    } catch (reason) { if (active.current === id && generation.current === version) { const text = message(reason); fail(text); if (!/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401|sin conexión|desconectad|network/i.test(text)) setStatus('disconnected') } }
   }, [fail])
   useEffect(() => { if (profileId) void refresh() }, [profileId, refresh])
+  useEffect(() => {
+    if (!profileId || status !== 'disconnected' || !retryRequested.current || !foreground.current) return
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(retryAttempt.current++, 5))
+    const timer = setTimeout(() => { if (foreground.current) void refresh() }, delay)
+    return () => clearTimeout(timer)
+  }, [profileId, status, error, refresh])
   useEffect(() => {
     if (!profileId || !hostId || !bootstrap) return
     const available = selectedHost?.status === 'connected' && bootstrap.projects.some(project => project.hostId === hostId && (project.availability || 'available') === 'available')
@@ -59,7 +81,7 @@ function MobileApp() {
     const handles: { remove(): Promise<void> }[] = []; let disposed = false
     async function setup() {
       handles.push(await App.addListener('backButton', () => back.current()))
-      handles.push(await App.addListener('appStateChange', state => { generation.current++; if (state.isActive) { void loadProfiles(); void refresh() } else setStatus('disconnected') }))
+      handles.push(await App.addListener('appStateChange', state => { foreground.current = state.isActive; generation.current++; if (state.isActive) { void loadProfiles(); void refresh() } else setStatus('disconnected') }))
       if (disposed) for (const handle of handles) await handle.remove()
     }
     void setup(); return () => { disposed = true; for (const handle of handles) void handle.remove() }
@@ -76,20 +98,20 @@ function MobileApp() {
     catch (reason) { if (active.current === id && version === generation.current) fail(message(reason)) }
   }
   return <div className={`app ${terminal ? 'with-terminal' : ''}`}>
-    <header><div><span className="brand">CROW</span><h1>{terminal ? 'Terminal' : enrolling ? 'Vincular equipos' : page}</h1></div><button aria-label="Actualizar conexión" disabled={!profile || busy} onClick={() => void refresh()}><RefreshCw size={22} aria-hidden="true" /></button></header>
-    {error && <p className="error" role="alert">{error}</p>}
+    <header><div><span className="brand">CROW · COMPANION</span><h1>{terminal ? 'Terminal' : enrolling ? 'Vincular equipos' : page}</h1></div>{!terminal && <button className="header-refresh" aria-label="Actualizar datos" title="Actualizar datos" disabled={!profile || busy || status === 'connecting'} onClick={() => void refresh()}><RefreshCw size={21} aria-hidden="true" /></button>}</header>
+    {error && <div className="error" role="alert"><span>{error}</span><button aria-label="Descartar aviso" onClick={() => setError('')}>Cerrar</button></div>}
     {terminal && profile ? <TerminalView profile={profile} hostId={hostId} session={terminal} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} /> : <main>
       {enrolling ? <Enrollment onCancel={() => setEnrolling(false)} onError={setError} onPaired={values => { profileListGeneration.current++; setProfiles(previous => [...previous, ...values]); changeProfile(values[0].id); setEnrolling(false); setPage('Inicio') }} /> : <>
-        <section className="connection"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? 'Conectado' : status === 'connecting' ? 'Conectando…' : status === 'revoked' ? 'Revocado · revinculá' : 'Sin conexión · elegí otro host disponible'}</small></div></section>
+        <section className={`connection connection-${status}`} aria-live="polite"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? 'Vínculo activo' : status === 'connecting' ? 'Comprobando la conexión…' : status === 'revoked' ? 'Acceso rechazado o vencido · revisá el vínculo' : retryRequested.current ? 'Sin conexión · reintentando automáticamente' : 'Sin conexión · revisá el aviso y actualizá'}</small></div></section>
         {profiles.length > 1 && <section className="card"><label htmlFor="active-gateway">Equipo</label><select id="active-gateway" value={profileId} onChange={event => changeProfile(event.target.value)}>{profiles.map(item => <option value={item.id} key={item.id}>{item.device.label}</option>)}</select></section>}
         {!profile && <section className="card"><h2>Tu workspace, desde Android</h2><p>Escaneá una vez el QR de Crow Windows. Después podés seguir las terminales de tus hosts Linux aunque apagues la PC. Android no guarda llaves SSH.</p><button className="primary" disabled={!native} onClick={() => setEnrolling(true)}>Vincular con QR</button></section>}
+        {profile && bootstrap && <section className="host-picker" aria-label="Servidor actual"><label htmlFor="host">Servidor</label><select id="host" value={hostId} onChange={event => { setHostId(event.target.value); setSessions([]) }}>{bootstrap.hosts.map(host => <option value={host.id} key={host.id}>{host.name} · {hostStateLabel(host.status)}</option>)}</select></section>}
         {profile && page === 'Inicio' && <>
-          <section className="card"><h2>Sesiones de {bootstrap?.actor.label || 'tu cuenta'}</h2>{sessions.length ? sessions.slice(0, 4).map(session => <SessionRow key={session.id} session={session} disabled={status !== 'connected'} onOpen={() => setTerminal(session)} />) : <p>{status !== 'connected' ? 'Este equipo no responde. Elegí otro host o actualizá.' : selectedHost?.status !== 'connected' ? 'Este host no está disponible ahora.' : bootstrap?.projects.some(project => project.hostId === hostId && (project.availability || 'available') === 'available') ? 'No hay sesiones en este host.' : 'No hay proyectos autorizados disponibles en este host.'}</p>}<button onClick={() => setPage('Proyectos')}>Ver proyectos</button></section>
-          <section className="card"><h2>Cuotas</h2>{!bootstrap?.device.capabilities.quotas ? <p>No autorizadas para este dispositivo. Podés habilitarlas al vincular desde Windows.</p> : !quotas.length ? <p>No hay muestras disponibles. No se interpreta como 0 %.</p> : quotas.map((quota) => <div className="quota" key={quota.id}><strong>{quota.label} · {agentLabel(quota.provider)} · {quotaStateLabel(quota.state)}</strong><small>{quota.sampledAt ? `Muestra: ${new Date(quota.sampledAt).toLocaleString()}` : 'Sin timestamp'}{staleQuota(quota.sampledAt) ? ' · desactualizada' : ''}</small>{quota.windows.map(window => <p key={window.label}>{window.label}: {window.usedPercent === null ? 'no disponible' : `${window.usedPercent} % usado`}{window.resetsAt ? ` · renueva ${new Date(window.resetsAt).toLocaleString()}` : ''}</p>)}</div>)}</section>
+          <section className="card"><div className="section-heading"><div><span className="eyebrow">CONTINUAR TRABAJO</span><h2>Terminales</h2></div>{sessions.length > 0 && <span className="count">{sessions.length}</span>}</div>{sessions.length ? sessions.slice(0, 4).map(session => <SessionRow key={session.id} session={session} projectName={hostProjects.find(project => project.id === session.projectId)?.name} disabled={status !== 'connected'} onOpen={() => setTerminal(session)} />) : <p className="empty-state">{status !== 'connected' ? 'Esperando conexión para mostrar las terminales.' : selectedHost?.status !== 'connected' ? 'Este servidor no está disponible ahora.' : hostProjects.some(project => (project.availability || 'available') === 'available') ? 'Todavía no hay terminales en este servidor.' : 'No hay proyectos autorizados disponibles en este servidor.'}</p>}<button className="text-action" onClick={() => setPage('Proyectos')}>Ver todos los proyectos <span aria-hidden="true">→</span></button></section>
+          <section className="card"><div className="section-heading"><div><span className="eyebrow">SIEMPRE A MANO</span><h2>Uso de cuentas</h2></div></div>{!bootstrap?.device.capabilities.quotas ? <p className="empty-state">No autorizado para este dispositivo. Habilitalo al vincular desde Windows.</p> : !quotas.length ? <p className="empty-state">No hay muestras disponibles. No se interpreta como 0 %.</p> : quotas.map((quota) => <div className="quota" key={quota.id}><strong>{quota.label}</strong><small>{agentLabel(quota.provider)} · {quotaStateLabel(quota.state)}{staleQuota(quota.sampledAt) ? ' · muestra desactualizada' : ''}</small>{quota.windows.map(window => <p key={window.label}>{window.label}: <strong>{window.usedPercent === null ? 'No disponible' : `${window.usedPercent} % usado`}</strong>{window.resetsAt ? ` · renueva ${new Date(window.resetsAt).toLocaleString()}` : ''}</p>)}</div>)}</section>
         </>}
         {profile && page === 'Proyectos' && <>
-          <label htmlFor="host">Host</label><select id="host" value={hostId} onChange={event => { setHostId(event.target.value); setSessions([]) }}>{bootstrap?.hosts.map(host => <option value={host.id} key={host.id}>{host.name} · {hostStateLabel(host.status)}</option>)}</select>
-          <label htmlFor="search">Buscar proyectos</label><input id="search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Nombre del proyecto" />
+          <label htmlFor="search">Buscar proyecto</label><input id="search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Nombre del proyecto" />
           {bootstrap?.projects.filter(project => project.hostId === hostId && project.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(project => {
             const projectAvailable = selectedHost?.status === 'connected' && (project.availability || 'available') === 'available'
             const unavailableMessage = project.availability === 'authorization-required'
@@ -98,6 +120,7 @@ function MobileApp() {
             return <section className="card" key={project.id}><h2>{project.name}</h2>{!projectAvailable && <p className="project-unavailable" role="status">{unavailableMessage}</p>}{sessions.filter(session => session.projectId === project.id).map(session => <div key={session.id}><SessionRow session={session} disabled={status !== 'connected' || !projectAvailable} onOpen={() => setTerminal(session)} />{session.canOperate && !session.readOnly && <div className="row">{bootstrap.supportedFeatures?.sessionWake !== false && mayWake(session, bootstrap.device) && <button disabled={busy || status !== 'connected' || !projectAvailable} onClick={() => void mutate('/api/v1/wake', { hostId, sessionId: session.id }, value => { setSessions(previous => previous.map(item => item.id === value.id ? value : item)); setTerminal(value) })}>Despertar</button>}{bootstrap.device.capabilities.close && <button className="danger" disabled={busy || status !== 'connected' || !projectAvailable} onClick={() => setClosing(session)}>Cerrar proceso…</button>}</div>}</div>)}{projectAvailable && bootstrap.device.capabilities.create && bootstrap.supportedFeatures?.sessionCreate !== false && <button className="primary" disabled={busy || status !== 'connected'} onClick={() => setNewProject(project)}>Nueva sesión</button>}{projectAvailable && bootstrap.supportedFeatures?.sessionCreate === false && <small>Modo host: podés usar terminales existentes. Para crear una, abrí Crow en Windows.</small>}</section>
           })}
           {bootstrap && !bootstrap.projects.some(project => project.hostId === hostId) && <p>No hay proyectos autorizados en este host.</p>}
+          {bootstrap && hostProjects.length > 0 && !hostProjects.some(project => project.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())) && <p className="empty-state">No encontramos proyectos con ese nombre en {selectedHost?.name || 'este servidor'}.</p>}
         </>}
         {profile && page === 'Alertas' && <section className="card"><h2>Actividad autorizada</h2><p>Se actualiza al volver a la app o tocar ↻. Sin notificaciones de fondo en esta versión.</p>{notices.length ? notices.map(notice => <button className="notice" disabled={status !== 'connected'} key={notice.id} onClick={() => void openNotice(notice)}><span>{notice.kind === 'turn-complete' ? 'Turno completado' : 'Proceso finalizado'}{notice.requiresAttention ? ' · requiere atención' : ''}<small>{new Date(notice.at).toLocaleString()}</small></span><span aria-hidden="true">→</span></button>) : <p>No hay avisos disponibles.</p>}</section>}
         {page === 'Ajustes' && <>
@@ -112,7 +135,7 @@ function MobileApp() {
     {unlinking && <ConfirmUnlink label={unlinking.length === 1 ? unlinking[0].device.label : `todos los ${unlinking.length} equipos`} busy={busy} onCancel={() => setUnlinking(null)} onConfirm={() => { const targets = [...unlinking], removed: string[] = []; setBusy(true); generation.current++; profileListGeneration.current++; void (async () => { for (const item of targets) { await Gateway.deleteProfile({ profileId: item.id }); removed.push(item.id); setProfiles(previous => previous.filter(value => value.id !== item.id)) } setUnlinking(null) })().catch(reason => fail(message(reason))).finally(() => { if (removed.includes(active.current)) changeProfile(profiles.find(item => !removed.includes(item.id))?.id || ''); setBusy(false) }) }} />}
   </div>
 }
-function SessionRow({ session, disabled, onOpen }: { session: MobileSession; disabled: boolean; onOpen(): void }) { return <button className="session" disabled={disabled} onClick={onOpen}><span><strong>{terminalTitle(session)}</strong><small>{agentLabel(session.agent)} · {sessionStateLabel(session.state)} · {agentStateLabel(session.agentState)}{!session.canOperate || session.readOnly ? ' · solo lectura' : ''}</small></span><span aria-hidden="true">→</span></button> }
+function SessionRow({ session, projectName, disabled, onOpen }: { session: MobileSession; projectName?: string; disabled: boolean; onOpen(): void }) { return <button className="session" disabled={disabled} onClick={onOpen}><span><strong>{terminalTitle(session)}</strong><small>{projectName ? `${projectName} · ` : ''}{agentLabel(session.agent)} · {sessionStateLabel(session.state)} · {agentStateLabel(session.agentState)}{!session.canOperate || session.readOnly ? ' · solo lectura' : ''}</small></span><span aria-hidden="true">→</span></button> }
 function Enrollment({ onCancel, onError, onPaired }: { onCancel(): void; onError(message: string): void; onPaired(profiles: GatewayProfile[]): void }) {
   const [raw, setRaw] = useState(''), [invitations, setInvitations] = useState<Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }>>([]), [label, setLabel] = useState('Mi Android'), [confirmed, setConfirmed] = useState(false), [busy, setBusy] = useState(false)
   const mounted = useRef(true)

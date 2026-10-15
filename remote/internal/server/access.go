@@ -122,6 +122,10 @@ func (a *App) principalCurrent(p *AccessPrincipal) bool {
 	if p == nil {
 		return !a.accessEnabled()
 	}
+	if p.Role == "installation" {
+		_, ok := installationIDFromOwner(p.ID)
+		return ok
+	}
 	a.access.mu.Lock()
 	defer a.access.mu.Unlock()
 	for _, u := range a.access.data.Users {
@@ -179,7 +183,7 @@ func (a *App) permittedRoot(p *AccessPrincipal, root string) bool {
 	if contained(path, state) || contained(state, path) {
 		return false
 	}
-	if p.Role == "admin" {
+	if p.Role == "admin" || p.Role == "installation" {
 		return true
 	}
 	for _, allowed := range p.AllowedRoots {
@@ -190,6 +194,36 @@ func (a *App) permittedRoot(p *AccessPrincipal, root string) bool {
 	}
 	return false
 }
+
+const installationOwnerPrefix = "installation:"
+
+func installationIDFromOwner(ownerID string) (string, bool) {
+	if !strings.HasPrefix(ownerID, installationOwnerPrefix) {
+		return "", false
+	}
+	id := strings.TrimPrefix(ownerID, installationOwnerPrefix)
+	if len(id) != 32 || strings.ToLower(id) != id {
+		return "", false
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		return "", false
+	}
+	return id, true
+}
+
+func installationPrincipal(r *http.Request) *AccessPrincipal {
+	id := strings.TrimSpace(r.Header.Get("X-Crow-Installation-ID"))
+	ownerID := installationOwnerPrefix + id
+	if _, ok := installationIDFromOwner(ownerID); !ok {
+		return nil
+	}
+	return &AccessPrincipal{ID: ownerID, Label: "Este Crow", Role: "installation", AllowedRoots: []string{}}
+}
+
+func (a *App) bootstrapTokenMatches(token string) bool {
+	return len(token) == len(a.token) && subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) == 1
+}
+
 func (a *App) accessAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && (r.URL.Path == "/api/access" || r.URL.Path == "/api/health") {
@@ -201,6 +235,7 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		installation := installationPrincipal(r)
 		a.access.mu.Lock()
 		enabled := a.access.data.Enabled
 		var principal *AccessPrincipal
@@ -216,7 +251,7 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 		}
 		a.access.mu.Unlock()
 		if !enabled {
-			if len(token) != len(a.token) || subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) != 1 {
+			if !a.bootstrapTokenMatches(token) {
 				http.Error(w, "unauthorized", 401)
 				return
 			}
@@ -228,7 +263,14 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			tracked, cleanup, err := a.trackAccessRequest(r, "legacy", true)
+			var tracked *http.Request
+			var cleanup func()
+			var err error
+			if installation != nil {
+				tracked, cleanup, err = a.trackAccessRequest(r.WithContext(context.WithValue(r.Context(), accessContextKey{}, installation)), installation.ID, false)
+			} else {
+				tracked, cleanup, err = a.trackAccessRequest(r, "legacy", true)
+			}
 			if err != nil {
 				http.Error(w, "individual credential required", 401)
 				return
@@ -240,6 +282,11 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 				next.ServeHTTP(accessResponseWriter{ResponseWriter: w, ctx: tracked.Context()}, tracked)
 			}
 			return
+		}
+		if installation != nil && (principal != nil || a.bootstrapTokenMatches(token)) {
+			// The desktop identity scopes Crow's own UI/workflow. It is not an
+			// authentication boundary against another shell user on this host.
+			principal = installation
 		}
 		if principal == nil {
 			// A hook credential can only submit telemetry for its single session, never list.
@@ -676,10 +723,14 @@ func (a *App) trackAccessRequest(r *http.Request, id string, legacy bool) (*http
 	}
 	if !legacy {
 		valid := false
-		for _, u := range a.access.data.Users {
-			if u.ID == id && !u.Revoked {
-				valid = true
-				break
+		if _, ok := installationIDFromOwner(id); ok {
+			valid = true
+		} else {
+			for _, u := range a.access.data.Users {
+				if u.ID == id && !u.Revoked {
+					valid = true
+					break
+				}
 			}
 		}
 		if !valid {

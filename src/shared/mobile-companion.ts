@@ -48,7 +48,7 @@ export interface MobileInviteResult { enrollment: MobileEnrollmentMetadata; qrDa
 /** null means key-based trust until explicit revocation, never a permanent bearer. */
 export interface MobileDevice { id: string; label: string; pairedAt: string; expiresAt: string | null; projectIds: string[]; unavailableProjects?: MobileProject[]; capabilities: MobileCapabilities }
 /** generation includes host target + current credential/access epoch, never raw credentials. */
-export interface MobileActorBinding { actorId: string; generation: string; allowedRoots: string[]; operateOthers: boolean; role?: 'admin' | 'member' }
+export interface MobileActorBinding { actorId: string; generation: string; allowedRoots: string[]; operateOthers: boolean; role?: 'admin' | 'member' | 'installation' }
 export interface MobilePairResult { version: 1 | 2; device: MobileDevice; credential: string; credentialExpiresAt?: string; endpoints: MobileEndpoint[] }
 export interface MobileDeviceChallenge { version: 2; gatewayId: string; deviceId: string; challengeId: string; nonce: string; expiresAt: string }
 export type MobileProjectAvailability = 'available' | 'server-disconnected' | 'authorization-required'
