@@ -97,7 +97,7 @@ export class MobileDeviceRegistry {
     if (!pending || pending.value.version !== 2 || !matches(code, pending.codeHash)) throw new Error('Invitación incompatible, inválida o vencida.')
     if (!label.trim() || label.length > 80 || /[\x00-\x1f\x7f]/.test(label)) throw new Error('Nombre de dispositivo inválido.')
     devicePublicKey(publicKey)
-    if (pending.scopes.some(scope => scope.binding.role !== 'admin' && scope.binding.role !== 'member')) throw new Error('La autorización requiere un rol individual vigente.')
+    if (pending.scopes.some(scope => !['admin', 'member', 'installation'].includes(scope.binding.role || ''))) throw new Error('La autorización requiere una identidad Crow vigente.')
     if ([...this.records.values()].some(record => record.publicKey === publicKey)) throw new Error('La clave ya está vinculada. Usá una clave nueva para una nueva invitación.')
     this.pending = undefined
     const device: MobileDevice = { id: randomUUID(), label: label.trim(), pairedAt: new Date(this.now()).toISOString(), expiresAt: null, projectIds: pending.scopes.map(scope => scope.projectId), ...(pending.unavailableProjects.length ? { unavailableProjects: pending.unavailableProjects } : {}), capabilities: pending.capabilities }

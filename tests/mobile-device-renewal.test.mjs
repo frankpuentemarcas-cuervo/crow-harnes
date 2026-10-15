@@ -74,6 +74,21 @@ test('only exact canonical P-256 SPKI accepted, with explicit v1/v2 pairing sepa
   assert.equal(typeof legacy.record.device.expiresAt, 'string')
   assert.throws(() => f.registry.challenge(legacy.record.device.id, 'gateway', 'ip'))
 })
+test('v2 pairing accepts Crow installation identity and still rejects unknown roles', () => {
+  const f = fixture(), installationScope = {
+    ...scope,
+    binding: { ...scope.binding, actorId: `installation:${'d'.repeat(32)}`, role: 'installation' }
+  }
+  const enrollment = f.registry.invite({ version: 2, gatewayId: 'gateway', endpoints: [] }, [installationScope], READ_CAPABILITIES)
+  const installationKey = key()
+  const paired = f.registry.pairKey(enrollment.invitationCode, 'Android installation', installationKey.encoded)
+  assert.equal(paired.record.scopes[0].binding.actorId, installationScope.binding.actorId)
+  assert.equal(paired.record.scopes[0].binding.role, 'installation')
+
+  const invalidScope = { ...scope, binding: { ...scope.binding, role: 'legacy' } }
+  const invalid = f.registry.invite({ version: 2, gatewayId: 'gateway', endpoints: [] }, [invalidScope], READ_CAPABILITIES)
+  assert.throws(() => f.registry.pairKey(invalid.invitationCode, 'Legacy Android', key().encoded), /identidad Crow vigente/)
+})
 test('challenge resource bounds and host invalidation revoke key-based trust', () => {
   const f = fixture(), id = f.paired.record.device.id
   for (let i = 0; i < 10; i++) f.registry.challenge(id, 'gateway', 'ip')
