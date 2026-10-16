@@ -42,6 +42,8 @@ public class CrowGatewayPlugin extends Plugin {
     private final ConcurrentHashMap<String, Stream> streams = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> streamGenerations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AccessCredential> accessCredentials = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PendingRead> pendingReads = new ConcurrentHashMap<>();
+    private final ThreadLocal<PendingRead> activeRead = new ThreadLocal<>();
     private static final class AccessCredential {
         final String value; final Instant expires;
         AccessCredential(String value, Instant expires) { this.value = value; this.expires = expires; }
@@ -147,7 +149,9 @@ public class CrowGatewayPlugin extends Plugin {
         if (method.equals("POST")) request.post(RequestBody.create(body == null ? "{}" : body.toString(), JSON)); else request.get();
         OkHttpClient base = client(profileId, endpoint);
         OkHttpClient client = path.equals("/api/v2/device-revoke") ? base.newBuilder().callTimeout(5, TimeUnit.SECONDS).build() : base;
-        try (Response response = client.newCall(request.build()).execute()) {
+        Call networkCall = client.newCall(request.build()); PendingRead pending = activeRead.get();
+        if (pending != null) pending.attach(networkCall);
+        try (Response response = networkCall.execute()) {
             if (response.code() == 401 || (proxyAuth != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API")))) {
                 if (profileId != null) invalidateAccess(profileId, credential);
                 if (response.code() == 401 && "1".equals(response.header("X-Crow-Mobile-API"))) throw new IllegalStateException(MobileErrorMessages.fromResponse(response.code(), response.body(), response.header("X-Crow-Mobile-API")));
@@ -161,7 +165,7 @@ public class CrowGatewayPlugin extends Plugin {
             if (source.getBuffer().size() > MAX_JSON_BYTES) throw new IllegalStateException("Respuesta de Crow demasiado grande.");
             String raw = source.readUtf8();
             return new org.json.JSONTokener(raw).nextValue();
-        } finally { if (profileId == null) GatewayTransportPool.release(base); }
+        } finally { if (profileId == null) GatewayTransportPool.release(base); if (pending != null) pending.detach(networkCall); }
     }
     private void forget(String id) {
         for (Stream stream : streams.values()) if (stream.profileId.equals(id)) emit(stream, "revoked", null);
@@ -255,7 +259,13 @@ public class CrowGatewayPlugin extends Plugin {
     }
     @PluginMethod public void request(PluginCall call) {
         String id = call.getString("profileId", ""); long g = generation(id), e = epoch.get();
+        String readId = call.getString("readId", "");
+        PendingRead pending = readId.isEmpty() ? null : new PendingRead(id);
+        if (pending != null && (!"GET".equals(call.getString("method", "GET")) || !readId.matches("[A-Za-z0-9-]{1,80}") || pendingReads.size() >= 64 || pendingReads.putIfAbsent(readId, pending) != null)) { call.reject("Lectura inválida o demasiadas lecturas pendientes."); return; }
         execute("GET".equals(call.getString("method", "GET")) ? readWorker : worker, call, () -> {
+            if (pending != null) activeRead.set(pending);
+            try {
+            if (pending != null) pending.check();
             assertCurrent(id, g, e); JSONObject record = record(id); JSONObject profile = record.getJSONObject("profile");
             String path = call.getString("path", ""), method = call.getString("method", "GET"); EndpointPolicy.path(path, method);
             JSONObject caps = profile.getJSONObject("device").getJSONObject("capabilities");
@@ -263,7 +273,14 @@ public class CrowGatewayPlugin extends Plugin {
             JSONObject body = method.equals("POST") ? mutationBody(record, call.getObject("body")) : null;
             Object result = http(profile.getJSONObject("endpoint"), path, method, body, accessCredential(id, record, g, e), id, record.optJSONObject("proxyAuth"));
             assertCurrent(id, g, e); publicResponse(result); call.resolve(new JSObject().put("data", result));
+            } finally { activeRead.remove(); if (pending != null) pendingReads.remove(readId, pending); }
         });
+    }
+    @PluginMethod public void cancelRead(PluginCall call) {
+        String id = call.getString("profileId", ""), readId = call.getString("readId", "");
+        PendingRead pending = pendingReads.get(readId);
+        if (pending != null && pending.profileId.equals(id) && pendingReads.remove(readId, pending)) pending.cancel();
+        call.resolve();
     }
     @PluginMethod public void openStream(PluginCall call) {
         String id = call.getString("profileId", ""), connectionId = call.getString("connectionId", ""); long g = generation(id), e = epoch.get();
@@ -319,6 +336,7 @@ public class CrowGatewayPlugin extends Plugin {
         });
     }
     @PluginMethod public void closeStream(PluginCall call) { String id = call.getString("connectionId", ""); streamGenerations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet(); Stream stream = streams.get(id); if (stream != null) stop(stream); call.resolve(); }
-    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); for (Stream stream : streams.values()) stop(stream); transports.clear(); }
-    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); worker.shutdownNow(); readWorker.shutdownNow(); }
+    private void cancelReads() { for (PendingRead pending : pendingReads.values()) pending.cancel(); pendingReads.clear(); }
+    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); cancelReads(); for (Stream stream : streams.values()) stop(stream); transports.clear(); }
+    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); cancelReads(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); worker.shutdownNow(); readWorker.shutdownNow(); }
 }

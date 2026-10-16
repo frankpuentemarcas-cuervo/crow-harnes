@@ -13,7 +13,7 @@ function pendingSessionRequest() {
   let reject
   const request = new Promise((_, deny) => { reject = deny })
   const body = ts.transpileModule(`(async () => { ${line.replace('void api', 'await api')} })()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const completion = vm.runInNewContext(body, { api: () => request, id: 'same-profile', hostId: 'host', version: 1, cancelled: false, generation, active, fail: value => failed.push(value), setSessions: value => sessions.push(value), message: value => String(value) })
+  const completion = vm.runInNewContext(body, { api: () => request, id: 'same-profile', hostId: 'host', version: 1, controller: new AbortController(), generation, active, fail: value => failed.push(value), setSessions: value => sessions.push(value), message: value => String(value) })
   return { generation, failed, sessions, reject, completion }
 }
 

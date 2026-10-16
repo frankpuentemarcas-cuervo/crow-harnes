@@ -28,7 +28,9 @@ test('bundled UI only, camera user gesture, no fake keyboard/direct fetch creden
   const config = readFileSync(new URL('../capacitor.config.ts', import.meta.url), 'utf8'), main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8'), terminal = readFileSync(new URL('../src/TerminalView.tsx', import.meta.url), 'utf8')
   assert.match(config, /allowNavigation: \[\]/); assert.doesNotMatch(config, /server:\s*\{[^}]*\burl:/)
   assert.match(main, /CapacitorBarcodeScanner\.scanBarcode/); assert.match(main, /onClick=\{\(\) => void scan\(\)\}/)
-  assert.doesNotMatch(main + terminal, /localStorage|sessionStorage|fetch\(|new WebSocket/)
+  // Only the public selected-profile UUID may be remembered in WebView storage.
+  const withoutPublicPreference = main.replace(/localStorage\.(?:setItem\('crow-active-profile', id\)|getItem\('crow-active-profile'\))/g, '')
+  assert.doesNotMatch(withoutPublicPreference + terminal, /localStorage|sessionStorage|fetch\(|new WebSocket/)
   assert.match(terminal, /from: cursor\.seq/); assert.match(terminal, /Ajustar \+ Windows/); assert.match(terminal, /PasteConfirmation/)
   assert.match(terminal, /cursor\.lastGap/)
   assert.match(terminal, /role="status" aria-live="polite" aria-atomic="true"[^>]*>Parte de la salida anterior no se pudo recuperar/)

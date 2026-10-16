@@ -35,6 +35,10 @@ La restricción de creación/cierre no depende de ocultar botones: `crowd` respo
 
 ### Servicio y red
 
+- La comprobación Android es única por equipo: actualizar metadatos no inicia otra comprobación. Las lecturas tienen un límite de 15 segundos y al vencer cancelan únicamente su solicitud HTTP, nunca la terminal ni un comando.
+- Una verificación en segundo plano no bloquea las terminales ya autorizadas. Un error confirmado muestra el aviso y recupera la conexión con espera progresiva, sin reenviar escrituras. Al cambiar de equipo, las respuestas viejas se descartan.
+- Android recuerda el equipo elegido (solo su UUID público). Si Windows no responde puede usar un host vinculado con proyectos autorizados compartidos, pero no cambia automáticamente de identidad ante rechazo de autenticación ni elige entre perfiles duplicados del mismo host.
+
 - El relay de `crow.frabubu.com` escucha `/v1/tunnel` mediante el proxy TLS existente. El Compose permite hasta 16 rutas y cuatro streams por ruta, sin publicar puertos de los hosts Linux.
 - El QR admite Windows más hasta 15 hosts. Si un host no ofrece todavía la API móvil, actualizá `crowd` y volvé a generar el QR; los vínculos anteriores no se borran.
 - Publicar una versión nueva **no** actualiza automáticamente `crowd` en hosts activos. El instalador difiere el reinicio cuando detecta sesiones vivas para no matarlas.

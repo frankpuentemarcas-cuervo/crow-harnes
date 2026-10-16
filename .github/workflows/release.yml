@@ -86,6 +86,9 @@ jobs:
       - name: Test Android chat fluidity in isolated mobile-sized Electron
         run: node tests/chat-fluidity-electron.mjs
 
+      - name: Test mobile bootstrap lifecycle and connection recovery
+        run: node tests/mobile-connection-electron.mjs
+
       - name: Type-check sources
         run: npm run typecheck
 

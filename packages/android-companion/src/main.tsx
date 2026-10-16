@@ -6,6 +6,7 @@ import { CapacitorBarcodeScanner } from '@capacitor/barcode-scanner'
 import { House, Folder, Bell, Settings, RefreshCw } from 'lucide-react'
 import type { MobileBootstrap, MobileEnrollment, MobileNotice, MobileProject, MobileQuota, MobileSession } from '../../../src/shared/mobile-companion'
 import { Gateway, api, type GatewayProfile } from './native'
+import { revokedConnection, retryableConnection, sessionProfile, fallbackProfile } from './connection-read.mjs'
 import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, staleQuota, mayWake, agentLabel, terminalTitle, sessionStateLabel, agentStateLabel, quotaStateLabel, hostStateLabel } from './protocol.mjs'
 import { TerminalView } from './TerminalView'
 import { ChatView } from './ChatView'
@@ -19,11 +20,14 @@ function MobileApp() {
   const [profiles, setProfiles] = useState<GatewayProfile[]>([]), [profileId, setProfileId] = useState(''), [page, setPage] = useState<Page>('Inicio')
   const [bootstrap, setBootstrap] = useState<MobileBootstrap | null>(null), [hostId, setHostId] = useState(''), [sessions, setSessions] = useState<MobileSession[]>([]), [terminal, setTerminal] = useState<MobileSession | null>(null), [sessionMode, setSessionMode] = useState<'chat' | 'terminal'>('terminal')
   const [notices, setNotices] = useState<MobileNotice[]>([]), [quotas, setQuotas] = useState<MobileQuota[]>([]), [error, setError] = useState(''), [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'revoked'>('disconnected')
+  const [checking, setChecking] = useState(false)
   const [enrolling, setEnrolling] = useState(false), [search, setSearch] = useState(''), [newProject, setNewProject] = useState<MobileProject | null>(null), [closing, setClosing] = useState<MobileSession | null>(null), [unlinking, setUnlinking] = useState<GatewayProfile[] | null>(null), [busy, setBusy] = useState(false)
   const generation = useRef(0), active = useRef(''), back = useRef(() => {}), profileListGeneration = useRef(0), foreground = useRef(true), retryRequested = useRef(false), retryAttempt = useRef(0)
+  const profilesNow = useRef(profiles), bootstrapNow = useRef(bootstrap), reads = useRef<AbortController | null>(null), check = useRef<{ id: string; controller: AbortController } | null>(null)
+  profilesNow.current = profiles; bootstrapNow.current = bootstrap
   const sessionHeading = useRef<HTMLHeadingElement>(null), sessionOrigin = useRef<HTMLElement | null>(null), restoreSessionFocus = useRef(false)
   const profile = profiles.find(item => item.id === profileId)
-  const terminalProfile = terminal ? profiles.find(item => item.mobileHostId === terminal.hostId && item.mobileHostId !== 'windows') || profile : profile
+  const terminalProfile = terminal ? sessionProfile(profiles, profile, terminal.hostId) : profile
   const native = Capacitor.isNativePlatform()
   function openSession(session: MobileSession, origin: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null) {
     sessionOrigin.current = origin === document.body ? null : origin
@@ -43,60 +47,56 @@ function MobileApp() {
     })
     return () => cancelAnimationFrame(frame)
   }, [terminal])
-  const changeProfile = useCallback((id: string) => { generation.current++; active.current = id; retryRequested.current = false; retryAttempt.current = 0; setProfileId(id); setBootstrap(null); setSessions([]); setQuotas([]); setNotices([]); setTerminal(null); setHostId(''); setError(''); setStatus('connecting') }, [])
+  const changeProfile = useCallback((id: string) => { reads.current?.abort(); check.current = null; generation.current++; active.current = id; retryRequested.current = false; retryAttempt.current = 0; bootstrapNow.current = null; setChecking(false); setProfileId(id); setBootstrap(null); setSessions([]); setQuotas([]); setNotices([]); setTerminal(null); setHostId(''); setError(''); setStatus(id ? 'connecting' : 'disconnected'); try { localStorage.setItem('crow-active-profile', id) } catch { /* public preference only */ } }, [])
   const selectedHost = bootstrap?.hosts.find(host => host.id === hostId)
   const hostProjects = bootstrap?.projects.filter(project => project.hostId === hostId) || []
-  const fail = useCallback((text: string) => { setError(previous => { const warning = previous.includes('No se repite automáticamente') && !text.includes('No se repite automáticamente') ? ' No se repite automáticamente. Verificá la sesión antes de volver a intentar.' : ''; return `${text}${warning}` }); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { retryRequested.current = false; setStatus('revoked'); setBootstrap(null); setSessions([]); setNotices([]); setQuotas([]); setTerminal(null) } else if (/sin conexión con crow en windows|sin conexión|desconectad|network/i.test(text)) { retryRequested.current = true; setStatus('disconnected') } }, [])
+  const fail = useCallback((text: string) => { setError(previous => { const warning = previous.includes('No se repite automáticamente') && !text.includes('No se repite automáticamente') ? ' No se repite automáticamente. Verificá la sesión antes de volver a intentar.' : ''; return `${text}${warning}` }); if (revokedConnection(text)) { generation.current++; reads.current?.abort(); check.current = null; setChecking(false); retryRequested.current = false; bootstrapNow.current = null; setStatus('revoked'); setBootstrap(null); setSessions([]); setNotices([]); setQuotas([]); setTerminal(null) } else if (retryableConnection(text)) { retryRequested.current = true; setStatus('disconnected') } }, [])
   const loadProfiles = useCallback(async () => {
     const version = ++profileListGeneration.current
-    try { const result = await Gateway.listProfiles(); if (profileListGeneration.current !== version) return; setProfiles(result.profiles); const preferred = result.profiles.find(item => item.mobileHostId === 'windows') || result.profiles[0]; if (!active.current && preferred) changeProfile(preferred.id) }
+    try { const result = await Gateway.listProfiles(); if (profileListGeneration.current !== version) return; profilesNow.current = result.profiles; setProfiles(result.profiles); let saved = ''; try { saved = localStorage.getItem('crow-active-profile') || '' } catch { /* optional preference */ } const preferred = result.profiles.find(item => item.id === saved) || result.profiles.find(item => item.mobileHostId === 'windows') || result.profiles[0]; if (!active.current && preferred) changeProfile(preferred.id) }
     catch (reason) { if (profileListGeneration.current === version) fail(message(reason)) }
   }, [changeProfile, fail])
   useEffect(() => { if (native) void loadProfiles(); else setError('Vista de desarrollo sin conexión nativa. Vinculación y terminal requieren Android; no se usan datos ficticios.') }, [native, loadProfiles])
+  // Bootstrap updates profiles itself. Depending on that array here creates a
+  // feedback loop: every success starts another probe and invalidates sessions.
   const refresh = useCallback(async () => {
-    const id = active.current, version = ++generation.current; if (!id) return; setStatus('connecting')
+    const id = active.current; if (!id || !foreground.current || check.current?.id === id) return
+    reads.current?.abort()
+    const version = ++generation.current, controller = new AbortController(), entry = { id, controller }
+    reads.current = controller; check.current = entry; setChecking(true)
+    if (!bootstrapNow.current) setStatus('connecting')
+    const current = () => active.current === id && generation.current === version && !controller.signal.aborted
     try {
-      const data = await api<MobileBootstrap>(id, '/api/v1/bootstrap'); if (active.current !== id || generation.current !== version) return
+      const data = await api<MobileBootstrap>(id, '/api/v1/bootstrap', 'GET', undefined, controller.signal); if (!current()) return
       if (data.version !== 1 || !data.device || !Array.isArray(data.projects) || !Array.isArray(data.hosts)) throw new Error('Protocolo incompatible con este companion.')
-      setBootstrap(data); setProfiles(previous => previous.map(item => item.id === id ? { ...item, device: data.device } : item)); setHostId(previous => data.hosts.some(host => host.id === previous) ? previous : data.hosts[0]?.id || '')
+      bootstrapNow.current = data; setBootstrap(data); setProfiles(previous => previous.map(item => item.id === id ? { ...item, device: data.device } : item)); setHostId(previous => data.hosts.some(host => host.id === previous) ? previous : data.hosts[0]?.id || '')
       retryRequested.current = false; retryAttempt.current = 0; setStatus('connected'); setError(previous => previous.includes('No se repite automáticamente') ? previous : '')
-      try {
-        const authorizedNotices = await api<MobileNotice[]>(id, '/api/v1/notices'); if (active.current !== id || generation.current !== version) return; setNotices(authorizedNotices)
-      } catch (reason) {
-        if (active.current !== id || generation.current !== version) return
-        const text = message(reason); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { fail(text); return }
-        setError(`No se pudieron actualizar los avisos: ${text}`)
-      }
+      // Optional metadata cannot hold the connection check or block session discovery.
+      void api<MobileNotice[]>(id, '/api/v1/notices', 'GET', undefined, controller.signal).then(values => { if (current()) setNotices(values) }).catch(reason => { if (!current()) return; const text = message(reason); if (revokedConnection(text)) fail(text); else setError(`No se pudieron actualizar los avisos: ${text}`) })
       if (data.device.capabilities.quotas) {
-        try {
-          const dataQuotas = await api<MobileQuota[]>(id, '/api/v1/quotas'); if (active.current === id && generation.current === version) setQuotas(dataQuotas)
-        } catch (reason) {
-          if (active.current !== id || generation.current !== version) return
-          const text = message(reason); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { fail(text); return }
-          setError(`No se pudo actualizar el uso de cuentas: ${text}`)
-        }
+        void api<MobileQuota[]>(id, '/api/v1/quotas', 'GET', undefined, controller.signal).then(values => { if (current()) setQuotas(values) }).catch(reason => { if (!current()) return; const text = message(reason); if (revokedConnection(text)) fail(text); else setError(`No se pudo actualizar el uso de cuentas: ${text}`) })
       }
-    } catch (reason) { if (active.current === id && generation.current === version) {
+    } catch (reason) { if (current()) {
       const text = message(reason)
-      const directHost = profile?.mobileHostId === 'windows' ? profiles.find(candidate => candidate.mobileHostId && candidate.mobileHostId !== 'windows') : undefined
+      const directHost = retryableConnection(text) ? fallbackProfile(profilesNow.current, profilesNow.current.find(item => item.id === id)) : undefined
       if (directHost) { changeProfile(directHost.id); return }
-      fail(text); if (!/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401|sin conexión|desconectad|network/i.test(text)) setStatus('disconnected')
-    } }
-  }, [changeProfile, fail, profile?.mobileHostId, profiles])
+      retryRequested.current = retryableConnection(text); fail(text); if (!revokedConnection(text)) setStatus('disconnected')
+    } } finally { if (check.current === entry) { check.current = null; setChecking(false) } }
+  }, [changeProfile, fail])
   useEffect(() => { if (profileId) void refresh() }, [profileId, refresh])
   useEffect(() => {
-    if (!profileId || status !== 'disconnected' || !retryRequested.current || !foreground.current) return
+    if (!profileId || checking || status !== 'disconnected' || !retryRequested.current || !foreground.current) return
     const delay = Math.min(30000, 1000 * 2 ** Math.min(retryAttempt.current++, 5))
     const timer = setTimeout(() => { if (foreground.current) void refresh() }, delay)
     return () => clearTimeout(timer)
-  }, [profileId, status, error, refresh])
+  }, [profileId, status, error, checking, refresh])
   useEffect(() => {
     if (!profileId || !hostId || !bootstrap) return
     const available = selectedHost?.status === 'connected' && bootstrap.projects.some(project => project.hostId === hostId && (project.availability || 'available') === 'available')
     if (!available) { setSessions([]); return }
-    let cancelled = false; const id = profileId, version = generation.current
-    void api<MobileSession[]>(id, `/api/v1/sessions?hostId=${encodeURIComponent(hostId)}`).then(result => { if (!cancelled && active.current === id && generation.current === version) setSessions(result) }).catch(reason => { if (!cancelled && active.current === id && generation.current === version) fail(message(reason)) })
-    return () => { cancelled = true }
+    const controller = new AbortController(), id = profileId, version = generation.current
+    void api<MobileSession[]>(id, `/api/v1/sessions?hostId=${encodeURIComponent(hostId)}`, 'GET', undefined, controller.signal).then(result => { if (!controller.signal.aborted && active.current === id && generation.current === version) setSessions(result) }).catch(reason => { if (!controller.signal.aborted && active.current === id && generation.current === version) fail(message(reason)) })
+    return () => controller.abort()
   }, [profileId, hostId, bootstrap, selectedHost?.status, fail])
   back.current = () => {
     const dialog = document.querySelector('dialog[open]'); if (dialog) { dialog.dispatchEvent(new Event('cancel', { cancelable: true })); return }
@@ -107,11 +107,12 @@ function MobileApp() {
     const handles: { remove(): Promise<void> }[] = []; let disposed = false
     async function setup() {
       handles.push(await App.addListener('backButton', () => back.current()))
-      handles.push(await App.addListener('appStateChange', state => { foreground.current = state.isActive; generation.current++; if (state.isActive) { void loadProfiles(); void refresh() } else setStatus('disconnected') }))
+      handles.push(await App.addListener('appStateChange', state => { foreground.current = state.isActive; if (state.isActive) { void loadProfiles(); void refresh() } else { generation.current++; reads.current?.abort(); check.current = null; setChecking(false); setStatus('disconnected') } }))
       if (disposed) for (const handle of handles) await handle.remove()
     }
     void setup(); return () => { disposed = true; for (const handle of handles) void handle.remove() }
   }, [native, loadProfiles, refresh])
+  useEffect(() => () => { generation.current++; reads.current?.abort() }, [])
   async function mutate(path: string, body: unknown, done: (result: MobileSession) => void) {
     if (!profile || busy) return; const id = profile.id, version = generation.current; setBusy(true)
     try { const result = await api<MobileSession>(id, path, 'POST', body); if (active.current === id && generation.current === version) { done(result); setError('') } }
@@ -124,7 +125,7 @@ function MobileApp() {
     catch (reason) { if (active.current === id && version === generation.current) fail(message(reason)) }
   }
   return <div className={`app ${terminal ? 'with-terminal' : ''}`}>
-    <header><div><span className="brand">CROW · COMPANION</span><h1 ref={sessionHeading} tabIndex={-1}>{terminal ? sessionMode === 'chat' ? 'Chat' : 'Terminal' : enrolling ? 'Vincular equipos' : page}</h1></div>{!terminal && <button className="header-refresh" aria-label="Actualizar datos" title="Actualizar datos" disabled={!profile || busy || status === 'connecting'} onClick={() => void refresh()}><RefreshCw size={21} aria-hidden="true" /></button>}</header>
+    <header><div><span className="brand">CROW · COMPANION</span><h1 ref={sessionHeading} tabIndex={-1}>{terminal ? sessionMode === 'chat' ? 'Chat' : 'Terminal' : enrolling ? 'Vincular equipos' : page}</h1></div>{!terminal && <button className="header-refresh" aria-label="Actualizar datos" title="Actualizar datos" aria-busy={checking} disabled={!profile || busy || checking} onClick={() => void refresh()}><RefreshCw size={21} aria-hidden="true" /></button>}</header>
     {error && <div className="error" role="alert"><span>{error}</span><button aria-label="Descartar aviso" onClick={() => setError('')}>Cerrar</button></div>}
     {terminal && terminalProfile ? <>
       {terminal.chatAvailable === true ? <>
@@ -149,7 +150,8 @@ function MobileApp() {
       </> : <div className="session-mode-panel"><TerminalView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} /></div>}
     </> : <main>
       {enrolling ? <Enrollment onCancel={() => setEnrolling(false)} onError={setError} onPaired={values => { profileListGeneration.current++; setProfiles(previous => [...previous, ...values]); changeProfile(values[0].id); setEnrolling(false); setPage('Inicio') }} /> : <>
-        <section className={`connection connection-${status}`} aria-live="polite"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? 'Vínculo activo' : status === 'connecting' ? 'Comprobando la conexión…' : status === 'revoked' ? 'Acceso rechazado o vencido · revisá el vínculo' : retryRequested.current ? 'Sin conexión · reintentando automáticamente' : 'Sin conexión · revisá el aviso y actualizá'}</small></div></section>
+        <section className={`connection connection-${status}`} aria-live="polite"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? checking ? 'Verificando conexión · terminales disponibles' : 'Vínculo activo' : status === 'connecting' ? 'Comprobando la conexión · máximo 15 segundos…' : status === 'revoked' ? 'Acceso rechazado o vencido · revisá el vínculo' : retryRequested.current ? 'Sin conexión · reintentando automáticamente' : 'Sin conexión · revisá el aviso y actualizá'}</small></div></section>
+        {profile && status === 'disconnected' && <button className="connection-retry" disabled={busy || checking} onClick={() => void refresh()}>{checking ? 'Reconectando…' : 'Reintentar conexión'}</button>}
         {profiles.length > 1 && <section className="card"><label htmlFor="active-gateway">Equipo de trabajo</label><select id="active-gateway" value={profileId} onChange={event => changeProfile(event.target.value)}>{profiles.map(item => <option value={item.id} key={item.id}>{item.device.label} · {item.mobileHostId === 'windows' ? 'Crow Windows' : item.mobileHostId || 'equipo vinculado'}</option>)}</select></section>}
         {!profile && <section className="card"><h2>Tu workspace, desde Android</h2><p>Escaneá una vez el QR de Crow Windows. Después podés seguir las terminales de tus hosts Linux aunque apagues la PC. Android no guarda llaves SSH.</p><button className="primary" disabled={!native} onClick={() => setEnrolling(true)}>Vincular con QR</button></section>}
         {profile && bootstrap && <section className="host-picker" aria-label="Servidor actual"><label htmlFor="host">Servidor</label><select id="host" value={hostId} onChange={event => { setHostId(event.target.value); setSessions([]) }}>{bootstrap.hosts.map(host => <option value={host.id} key={host.id}>{host.name} · {hostStateLabel(host.status)}</option>)}</select></section>}

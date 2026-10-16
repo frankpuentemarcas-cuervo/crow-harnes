@@ -29,7 +29,9 @@ test('errors can be dismissed without concealing connection status', () => {
 })
 
 test('device authentication rejection leaves connecting state without retrying actions', () => {
-  assert.match(app, /revocado\|vencido\|forgotten\|rechazó la autenticación del dispositivo\|HTTP 401/)
+  const policy = readFileSync(new URL('../src/connection-read.mjs', import.meta.url), 'utf8')
+  assert.match(policy, /revocado\|vencido\|forgotten\|rechazó la autenticación del dispositivo\|HTTP 401/)
+  assert.match(app, /if \(revokedConnection\(text\)\)/)
   assert.match(app, /setStatus\('revoked'\); setBootstrap\(null\)/)
   assert.match(app, /Acceso rechazado o vencido · revisá el vínculo/)
 })
