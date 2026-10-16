@@ -2,11 +2,18 @@ package dev.crow.companion;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import okhttp3.OkHttpClient;
 
 /** Reuse pinned TLS/relay connections only within the same profile and trust binding.
  * Credentials remain per-request headers and are never retained in a client. */
 final class GatewayTransportPool {
+    // Conscrypt may write TLS close_notify while evicting an idle connection.
+    // Lifecycle callbacks run on Android's UI thread, even when no request is active.
+    private static final ExecutorService CLEANUP = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "crow-transport-cleanup"); thread.setDaemon(true); return thread;
+    });
     interface Factory { OkHttpClient create() throws Exception; }
     private static final class Entry {
         final String binding; final OkHttpClient client;
@@ -30,8 +37,12 @@ final class GatewayTransportPool {
         clients.clear();
     }
     static void release(OkHttpClient client) {
-        client.dispatcher().cancelAll();
-        client.connectionPool().evictAll();
-        client.dispatcher().executorService().shutdown();
+        CLEANUP.execute(() -> {
+            try { client.dispatcher().cancelAll(); }
+            finally {
+                try { client.connectionPool().evictAll(); }
+                finally { client.dispatcher().executorService().shutdown(); }
+            }
+        });
     }
 }

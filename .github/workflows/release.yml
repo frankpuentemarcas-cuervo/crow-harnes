@@ -115,7 +115,7 @@ jobs:
           name: crow-android
           path: dist
 
-      - name: Publish and verify release assets
+      - name: Stage and verify draft release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -164,7 +164,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Could not update release notes' }
             gh release upload $env:GITHUB_REF_NAME @files --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME @files --title $version --notes $androidNotes --generate-notes --verify-tag --latest
+            # Keep latest/auto-update unchanged until real APK acceptance passes.
+            gh release create $env:GITHUB_REF_NAME @files --title $version --notes $androidNotes --generate-notes --verify-tag --draft
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release upload failed' }
 
