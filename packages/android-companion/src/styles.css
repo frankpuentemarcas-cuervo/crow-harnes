@@ -55,7 +55,7 @@ nav button[aria-current=page]{background:#273d2e}
 .terminal-page{gap:7px}
 .with-terminal .error{max-height:104px;overflow:auto;font-size:13px}
 .terminal-heading{grid-template-columns:1fr auto;grid-template-areas:'back state' 'identity identity';gap:3px 8px;padding-bottom:7px}
-.terminal-back{grid-area:back;justify-self:start}
+.terminal-heading .terminal-back{grid-area:back;justify-self:start}
 .terminal-identity{grid-area:identity}
 .terminal-identity strong{font-size:18px}
 .terminal-status{grid-area:state;max-width:none;padding:6px 10px;font-size:12px}
@@ -95,4 +95,6 @@ nav button[aria-current=page]{background:#273d2e}
 .chat-compose{display:flex;flex:0 0 auto;align-items:stretch;gap:8px;min-width:0}.chat-compose textarea{flex:1;min-width:0;min-height:58px;max-height:150px;resize:vertical;touch-action:pan-y}.chat-send{display:flex;align-items:center;justify-content:center;gap:6px;min-width:82px;padding:8px 10px}
 .chat-toolbar{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;gap:6px;color:var(--dim);font-size:11px}.chat-toolbar button{display:flex;align-items:center;gap:5px;min-height:48px;padding:4px 8px;font-size:12px}
 .chat-recovery{flex:0 0 auto;padding:9px 10px;border:1px solid #705d31;border-radius:9px;background:#292619;color:#f2d38b;font-size:12px}.chat-recovery p{margin:0 0 7px}.chat-recovery button{min-height:48px;color:var(--ink)}
+.chat-message{flex-shrink:0}.chat-message>p{margin:0;white-space:pre-wrap}.chat-message-meta span{font-size:11px;color:var(--dim)}.outgoing-sending{opacity:.75}.outgoing-unknown{border-color:#9d7540}.chat-activity{border-left:3px solid var(--green);background:#19231d}
+.chat-inline-error{display:flex;align-items:center;gap:8px}.chat-inline-error>span{flex:1;min-width:0;max-height:72px;overflow:auto}.chat-inline-error>button{flex:none;min-height:48px;padding:6px 9px;font-size:12px}
 @media(max-height:560px){.chat-page{gap:5px}.chat-heading{padding-bottom:4px}.chat-status{padding:4px 6px}.chat-compose textarea{min-height:48px;max-height:96px}.chat-message{padding:8px 10px}.chat-latest{bottom:96px}}

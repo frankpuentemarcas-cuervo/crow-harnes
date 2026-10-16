@@ -24,6 +24,17 @@ La restricción de creación/cierre no depende de ocultar botones: `crowd` respo
 
 ## Operación y límites
 
+### Chat y confirmación del envío
+
+- Al entrar o volver a Chat se consulta el tramo final del historial y se muestra la última respuesta capturada. Mientras estás leyendo arriba, las respuestas nuevas no te mueven de lugar: usá **Ir al final**.
+- Tu texto aparece inmediatamente con **Enviando**. **Recibido por la terminal** confirma una escritura al PTY, no que el agente ya haya procesado la instrucción. **Agente trabajando** requiere una señal del agente.
+- Un estado desconocido no elimina permisos de envío. Podés preparar el siguiente mensaje mientras el agente trabaja; el envío de otro turno espera a que termine. Si la señal queda trabada, revisá Terminal antes de habilitar el envío manual.
+- Una desconexión durante el envío puede dejar el resultado sin confirmar. Crow no reenvía comandos automáticamente; el historial puede confirmar la recepción posteriormente.
+- Las respuestas se incorporan al cerrar el turno del agente; no se muestra todavía cada token mientras se genera. Claude puede recuperar la última respuesta al iniciar o reanudar con los hooks actualizados, usando únicamente el transcript de esa sesión. No se importan historiales de otras terminales.
+- Esta mejora requiere actualizar **Windows, APK y crowd** juntos. Actualizar el binario no reinicia de forma segura agentes que ya están ejecutándose: para activar nuevos hooks, cerrá o reanudá el agente de manera controlada, sin interrumpir tareas activas.
+
+### Servicio y red
+
 - El relay de `crow.frabubu.com` escucha `/v1/tunnel` mediante el proxy TLS existente. El Compose permite hasta 16 rutas y cuatro streams por ruta, sin publicar puertos de los hosts Linux.
 - El QR admite Windows más hasta 15 hosts. Si un host no ofrece todavía la API móvil, actualizá `crowd` y volvé a generar el QR; los vínculos anteriores no se borran.
 - Publicar una versión nueva **no** actualiza automáticamente `crowd` en hosts activos. El instalador difiere el reinicio cuando detecta sesiones vivas para no matarlas.

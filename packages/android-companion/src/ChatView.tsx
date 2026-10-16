@@ -5,12 +5,14 @@ import { ArrowDown, Copy, RefreshCw, Send } from 'lucide-react'
 import type { MobileChatMessage, MobileChatPage, MobileSession } from '../../../src/shared/mobile-companion'
 import { Gateway, api, type GatewayProfile } from './native'
 import { encodeInput, inputByteLength, MAX_INPUT_BYTES } from './protocol.mjs'
-import { boundChatWindow, mergeChatMessages, singleLineChatInput, splitChatMarkdown } from './chat-model.mjs'
+import { boundChatWindow, chatInputAllowed, chatReplyProgress, confirmedChatEcho, definiteChatSendFailure, mergeChatMessages, singleLineChatInput, splitChatMarkdown } from './chat-model.mjs'
+import { createChatSync } from './chat-sync.mjs'
 
 const CHAT_PAGE_SIZE = 100
 const CHAT_WINDOW_SIZE = 200
-const CHAT_POLL_MS = 2500
+const CHAT_POLL_MS = 10000 // Recovery only; live state frames trigger immediate reads.
 type ChatStreamState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+type OutgoingMessage = { content: string; afterSeq: number; status: 'sending' | 'delivered' | 'processing' | 'unknown' | 'failed' | 'answered' }
 
 function agentName(agent: string) { return agent === 'claude' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent }
 
@@ -48,41 +50,47 @@ function MessageContent({ content, onCopy }: { content: string; onCopy(value: st
 
 export function ChatView({ profile, hostId, session, onBack, onState, isActive = true }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onState(info: MobileSession): void; isActive?: boolean }) {
   const list = useRef<HTMLDivElement>(null), cursor = useRef(0), before = useRef(0)
-  const inFlight = useRef(false), active = useRef(true), followLatest = useRef(true), pendingOlderAnchor = useRef<{ id: string; offset: number } | null>(null)
+  const active = useRef(true), followLatest = useRef(true), pendingOlderAnchor = useRef<{ id: string; offset: number } | null>(null)
+  const historySync = useRef<ReturnType<typeof createChatSync> | null>(null)
   const connection = useRef(''), retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const onStateRef = useRef(onState)
   onStateRef.current = onState
   const [messages, setMessages] = useState<MobileChatMessage[]>([]), [hasOlder, setHasOlder] = useState(false)
+  const [historyReady, setHistoryReady] = useState(false)
   const [streamState, setStreamState] = useState<ChatStreamState>('connecting'), [loading, setLoading] = useState(true)
   const [draft, setDraft] = useState(''), [sending, setSending] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
+  const [historyError, setHistoryError] = useState('')
   const [unread, setUnread] = useState(0), [copyMessage, setCopyMessage] = useState(''), [awaitingAgent, setAwaitingAgent] = useState(false)
+  const [outgoing, setOutgoing] = useState<OutgoingMessage | null>(null)
   const [recoveryAvailable, setRecoveryAvailable] = useState(false), [manualSendOverride, setManualSendOverride] = useState(false), [announcement, setAnnouncement] = useState('')
-  const sendLock = useRef(false), sawAgentBusy = useRef(false), assistantSeqAtSend = useRef(0)
-  const canOperate = session.canOperate && profile.device.capabilities.input && session.state === 'running'
-  const agentReady = session.agentState === 'waiting' || session.agentState === 'completed'
-  const canSend = canOperate && (agentReady || manualSendOverride) && !awaitingAgent && streamState === 'connected'
+  const sendLock = useRef(false), sawAgentBusy = useRef(false)
+  const replyPending = useRef<{ content: string; afterSeq: number; userSeq?: number } | null>(null)
+  const canOperate = session.canOperate && !session.readOnly && profile.device.capabilities.input && session.state === 'running'
+  const agentReady = session.agentState !== 'working'
+  const canSend = historyReady && chatInputAllowed(session, profile.device.capabilities, streamState === 'connected', awaitingAgent, manualSendOverride)
 
   useEffect(() => {
-    if (!awaitingAgent) { setRecoveryAvailable(false); return }
+    if (!awaitingAgent && (agentReady || !canOperate)) { setRecoveryAvailable(false); return }
     const timer = window.setTimeout(() => setRecoveryAvailable(true), 30000)
     return () => clearTimeout(timer)
-  }, [awaitingAgent])
+  }, [agentReady, awaitingAgent, canOperate])
 
   useEffect(() => {
     if (!awaitingAgent) return
-    if (!agentReady) sawAgentBusy.current = true
+    if (!agentReady) { sawAgentBusy.current = true; setOutgoing(previous => previous && previous.status !== 'unknown' ? { ...previous, status: 'processing' } : previous) }
     else if (sawAgentBusy.current) { sawAgentBusy.current = false; setManualSendOverride(false); setAwaitingAgent(false) }
   }, [agentReady, awaitingAgent])
-
-  useEffect(() => {
-    if (!awaitingAgent) return
-    const assistantSeq = messages.reduce((maximum, item) => item.role === 'assistant' ? Math.max(maximum, item.seq) : maximum, 0)
-    if (assistantSeq > assistantSeqAtSend.current) { sawAgentBusy.current = false; setManualSendOverride(false); setAwaitingAgent(false) }
-  }, [awaitingAgent, messages])
 
   useEffect(() => { if (agentReady && manualSendOverride) setManualSendOverride(false) }, [agentReady, manualSendOverride])
 
   const acceptPage = useCallback((page: MobileChatPage, mode: 'initial' | 'older' | 'newer') => {
+    if (replyPending.current) {
+      const progress = chatReplyProgress(replyPending.current, page.messages)
+      replyPending.current = progress.answered ? null : progress
+      if (progress.userSeq) setError('') // A durable user hook resolves an uncertain send.
+      if (progress.answered) { sawAgentBusy.current = false; setManualSendOverride(false); setAwaitingAgent(false); setOutgoing(previous => previous ? { ...previous, status: 'answered' } : null); setNotice('Respuesta recibida.') }
+    }
+    setOutgoing(previous => confirmedChatEcho(previous, page.messages) ? null : previous)
     if (mode === 'older') {
       const element = list.current
       if (element) {
@@ -111,65 +119,44 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
       setUnread(value => value + page.messages.filter(item => item.seq > previousCursor).length)
       return
     }
-    setMessages(previous => boundChatWindow(mergeChatMessages(previous, page.messages), CHAT_WINDOW_SIZE, 'latest'))
-    if (mode === 'initial') setHasOlder(page.hasMore)
+    setMessages(previous => {
+      const next = boundChatWindow(mode === 'initial' ? page.messages : mergeChatMessages(previous, page.messages), CHAT_WINDOW_SIZE, 'latest')
+      if (next.length) before.current = next[0].seq
+      return next
+    })
+    if (mode === 'initial') { setHasOlder(page.hasMore); setUnread(0); cursor.current = 0; before.current = page.nextBefore || 0 }
     if (page.messages.length) {
       cursor.current = Math.max(cursor.current, ...page.messages.map(item => item.seq))
       if (!before.current || mode === 'initial') before.current = page.nextBefore || page.messages[0].seq
       if (mode === 'newer' && page.messages[0].seq > 1) setHasOlder(true)
     }
   }, [isActive, session.agent])
+  const acceptPageRef = useRef(acceptPage)
+  acceptPageRef.current = acceptPage
 
   const fetchPage = useCallback(async (mode: 'initial' | 'older' | 'newer') => {
-    if (inFlight.current) return
-    if (mode === 'older' && !before.current) return
-    inFlight.current = true
-    try {
-      const query = new URLSearchParams({ hostId, sessionId: session.id, limit: String(CHAT_PAGE_SIZE) })
-      if (mode === 'older') query.set('before', String(before.current))
-      else if (mode === 'newer' && cursor.current) query.set('after', String(cursor.current))
-      const page = await api<MobileChatPage>(profile.id, `/api/v1/chat?${query}`)
-      if (!active.current) return
-      acceptPage(page, mode)
-      setError('')
-    } catch (reason) {
-      if (active.current) setError(`No se pudo actualizar la conversación: ${reason instanceof Error ? reason.message : String(reason)}`)
-    } finally {
-      inFlight.current = false
-      setLoading(false)
-    }
-  }, [acceptPage, hostId, profile.id, session.id])
-
-  const fetchLatest = useCallback(async () => {
-    if (inFlight.current) return
-    inFlight.current = true
-    setLoading(true)
-    try {
-      const query = new URLSearchParams({ hostId, sessionId: session.id, limit: String(CHAT_PAGE_SIZE) })
-      const latest = await api<MobileChatPage>(profile.id, `/api/v1/chat?${query}`)
-      let combined = latest.messages
-      let older = latest
-      if (latest.hasMore && latest.nextBefore > 0) {
-        const olderQuery = new URLSearchParams({ hostId, sessionId: session.id, before: String(latest.nextBefore), limit: String(CHAT_PAGE_SIZE) })
-        older = await api<MobileChatPage>(profile.id, `/api/v1/chat?${olderQuery}`)
-        combined = mergeChatMessages(older.messages, latest.messages)
-      }
-      if (!active.current) return
-      followLatest.current = true
-      setMessages(boundChatWindow(combined, CHAT_WINDOW_SIZE, 'latest'))
-      cursor.current = latest.messages.reduce((maximum, item) => Math.max(maximum, item.seq), 0)
-      before.current = older.nextBefore || latest.nextBefore
-      setHasOlder(latest.hasMore ? older.hasMore : false)
-      setUnread(0); setError('')
-    } catch (reason) {
-      if (active.current) setError(`No se pudo cargar el final de la conversación: ${reason instanceof Error ? reason.message : String(reason)}`)
-    } finally { inFlight.current = false; setLoading(false) }
-  }, [hostId, profile.id, session.id])
+    if (mode !== 'older' || before.current) await historySync.current?.request(mode)
+  }, [])
+  const fetchLatest = useCallback(() => fetchPage('initial'), [fetchPage])
 
   useEffect(() => {
     if (!isActive) { active.current = false; return }
     active.current = true
-    void fetchPage(cursor.current ? 'newer' : 'initial')
+    const sync = createChatSync({
+      read: async (mode: string) => {
+        const query = new URLSearchParams({ hostId, sessionId: session.id, limit: String(CHAT_PAGE_SIZE) })
+        if (mode === 'older') query.set('before', String(before.current))
+        else if (mode === 'newer' && cursor.current) query.set('after', String(cursor.current))
+        return api<MobileChatPage>(profile.id, `/api/v1/chat?${query}`)
+      },
+      accept: (page: MobileChatPage, mode: 'initial' | 'older' | 'newer') => { acceptPageRef.current(page, mode); if (mode === 'initial') setHistoryReady(true); setHistoryError('') },
+      error: (reason: unknown) => setHistoryError(`No se pudo actualizar la conversación: ${reason instanceof Error ? reason.message : String(reason)}`),
+      loading: (value: boolean, mode: string) => { if (mode !== 'newer') setLoading(value) },
+    })
+    historySync.current = sync
+    setHistoryReady(false)
+    followLatest.current = true
+    void sync.request('initial')
     let disposed = false, retries = 0
     const handles: { remove(): Promise<void> }[] = []
     const close = () => {
@@ -207,15 +194,15 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
           if (!event.data) return
           try {
             const frame = JSON.parse(event.data)
-            if (frame.type === 'ready') { retries = 0; setStreamState('connected'); return }
-            if (frame.type === 'state' && frame.info) onStateRef.current(frame.info)
+            if (frame.type === 'ready') { retries = 0; setStreamState('connected'); void fetchPage('newer'); return }
+            if (frame.type === 'state' && frame.info) { onStateRef.current(frame.info); void fetchPage('newer') }
             if (frame.type === 'disconnected') { setStreamState('reconnecting'); schedule() }
           } catch { setStreamState('reconnecting'); schedule() }
         }))
         handles.push(await App.addListener('appStateChange', state => {
           active.current = state.isActive
           clearTimeout(retryTimer.current)
-          if (state.isActive) { void connect(); void fetchPage('newer') } else close()
+          if (state.isActive) { void connect(); void fetchPage('initial') } else close()
         }))
         if (disposed) { for (const handle of handles) await handle.remove(); return }
         await connect()
@@ -233,6 +220,7 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
     }, CHAT_POLL_MS)
     return () => {
       disposed = true; active.current = false; clearInterval(poll); clearTimeout(retryTimer.current); close()
+      sync.dispose(); if (historySync.current === sync) historySync.current = null
       for (const handle of handles) void handle.remove()
     }
   }, [fetchPage, hostId, isActive, profile.id, session.id])
@@ -249,7 +237,15 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
       element.scrollTop = element.scrollHeight
       setUnread(0)
     }
-  }, [messages])
+  }, [isActive, messages, outgoing])
+
+  useEffect(() => {
+    if (!isActive || !list.current) return
+    const element = list.current
+    const observer = new ResizeObserver(() => { if (followLatest.current) element.scrollTop = element.scrollHeight })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [isActive])
 
   async function send() {
     if (!draft.trim() || sending || sendLock.current || !canSend) return
@@ -259,18 +255,31 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
     if (!singleLineText) return
     sendLock.current = true
     setSending(true); setError(''); setNotice(''); sawAgentBusy.current = false
-    assistantSeqAtSend.current = messages.reduce((maximum, item) => item.role === 'assistant' ? Math.max(maximum, item.seq) : maximum, 0)
+    followLatest.current = true
+    if (list.current) list.current.scrollTop = list.current.scrollHeight
+    setUnread(0); setAwaitingAgent(true)
+    setOutgoing({ content: singleLineText, afterSeq: cursor.current, status: 'sending' })
+    replyPending.current = { content: singleLineText, afterSeq: cursor.current }
     try {
       await Gateway.send({ connectionId: id, type: 'input', data: encodeInput(singleLineText + '\r') })
       if (connection.current !== id) throw new Error('La conexión cambió durante el envío. Verificá si el mensaje llegó antes de repetirlo.')
       setDraft(value => value === text ? '' : value)
-      setAwaitingAgent(true)
+      setOutgoing(previous => previous?.status === 'sending' ? { ...previous, status: 'delivered' } : previous)
       setManualSendOverride(false)
-      setNotice(/\r|\n/.test(text) ? 'Enviado como una sola instrucción; los saltos de línea se convirtieron en espacios para no ejecutar varias líneas.' : `Enviado. Esperando la respuesta de ${agentName(session.agent)}; no se volverá a enviar automáticamente.`)
-      void fetchPage('newer')
+      setNotice(!replyPending.current ? 'Respuesta recibida.' : /\r|\n/.test(text) ? 'Recibido como una sola instrucción; los saltos de línea se convirtieron en espacios.' : 'Recibido por la terminal.')
+      void fetchPage('initial')
     } catch (reason) {
-      setAwaitingAgent(false)
-      setError(`${reason instanceof Error ? reason.message : String(reason)} Verificá la conversación antes de volver a intentar.`)
+      if (!replyPending.current || replyPending.current.userSeq) {
+        // The HTTP acknowledgement can be lost after the agent's user hook
+        // already proved receipt. Never ask the user to repeat that prompt.
+        setDraft(value => value === text ? '' : value)
+        setError(''); setNotice('El historial confirmó la recepción. No se repite el envío.')
+      } else {
+        const definite = definiteChatSendFailure(reason)
+        if (definite) { setAwaitingAgent(false); replyPending.current = null }
+        setOutgoing(previous => previous ? { ...previous, status: definite ? 'failed' : 'unknown' } : null)
+        setError(`${reason instanceof Error ? reason.message : String(reason)} Verificá la conversación antes de volver a intentar.`)
+      }
     } finally { sendLock.current = false; setSending(false) }
   }
 
@@ -286,7 +295,7 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
       <span className={`chat-status ${streamState}`} role="status">{streamState === 'connected' ? 'En línea' : streamState === 'connecting' ? 'Conectando…' : streamState === 'reconnecting' ? 'Reconectando…' : 'Desconectada'}</span>
     </div>
     <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
-    <div className="chat-transcript" ref={list} role="region" tabIndex={0} onScroll={event => { const element = event.currentTarget; followLatest.current = element.scrollHeight - element.clientHeight - element.scrollTop < 96; if (followLatest.current) setUnread(0) }} aria-label="Mensajes de la conversación" aria-live="off">
+    <div className="chat-transcript" ref={list} role="region" tabIndex={0} onScroll={event => { const element = event.currentTarget; if (!isActive || !element.clientHeight) return; followLatest.current = element.scrollHeight - element.clientHeight - element.scrollTop < 96; if (followLatest.current) setUnread(0) }} aria-label="Mensajes de la conversación" aria-live="off">
       {hasOlder && <button className="chat-older" disabled={loading} onClick={() => void fetchPage('older')}>{loading ? 'Cargando…' : 'Cargar mensajes anteriores'}</button>}
       {loading && messages.length === 0 && <p className="chat-empty">Cargando conversación…</p>}
       {!loading && messages.length === 0 && <p className="chat-empty">Todavía no hay mensajes estructurados. Escribí cuando {agentName(session.agent)} esté esperando una instrucción; las próximas respuestas se guardarán acá.</p>}
@@ -295,18 +304,20 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
         {item.truncated && <p className="chat-truncated" role="note">Mensaje recortado por el límite del historial.</p>}
         <MessageContent content={item.content} onCopy={value => void copyCode(value)} />
       </article>)}
+      {outgoing && <article className={`chat-message user outgoing-${outgoing.status}`}><div className="chat-message-meta"><strong>Vos</strong><span role="status">{outgoing.status === 'sending' ? 'Enviando…' : outgoing.status === 'unknown' ? 'Envío sin confirmar' : outgoing.status === 'failed' ? 'No enviado' : outgoing.status === 'processing' ? 'Agente trabajando' : outgoing.status === 'answered' ? 'Respuesta recibida' : 'Recibido por la terminal'}</span></div><p>{outgoing.content}</p></article>}
     </div>
     {(unread > 0 || (messages.length > 0 && cursor.current > messages[messages.length - 1].seq)) && <button className="chat-latest" disabled={loading} onClick={() => void fetchLatest()}><ArrowDown size={16} aria-hidden="true" /> {unread > 0 ? `${unread} mensaje${unread === 1 ? '' : 's'} nuevo${unread === 1 ? '' : 's'}` : 'Ir al final'}</button>}
-    {error && <p className="chat-inline-error" role="alert">{error}</p>}
-    {(notice || copyMessage) && <p className="chat-inline-notice" role="status">{notice || copyMessage}</p>}
+    {(error || historyError) && <div className="chat-inline-error" role="alert"><span>{error || historyError}</span><button type="button" aria-label="Descartar aviso del chat" onClick={() => { setError(''); setHistoryError('') }}>Cerrar</button></div>}
+    {(copyMessage || (notice && !awaitingAgent)) && <p className="chat-inline-notice" role="status">{copyMessage || notice}</p>}
     {!canOperate && <p className="chat-compose-help">Esta terminal está en modo de solo lectura. Podés consultar el historial cuando esté disponible.</p>}
-     {canOperate && awaitingAgent && <p className="chat-compose-help">Esperando que {agentName(session.agent)} termine antes de habilitar otro envío. No se reenvía automáticamente.</p>}
-     {canOperate && awaitingAgent && recoveryAvailable && <div className="chat-recovery"><p>¿La respuesta no aparece? Revisá primero la pestaña Terminal para confirmar que el agente terminó y que tu mensaje llegó.</p><button type="button" onClick={() => { setAwaitingAgent(false); setManualSendOverride(true); setRecoveryAvailable(false); setNotice('Habilitaste el envío manual tras revisar Terminal. No repitas la instrucción anterior.') }}>Ya revisé Terminal; habilitar envío</button></div>}
-     {canOperate && !agentReady && !awaitingAgent && !manualSendOverride && <p className="chat-compose-help">{agentName(session.agent)} todavía está trabajando o no informó un estado seguro. Vas a poder enviar cuando vuelva a quedar disponible.</p>}
+     {canOperate && awaitingAgent && <p className="chat-compose-help chat-activity" role="status">{!agentReady ? `${agentName(session.agent)} está trabajando…` : sending ? 'Enviando a la terminal…' : outgoing?.status === 'unknown' ? 'Resultado del envío sin confirmar. No se vuelve a enviar automáticamente.' : 'Recibido por la terminal; esperando actividad del agente…'}</p>}
+     {canOperate && recoveryAvailable && <div className="chat-recovery"><p>¿El estado no avanza? Revisá Terminal para confirmar que el agente terminó y que tu mensaje llegó.</p><button type="button" onClick={() => { setAwaitingAgent(false); setManualSendOverride(true); setRecoveryAvailable(false); setNotice('Habilitaste el envío manual tras revisar Terminal. No repitas la instrucción anterior.') }}>Ya revisé Terminal; habilitar envío</button></div>}
+     {canOperate && !agentReady && !awaitingAgent && !manualSendOverride && <p className="chat-compose-help" role="status">{agentName(session.agent)} está trabajando. Podés preparar tu próximo mensaje.</p>}
+     {canOperate && (!session.agentState || session.agentState === 'unknown') && !awaitingAgent && <p className="chat-compose-help">Estado del agente sin confirmar. El envío va a la misma terminal; no se ejecuta en otra sesión.</p>}
      {canOperate && manualSendOverride && !agentReady && <p className="chat-compose-help" role="status">Envío manual habilitado por vos. Confirmá que el agente terminó en Terminal antes de enviar; esto no reenvía el mensaje anterior.</p>}
     <form className="chat-compose" onSubmit={event => { event.preventDefault(); void send() }}>
        <label className="sr-only" htmlFor="chat-draft">Escribí un mensaje para {agentName(session.agent)}</label>
-       <textarea id="chat-draft" rows={2} value={draft} disabled={!canSend || sending} placeholder={canSend ? `Escribí a ${agentName(session.agent)}…` : awaitingAgent ? `Esperando respuesta de ${agentName(session.agent)}…` : streamState !== 'connected' ? 'Conectando la sesión…' : `${agentName(session.agent)} no está esperando un mensaje`} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void send() } }} />
+       <textarea id="chat-draft" rows={2} value={draft} disabled={!canOperate} placeholder={awaitingAgent || !agentReady ? 'Prepará tu próximo mensaje…' : `Escribí a ${agentName(session.agent)}…`} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void send() } }} />
       <button className="primary chat-send" type="submit" disabled={!canSend || sending || !draft.trim()} aria-label="Enviar mensaje"><Send size={19} aria-hidden="true" />{sending ? 'Enviando' : 'Enviar'}</button>
     </form>
     <div className="chat-toolbar"><span>{draft ? `${inputByteLength(draft)} / ${MAX_INPUT_BYTES} bytes` : 'Enter agrega una línea · Ctrl+Enter envía'}</span><button aria-label="Actualizar conversación" disabled={loading} onClick={() => void fetchPage('newer')}><RefreshCw size={17} aria-hidden="true" /> Actualizar</button></div>

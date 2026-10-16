@@ -83,6 +83,9 @@ jobs:
       - name: Test terminal names after reconnect in isolated Electron
         run: node tests/session-names-startup-electron.mjs
 
+      - name: Test Android chat fluidity in isolated mobile-sized Electron
+        run: node tests/chat-fluidity-electron.mjs
+
       - name: Type-check sources
         run: npm run typecheck
 

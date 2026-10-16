@@ -20,6 +20,29 @@ export function singleLineChatInput(value) {
   return value.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ').trim()
 }
 
+/** Unknown telemetry is not a permission failure. Only confirmed work blocks
+ * another turn; the composer remains editable while connection/work settles. */
+export function chatInputAllowed(session, capabilities, connected, awaiting, override = false) {
+  return !!(session.canOperate && !session.readOnly && capabilities.input && session.state === 'running' && connected && !awaiting && (session.agentState !== 'working' || override))
+}
+
+export function confirmedChatEcho(outgoing, messages) {
+  if (!outgoing) return false
+  return messages.some(item => item.role === 'user' && item.seq > outgoing.afterSeq && singleLineChatInput(item.content) === outgoing.content)
+}
+
+export function definiteChatSendFailure(reason) {
+  return String(reason instanceof Error ? reason.message : reason).includes('No se envió el texto.')
+}
+
+/** Correlate only after the submitted user text appears in durable history.
+ * An older assistant answer loaded during reconnect is not a new reply. */
+export function chatReplyProgress(submission, messages) {
+  let userSeq = submission.userSeq || 0
+  if (!userSeq) userSeq = messages.find(item => item.role === 'user' && item.seq > submission.afterSeq && singleLineChatInput(item.content) === submission.content)?.seq || 0
+  return { ...submission, userSeq, answered: !!userSeq && messages.some(item => item.role === 'assistant' && item.seq > userSeq) }
+}
+
 function splitTextBlocks(content) {
   const blocks = []
   let paragraph = [], list = null
