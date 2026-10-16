@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
 import okhttp3.Call;
+import okhttp3.ConnectionPool;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -32,6 +33,10 @@ import org.json.JSONObject;
 public class CrowGatewayPlugin extends Plugin {
     private CredentialStore store;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    // Slow history/bootstrap reads must not queue ahead of an explicit input.
+    private final ExecutorService readWorker = Executors.newFixedThreadPool(2);
+    private final GatewayTransportPool transports = new GatewayTransportPool();
+    private final ConcurrentHashMap<String, Object> renewalLocks = new ConcurrentHashMap<>();
     private final AtomicLong epoch = new AtomicLong();
     private final ConcurrentHashMap<String, AtomicLong> generations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Stream> streams = new ConcurrentHashMap<>();
@@ -44,15 +49,16 @@ public class CrowGatewayPlugin extends Plugin {
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final int MAX_JSON_BYTES = 2 * 1024 * 1024;
     private static final class Stream {
-        final String id, profileId; final long generation, epoch; volatile WebSocket socket; volatile String serverId; volatile boolean writable;
-        Stream(String id, String profileId, long generation, long epoch, boolean writable) { this.id = id; this.profileId = profileId; this.generation = generation; this.epoch = epoch; this.writable = writable; }
+        final String id, profileId; final long generation, epoch; final boolean inputGranted; volatile WebSocket socket; volatile String serverId; volatile boolean writable;
+        Stream(String id, String profileId, long generation, long epoch, boolean inputGranted, boolean writable) { this.id = id; this.profileId = profileId; this.generation = generation; this.epoch = epoch; this.inputGranted = inputGranted; this.writable = inputGranted && writable; }
     }
     interface Work { void run() throws Exception; }
     @Override public void load() { store = new CredentialStore(getContext()); }
-    private void execute(PluginCall call, Work work) { try { worker.execute(() -> { try { work.run(); } catch (Exception error) { call.reject(safeError(error)); } }); } catch (java.util.concurrent.RejectedExecutionException cancelled) { call.reject("Conexión cancelada; volvé a vincular."); } }
+    private void execute(PluginCall call, Work work) { execute(worker, call, work); }
+    private void execute(ExecutorService executor, PluginCall call, Work work) { try { executor.execute(() -> { try { work.run(); } catch (Exception error) { call.reject(safeError(error)); } }); } catch (java.util.concurrent.RejectedExecutionException cancelled) { call.reject("Conexión cancelada; volvé a vincular."); } }
     private String safeError(Exception error) {
         if (error instanceof javax.net.ssl.SSLException || error instanceof java.security.cert.CertificateException) return "TLS: verificá la huella, el nombre del endpoint y la vigencia del certificado.";
-        if (error instanceof java.io.IOException) return "Sin conexión con Crow en Windows. Si enviaste una acción, verificá su estado antes de volver a intentarla.";
+        if (error instanceof java.io.IOException) return "Sin conexión con Crow. Si enviaste una acción, verificá su estado antes de volver a intentarla.";
         if (error instanceof IllegalStateException || error instanceof IllegalArgumentException) return error.getMessage();
         return "Respuesta inválida o almacenamiento seguro no disponible. No se envió ninguna credencial a otro endpoint.";
     }
@@ -80,6 +86,10 @@ public class CrowGatewayPlugin extends Plugin {
         if (result.getInt("version") != 2 || !value.matches("[0-9a-f]{64}") || !expires.isAfter(now) || expires.isAfter(now.plusSeconds(901))) throw new IllegalStateException("Credencial temporal incompatible.");
         AccessCredential access = new AccessCredential(value, expires); accessCredentials.put(id, access); return access;
     }
+    private void invalidateAccess(String id, String usedCredential) {
+        AccessCredential current = accessCredentials.get(id);
+        if (current != null && current.value.equals(usedCredential)) accessCredentials.remove(id, current);
+    }
     /** Each explicit mutation gets a new ID; the call's shared JSON and credentials are never persisted here. */
     private JSONObject mutationBody(JSONObject record, JSONObject body) throws Exception {
         JSONObject copy = body == null ? new JSONObject() : new JSONObject(body.toString());
@@ -87,6 +97,11 @@ public class CrowGatewayPlugin extends Plugin {
         return copy;
     }
     private String accessCredential(String id, JSONObject record, long g, long e) throws Exception {
+        synchronized (renewalLocks.computeIfAbsent(id, ignored -> new Object())) {
+            return renewAccessCredential(id, record, g, e);
+        }
+    }
+    private String renewAccessCredential(String id, JSONObject record, long g, long e) throws Exception {
         assertCurrent(id, g, e);
         if (record.optInt("authVersion", 1) != 2) return record.getString("credential");
         AccessCredential existing = accessCredentials.get(id);
@@ -101,9 +116,14 @@ public class CrowGatewayPlugin extends Plugin {
         try { assertCurrent(id, g, e); } catch (Exception cancelled) { accessCredentials.remove(id, renewed); throw cancelled; }
         return renewed.value;
     }
-    private OkHttpClient client(JSONObject endpoint) throws Exception {
+    private OkHttpClient client(String profileId, JSONObject endpoint) throws Exception {
+        String binding = endpoint.getString("kind") + "|" + EndpointPolicy.origin(endpoint) + "|" + endpoint.optString("certSHA256") + "|" + endpoint.optString("relayUrl") + "|" + endpoint.optString("relayRoute");
+        return profileId == null ? buildClient(endpoint) : transports.get(profileId, binding, () -> buildClient(endpoint));
+    }
+    private OkHttpClient buildClient(JSONObject endpoint) throws Exception {
         EndpointPolicy.origin(endpoint);
         OkHttpClient.Builder builder = new OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(12, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS).writeTimeout(15, TimeUnit.SECONDS).callTimeout(35, TimeUnit.SECONDS);
+        builder.connectionPool(new ConnectionPool(2, 60, TimeUnit.SECONDS));
         if (endpoint.getString("kind").equals("lan-pinned")) {
             X509TrustManager trust = EndpointPolicy.pinnedTrust(endpoint.getString("certSHA256"));
             SSLContext tls = SSLContext.getInstance("TLS"); tls.init(null, new X509TrustManager[]{trust}, null);
@@ -125,10 +145,11 @@ public class CrowGatewayPlugin extends Plugin {
         if (credential != null) request.header("Authorization", "Bearer " + credential);
         PangolinAuth.headers(request, endpoint, proxyAuth);
         if (method.equals("POST")) request.post(RequestBody.create(body == null ? "{}" : body.toString(), JSON)); else request.get();
-        OkHttpClient client = path.equals("/api/v2/device-revoke") ? client(endpoint).newBuilder().callTimeout(5, TimeUnit.SECONDS).build() : client(endpoint);
+        OkHttpClient base = client(profileId, endpoint);
+        OkHttpClient client = path.equals("/api/v2/device-revoke") ? base.newBuilder().callTimeout(5, TimeUnit.SECONDS).build() : base;
         try (Response response = client.newCall(request.build()).execute()) {
             if (response.code() == 401 || (proxyAuth != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API")))) {
-                if (profileId != null) accessCredentials.remove(profileId);
+                if (profileId != null) invalidateAccess(profileId, credential);
                 if (response.code() == 401 && "1".equals(response.header("X-Crow-Mobile-API"))) throw new IllegalStateException(MobileErrorMessages.fromResponse(response.code(), response.body(), response.header("X-Crow-Mobile-API")));
                 throw new IllegalStateException("Sin conexión autorizada: autenticación rechazada. Revisá la conexión y los permisos en Windows. La acción no se repite automáticamente.");
             }
@@ -140,13 +161,14 @@ public class CrowGatewayPlugin extends Plugin {
             if (source.getBuffer().size() > MAX_JSON_BYTES) throw new IllegalStateException("Respuesta de Crow demasiado grande.");
             String raw = source.readUtf8();
             return new org.json.JSONTokener(raw).nextValue();
-        } finally { client.connectionPool().evictAll(); client.dispatcher().executorService().shutdown(); }
+        } finally { if (profileId == null) GatewayTransportPool.release(base); }
     }
     private void forget(String id) {
         for (Stream stream : streams.values()) if (stream.profileId.equals(id)) emit(stream, "revoked", null);
         generations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet();
         accessCredentials.remove(id);
         for (Stream stream : streams.values()) if (stream.profileId.equals(id)) stop(stream);
+        transports.remove(id);
         try { String alias = signingAlias(id); if (DeviceSigningKey.exists(alias)) DeviceSigningKey.delete(alias); }
         catch (Exception unavailable) { throw new IllegalStateException("No se pudo eliminar la clave del dispositivo del almacenamiento seguro."); }
         store.delete(id);
@@ -231,7 +253,7 @@ public class CrowGatewayPlugin extends Plugin {
     }
     @PluginMethod public void request(PluginCall call) {
         String id = call.getString("profileId", ""); long g = generation(id), e = epoch.get();
-        execute(call, () -> {
+        execute("GET".equals(call.getString("method", "GET")) ? readWorker : worker, call, () -> {
             assertCurrent(id, g, e); JSONObject record = record(id); JSONObject profile = record.getJSONObject("profile");
             String path = call.getString("path", ""), method = call.getString("method", "GET"); EndpointPolicy.path(path, method);
             JSONObject caps = profile.getJSONObject("device").getJSONObject("capabilities");
@@ -244,7 +266,7 @@ public class CrowGatewayPlugin extends Plugin {
     @PluginMethod public void openStream(PluginCall call) {
         String id = call.getString("profileId", ""), connectionId = call.getString("connectionId", ""); long g = generation(id), e = epoch.get();
         long connectionGeneration = streamGenerations.computeIfAbsent(connectionId, ignored -> new AtomicLong()).get();
-        execute(call, () -> {
+        execute(readWorker, call, () -> {
             assertCurrent(id, g, e);
             if (!connectionId.matches("[A-Za-z0-9-]{1,80}") || streams.containsKey(connectionId)) throw new IllegalArgumentException("Invalid connection identity");
             String host = call.getString("hostId", ""), sessionId = call.getString("sessionId", "");
@@ -260,21 +282,21 @@ public class CrowGatewayPlugin extends Plugin {
             if (session == null) throw new IllegalStateException("La sesión ya no está autorizada.");
             assertCurrent(id, g, e);
             if (streamGenerations.get(connectionId).get() != connectionGeneration) throw new IllegalStateException("Conexión cancelada antes de abrirse.");
-            Stream stream = new Stream(connectionId, id, g, e, profile.getJSONObject("device").getJSONObject("capabilities").optBoolean("input") && session.optBoolean("canOperate") && !session.optBoolean("readOnly")); streams.put(connectionId, stream);
+            Stream stream = new Stream(connectionId, id, g, e, profile.getJSONObject("device").getJSONObject("capabilities").optBoolean("input"), session.optBoolean("canOperate") && !session.optBoolean("readOnly")); streams.put(connectionId, stream);
             String origin = EndpointPolicy.origin(endpoint);
             HttpUrl url = HttpUrl.get(origin + "/api/v1/stream").newBuilder().addQueryParameter("hostId", host).addQueryParameter("sessionId", sessionId).addQueryParameter("from", String.valueOf(from)).addQueryParameter("mode", mode).build();
             Request.Builder requestBuilder = new Request.Builder().url(url).header("Origin", origin).header("Authorization", "Bearer " + credential);
             PangolinAuth.headers(requestBuilder, endpoint, record.optJSONObject("proxyAuth"));
             Request request = requestBuilder.build();
-            OkHttpClient client = client(endpoint).newBuilder().callTimeout(0, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build();
+            OkHttpClient client = client(id, endpoint).newBuilder().callTimeout(0, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build();
             stream.socket = client.newWebSocket(request, new WebSocketListener() {
                 @Override public void onOpen(WebSocket socket, Response response) { if (!current(stream)) { socket.cancel(); return; } emit(stream, "connected", null); }
                 @Override public void onMessage(WebSocket socket, String text) {
                     if (!current(stream)) return;
-                    try { JSONObject frame = new JSONObject(text); publicResponse(frame); if (frame.optString("type").equals("ready")) stream.serverId = frame.getString("streamId"); if (frame.optString("type").equals("state") && frame.optJSONObject("info") != null && (!frame.getJSONObject("info").optBoolean("canOperate") || frame.getJSONObject("info").optBoolean("readOnly"))) stream.writable = false; emit(stream, null, text); } catch (Exception invalid) { emit(stream, "disconnected", null); stop(stream); }
+                    try { JSONObject frame = new JSONObject(text); publicResponse(frame); if (frame.optString("type").equals("ready")) stream.serverId = frame.getString("streamId"); if (frame.optString("type").equals("state") && frame.optJSONObject("info") != null) stream.writable = stream.inputGranted && frame.getJSONObject("info").optBoolean("canOperate") && !frame.getJSONObject("info").optBoolean("readOnly"); emit(stream, null, text); } catch (Exception invalid) { emit(stream, "disconnected", null); stop(stream); }
                 }
-                @Override public void onClosed(WebSocket socket, int code, String reason) { emit(stream, "disconnected", null); stop(stream); client.connectionPool().evictAll(); client.dispatcher().executorService().shutdown(); }
-                @Override public void onFailure(WebSocket socket, Throwable error, Response response) { if (response != null && (response.code() == 401 || (record.optJSONObject("proxyAuth") != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API"))))) accessCredentials.remove(id); emit(stream, "disconnected", null); stop(stream); client.connectionPool().evictAll(); client.dispatcher().executorService().shutdown(); }
+                @Override public void onClosed(WebSocket socket, int code, String reason) { emit(stream, "disconnected", null); stop(stream); }
+                @Override public void onFailure(WebSocket socket, Throwable error, Response response) { if (response != null && (response.code() == 401 || (record.optJSONObject("proxyAuth") != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API"))))) invalidateAccess(id, credential); emit(stream, "disconnected", null); stop(stream); }
             });
             call.resolve();
         });
@@ -293,6 +315,6 @@ public class CrowGatewayPlugin extends Plugin {
         });
     }
     @PluginMethod public void closeStream(PluginCall call) { String id = call.getString("connectionId", ""); streamGenerations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet(); Stream stream = streams.get(id); if (stream != null) stop(stream); call.resolve(); }
-    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); }
-    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); worker.shutdownNow(); }
+    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); }
+    @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); worker.shutdownNow(); readWorker.shutdownNow(); }
 }

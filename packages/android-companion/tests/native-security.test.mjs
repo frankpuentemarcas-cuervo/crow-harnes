@@ -58,7 +58,7 @@ test('Pangolin QR auth is origin-bound, confirmed on Android, encrypted at rest 
 test('native gateway translates only bounded known Crow error codes without changing auth or retry behavior', () => {
   const native = source('CrowGatewayPlugin'), errors = source('MobileErrorMessages')
   assert.equal((native.match(/MobileErrorMessages\.fromResponse\(response\.code\(\), response\.body\(\), response\.header\("X-Crow-Mobile-API"\)\)/g) || []).length, 2)
-  assert.match(native, /response\.code\(\) == 401[\s\S]*accessCredentials\.remove\(profileId\)/)
+  assert.match(native, /response\.code\(\) == 401[\s\S]*invalidateAccess\(profileId, credential\)/)
   assert.match(native, /PangolinAuth\.rejected\(response\.code\(\), response\.header\("X-Crow-Mobile-API"\)\)/)
   assert.match(native, /if \(response\.code\(\) == 401 \|\| \(proxyAuth != null && PangolinAuth\.rejected[\s\S]*?\}\s*if \(response\.isRedirect\(\)\)[\s\S]*?if \(!response\.isSuccessful\(\)\) throw new IllegalStateException\(MobileErrorMessages\.fromResponse/)
   assert.match(errors, /fromResponse\(int status, ResponseBody body, String crowMarker\)/)
