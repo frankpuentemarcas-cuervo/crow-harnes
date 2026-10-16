@@ -485,6 +485,7 @@ func firstStatusLine(statusLines []map[string]any) map[string]any {
 
 func claudeHookSettings(hook string, statusLine map[string]any) []byte {
 	config := map[string]any{"hooks": map[string]any{
+		"SessionStart":     []any{map[string]any{"matcher": "startup|resume", "hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " session-start"}}}},
 		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " user-prompt"}}}},
 		"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
 		"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},

@@ -344,8 +344,8 @@ func TestShellClaudeLifecyclePromotesAndRestoresSessionAgent(t *testing.T) {
 	}
 
 	post("agent-start")
-	if got := s.snapshot(); got.Agent != "claude" || got.AgentState != "working" {
-		t.Fatalf("agent-start session = agent:%q state:%q, want claude/working", got.Agent, got.AgentState)
+	if got := s.snapshot(); got.Agent != "claude" || got.AgentState != "waiting" {
+		t.Fatalf("agent-start session = agent:%q state:%q, want claude/waiting", got.Agent, got.AgentState)
 	}
 	post("agent-stop")
 	if got := s.snapshot(); got.Agent != "shell" || got.AgentState != "unknown" {

@@ -322,7 +322,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := a.session(body.SessionID)
-	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "user-prompt" && body.Kind != "subagent-start" && body.Kind != "subagent-stop" && body.Kind != "agent-start" && body.Kind != "agent-stop") {
+	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "user-prompt" && body.Kind != "session-start" && body.Kind != "subagent-start" && body.Kind != "subagent-stop" && body.Kind != "agent-start" && body.Kind != "agent-stop") {
 		http.Error(w, "invalid event", http.StatusBadRequest)
 		return
 	}
@@ -330,7 +330,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid managed shell agent", http.StatusBadRequest)
 		return
 	}
-	if body.Kind == "user-prompt" {
+	if body.Kind == "user-prompt" || body.Kind == "session-start" {
 		info := s.snapshot()
 		if (body.Agent != "claude" && body.Agent != "codex") || body.Agent != info.Agent {
 			http.Error(w, "invalid managed agent prompt", http.StatusBadRequest)
@@ -358,8 +358,8 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Kind == "agent-start" {
 			s.info.Agent = "claude"
-			s.rootAgentState = "working"
-			s.info.AgentState = "working"
+			s.rootAgentState = "waiting"
+			s.info.AgentState = "waiting"
 		} else {
 			s.info.Agent = "shell"
 			s.rootAgentState = "unknown"
@@ -374,6 +374,19 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		_ = a.saveSessions()
 	} else if body.Kind == "working" {
 		a.markAgentState(body.SessionID, "working")
+	} else if body.Kind == "session-start" {
+		if body.Agent != "claude" {
+			http.Error(w, "unsupported session start", http.StatusBadRequest)
+			return
+		}
+		if body.ChatMessage != "" && body.SourceID != "" {
+			if _, err := a.captureChatMessage(s, "assistant", body.ChatMessage, chatSourceID(body.SessionID, "turn-complete", body.SourceID), body.ChatTruncated); err != nil {
+				log.Printf("crow resumed chat capture failed for session %s: %v", body.SessionID, err)
+				http.Error(w, "chat history unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		a.markAgentState(body.SessionID, "waiting")
 	} else if body.Kind == "user-prompt" {
 		sourceID := body.SourceID
 		if sourceID == "" {
@@ -467,8 +480,8 @@ const maxHookPayload = 4 * 1024 * 1024
 // RunHookNotify is invoked by managed agent hooks. Hook payloads are read from
 // stdin; an optional argument form is retained for diagnostics.
 func RunHookNotify(args []string) error {
-	if len(args) == 0 || (args[0] != "working" && args[0] != "user-prompt" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop" && args[0] != "agent-start" && args[0] != "agent-stop") {
-		return errors.New("usage: crowd hook-notify <working|user-prompt|turn-complete|subagent-start|subagent-stop|agent-start|agent-stop> [agent-payload]")
+	if len(args) == 0 || (args[0] != "working" && args[0] != "user-prompt" && args[0] != "turn-complete" && args[0] != "session-start" && args[0] != "subagent-start" && args[0] != "subagent-stop" && args[0] != "agent-start" && args[0] != "agent-stop") {
+		return errors.New("usage: crowd hook-notify <working|user-prompt|turn-complete|session-start|subagent-start|subagent-stop|agent-start|agent-stop> [agent-payload]")
 	}
 	kind := args[0]
 	if os.Getenv("CROW_SESSION_ID") == "" {
@@ -477,9 +490,9 @@ func RunHookNotify(args []string) error {
 
 	var message, userPrompt, agentID, sourceID, providerThreadID string
 	var messageTruncated bool
-	if kind == "user-prompt" || kind == "turn-complete" || kind == "subagent-start" || kind == "subagent-stop" {
+	if kind == "user-prompt" || kind == "turn-complete" || kind == "session-start" || kind == "subagent-start" || kind == "subagent-stop" {
 		var payload []byte
-		if kind == "turn-complete" || kind == "user-prompt" {
+		if kind == "turn-complete" || kind == "session-start" || kind == "user-prompt" {
 			for _, arg := range args[1:] {
 				if json.Valid([]byte(arg)) {
 					payload = []byte(arg)
@@ -494,9 +507,12 @@ func RunHookNotify(args []string) error {
 			}
 			payload = read
 		}
-		if kind == "turn-complete" {
+		if kind == "turn-complete" || kind == "session-start" {
 			message = hookAssistantMessage(payload)
 			sourceID = hookEventID(payload)
+			if os.Getenv("CROW_AGENT") == "claude" {
+				message, sourceID = claudeHookMessage(payload)
+			}
 			if os.Getenv("CROW_AGENT") == "codex" {
 				userPrompt = hookCodexUserPrompt(payload)
 				providerThreadID = hookThreadID(payload)
