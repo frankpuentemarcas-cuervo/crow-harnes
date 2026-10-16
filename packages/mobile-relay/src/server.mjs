@@ -13,6 +13,7 @@ export const MAX_PENDING_HANDSHAKES = 32
 export const MAX_HEADERS_TIMEOUT_MS = 5_000
 export const MAX_REQUEST_TIMEOUT_MS = 10_000
 export const MAX_CONNECTIONS_CHECK_INTERVAL_MS = 1_000
+export const HEARTBEAT_INTERVAL_MS = 10_000
 const MAX_HEADER_BYTES = 8 * 1024
 const MAX_HEADER_COUNT = 32
 const RETIRED_STREAM_TTL_MS = 30_000
@@ -161,7 +162,8 @@ export function createRelayServer({
   maxPendingHandshakes = MAX_PENDING_HANDSHAKES,
   headersTimeoutMs = MAX_HEADERS_TIMEOUT_MS,
   requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
-  connectionsCheckingIntervalMs = MAX_CONNECTIONS_CHECK_INTERVAL_MS
+  connectionsCheckingIntervalMs = MAX_CONNECTIONS_CHECK_INTERVAL_MS,
+  heartbeatIntervalMs = HEARTBEAT_INTERVAL_MS
 } = {}) {
   if (!Number.isInteger(maxRoutes) || maxRoutes < 1 || maxRoutes > MAX_ROUTES ||
       !Number.isInteger(maxStreamsPerRoute) || maxStreamsPerRoute < 1 || maxStreamsPerRoute > MAX_DEVICE_STREAMS_PER_ROUTE ||
@@ -169,7 +171,8 @@ export function createRelayServer({
       !Number.isInteger(maxPendingHandshakes) || maxPendingHandshakes < 1 || maxPendingHandshakes > MAX_PENDING_HANDSHAKES ||
       !Number.isInteger(headersTimeoutMs) || headersTimeoutMs < 100 || headersTimeoutMs > MAX_HEADERS_TIMEOUT_MS ||
       !Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 100 || requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS ||
-      !Number.isInteger(connectionsCheckingIntervalMs) || connectionsCheckingIntervalMs < 10 || connectionsCheckingIntervalMs > MAX_CONNECTIONS_CHECK_INTERVAL_MS) {
+      !Number.isInteger(connectionsCheckingIntervalMs) || connectionsCheckingIntervalMs < 10 || connectionsCheckingIntervalMs > MAX_CONNECTIONS_CHECK_INTERVAL_MS ||
+      !Number.isInteger(heartbeatIntervalMs) || heartbeatIntervalMs < 100 || heartbeatIntervalMs > HEARTBEAT_INTERVAL_MS) {
     throw new Error('Invalid relay capacity configuration')
   }
   const maxConnections = maxRoutes * (1 + maxStreamsPerRoute)
@@ -210,6 +213,18 @@ export function createRelayServer({
     maxPayload: MAX_FRAME_BYTES,
     clientTracking: true
   })
+  // Phones can disappear without FIN when switching networks. Client-side pings
+  // cannot reclaim those slots: the broker must detect missing pongs as well.
+  const awaitingPong = new WeakSet()
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws.readyState !== WebSocket.OPEN || awaitingPong.has(ws)) { ws.terminate(); continue }
+      awaitingPong.add(ws)
+      ws.ping(undefined, false, error => { if (error) ws.terminate() })
+    }
+  }, heartbeatIntervalMs)
+  heartbeat.unref()
+  wss.once('close', () => clearInterval(heartbeat))
 
   const removeRouteIfEmpty = (routeKey, route) => {
     if (!route.gateway && route.streams.size === 0 && routes.get(routeKey) === route) routes.delete(routeKey)
@@ -254,6 +269,7 @@ export function createRelayServer({
   })
 
   wss.on('connection', (ws, _req, identity) => {
+    ws.on('pong', () => awaitingPong.delete(ws))
     const { routeKey, role, streamId } = identity
     let route = routes.get(routeKey)
 
@@ -329,6 +345,7 @@ export function createRelayServer({
       httpServer.listen(...args, () => { httpServer.off('error', reject); resolve(httpServer.address()) })
     }) },
     close() { return new Promise(resolve => {
+      clearInterval(heartbeat)
       for (const [key, route] of routes) closeRoute(key, route)
       for (const client of wss.clients) client.terminate()
       wss.close(() => httpServer.close(() => resolve()))

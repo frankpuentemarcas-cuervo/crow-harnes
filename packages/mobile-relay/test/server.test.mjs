@@ -18,6 +18,35 @@ import {
 
 const routeToken = () => randomBytes(32).toString('base64url')
 
+test('reclaims a vanished device slot without closing healthy sibling or gateway', async t => {
+  const relay = await fixture(t, { maxStreamsPerRoute: 2, heartbeatIntervalMs: 100 })
+  if (!relay) return
+  const route = routeToken(), gateway = relay.join(route, 'gateway')
+  await waitOpen(gateway)
+  gateway.on('message', (data, binary) => {
+    if (!binary) { const message = JSON.parse(data); if (message.type === 'open') gateway.send(JSON.stringify({ type: 'accept', streamId: message.streamId })) }
+  })
+  const healthy = relay.join(route, 'device', randomUUID())
+  const healthyReady = event(healthy, 'message', data => JSON.parse(data).type === 'ready')
+  await healthyReady
+  const vanished = new WebSocket(relay.url, { autoPong: false, headers: { 'X-Crow-Route': route, 'X-Crow-Role': 'device', 'X-Crow-Stream': randomUUID() } })
+  vanished.on('error', () => {}); t.after(() => vanished.terminate())
+  const ready = event(vanished, 'message', data => JSON.parse(data).type === 'ready')
+  await ready
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('relay never reclaimed the vanished device slot')), 1500)
+    vanished.once('close', () => { clearTimeout(timer); resolve() })
+  })
+  assert.equal(gateway.readyState, WebSocket.OPEN)
+  assert.equal(healthy.readyState, WebSocket.OPEN)
+  const deadline = Date.now() + 1000
+  while (relay.routes.get(route).streams.size !== 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(relay.routes.get(route).streams.size, 1)
+  const replacement = relay.join(route, 'device', randomUUID())
+  await event(replacement, 'message', data => JSON.parse(data).type === 'ready')
+  assert.equal(relay.routes.get(route).streams.size, 2)
+})
+
 test('validates canonical 32-byte route tokens and exact gateway control shape', () => {
   const route = routeToken()
   const streamId = randomUUID()
