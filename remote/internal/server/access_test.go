@@ -237,6 +237,47 @@ func TestAccessHookScopedAndRevoked(t *testing.T) {
 		t.Fatal("revoked hook accepted")
 	}
 }
+
+func TestAccessHookScopedWhenIndividualAccessIsDisabled(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	ownerID := installationOwnerPrefix + strings.Repeat("a", 32)
+	a := &App{dir: t.TempDir(), token: "bootstrap", sessions: map[string]*session{
+		sessionID: {hookHash: tokenHash("hook-one"), info: SessionInfo{ID: sessionID, OwnerID: ownerID, Agent: "claude", State: "running", HooksActive: true}, subs: make(map[chan Frame]struct{})},
+	}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/events", a.handleEvents)
+	mux.HandleFunc("GET /api/events", a.handleEvents)
+	h := a.auth(mux)
+
+	body := `{"sessionId":"` + sessionID + `","kind":"user-prompt","agent":"claude","message":"prompt","sourceId":"prompt-1"}`
+	if w := accessRequest(h, "hook-one", "POST", "/api/events", body); w.Code != http.StatusAccepted {
+		t.Fatalf("installation-owned hook rejected while individual access is disabled: %d %s", w.Code, w.Body)
+	}
+	if w := accessRequest(h, "hook-one", "GET", "/api/events", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("hook credential listed events: %d %s", w.Code, w.Body)
+	}
+	wrongSession := strings.Replace(body, sessionID, "fedcba9876543210fedcba9876543210", 1)
+	if w := accessRequest(h, "hook-one", "POST", "/api/events", wrongSession); w.Code != http.StatusForbidden {
+		t.Fatalf("hook credential posted for another session: %d %s", w.Code, w.Body)
+	}
+	messages, _, err := a.chatHistory().page(sessionID, 0, 0, 10)
+	if err != nil || len(messages) != 1 || messages[0].Content != "prompt" {
+		t.Fatalf("hook event was not captured: %#v, err=%v", messages, err)
+	}
+}
+
+func TestAccessHookScopedForInstallationOwnerWithIndividualAccessEnabled(t *testing.T) {
+	a, h, _ := accessFixture(t)
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	a.sessions[sessionID] = &session{hookHash: tokenHash("hook-install"), info: SessionInfo{
+		ID: sessionID, OwnerID: installationOwnerPrefix + strings.Repeat("b", 32), Agent: "claude", State: "running", HooksActive: true,
+	}, subs: make(map[chan Frame]struct{})}
+	body := `{"sessionId":"` + sessionID + `","kind":"user-prompt","agent":"claude","message":"prompt","sourceId":"prompt-1"}`
+	if w := accessRequest(h, "hook-install", "POST", "/api/events", body); w.Code != http.StatusAccepted {
+		t.Fatalf("installation-owned hook rejected while individual access is enabled: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestAccessRevocationClosesLiveReplayStream(t *testing.T) {
 	a, h, _ := accessFixture(t)
 	os.WriteFile(filepath.Join(a.dir, "terminal-one.jsonl"), nil, 0600)

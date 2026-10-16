@@ -232,6 +232,69 @@ func (a *App) bootstrapTokenMatches(token string) bool {
 	return len(token) == len(a.token) && subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) == 1
 }
 
+// hookOwnerCurrent verifies that a per-session hook credential still belongs
+// to a live user or a Crow installation identity. The hook secret itself is
+// the capability: it grants no API access beyond telemetry for that session.
+func (a *App) hookOwnerCurrent(ownerID string) bool {
+	if _, ok := installationIDFromOwner(ownerID); ok {
+		return true
+	}
+	a.access.mu.Lock()
+	defer a.access.mu.Unlock()
+	for _, user := range a.access.data.Users {
+		if user.ID == ownerID && !user.Revoked {
+			return true
+		}
+	}
+	return false
+}
+
+// serveHookTelemetry allows only a matching session secret on write-only hook
+// endpoints. This remains available before individual access is enabled and
+// for installation-owned sessions without elevating the hook to a Crow user.
+func (a *App) serveHookTelemetry(w http.ResponseWriter, next http.Handler, r *http.Request, token string) bool {
+	if token == "" || r.Method != http.MethodPost {
+		return false
+	}
+	hash := tokenHash(token)
+	var hookSession, ownerID string
+	a.mu.RLock()
+	for id, s := range a.sessions {
+		s.mu.Lock()
+		match := s.hookHash != "" && subtle.ConstantTimeCompare([]byte(hash), []byte(s.hookHash)) == 1
+		if match {
+			hookSession, ownerID = id, s.info.OwnerID
+		}
+		s.mu.Unlock()
+		if match {
+			break
+		}
+	}
+	a.mu.RUnlock()
+	if hookSession == "" || !a.hookOwnerCurrent(ownerID) {
+		return false
+	}
+	if r.URL.Path == "/api/events" {
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*1024*1024))
+		if err != nil {
+			http.Error(w, "invalid telemetry", http.StatusBadRequest)
+			return true
+		}
+		var body struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(data, &body) != nil || body.SessionID != hookSession {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return true
+		}
+		r.Body = io.NopCloser(bytes.NewReader(data))
+	} else if r.URL.Path != "/api/sessions/"+hookSession+"/cache" {
+		return false
+	}
+	next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), hookContextKey{}, hookSession)))
+	return true
+}
+
 func (a *App) accessAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && (r.URL.Path == "/api/access" || r.URL.Path == "/api/health") {
@@ -260,6 +323,9 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 		a.access.mu.Unlock()
 		if !enabled {
 			if !a.bootstrapTokenMatches(token) {
+				if a.serveHookTelemetry(w, next, r, token) {
+					return
+				}
 				http.Error(w, "unauthorized", 401)
 				return
 			}
@@ -297,54 +363,8 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 			principal = installation
 		}
 		if principal == nil {
-			// A hook credential can only submit telemetry for its single session, never list.
-			a.mu.RLock()
-			hookSession := ""
-			hash := tokenHash(token)
-			for id, s := range a.sessions {
-				s.mu.Lock()
-				match := s.hookHash != "" && subtle.ConstantTimeCompare([]byte(hash), []byte(s.hookHash)) == 1
-				owner := s.info.OwnerID
-				s.mu.Unlock()
-				if match {
-					hookSession = id
-					_ = owner
-					break
-				}
-			}
-			a.mu.RUnlock()
-			if hookSession != "" && r.Method == "POST" && (r.URL.Path == "/api/events" || r.URL.Path == "/api/sessions/"+hookSession+"/cache") {
-				s := a.session(hookSession)
-				if s == nil {
-					http.Error(w, "terminal unavailable", 401)
-					return
-				}
-				owner := s.snapshot().OwnerID
-				a.access.mu.Lock()
-				valid := false
-				for _, u := range a.access.data.Users {
-					if u.ID == owner && !u.Revoked {
-						valid = true
-					}
-				}
-				a.access.mu.Unlock()
-				if valid {
-					data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-					if err != nil {
-						http.Error(w, "invalid telemetry", 400)
-						return
-					}
-					var body struct {
-						SessionID string `json:"sessionId"`
-					}
-					if r.URL.Path == "/api/events" && (json.Unmarshal(data, &body) != nil || body.SessionID != hookSession) {
-						http.Error(w, "forbidden", 403)
-						return
-					}
-					r.Body = io.NopCloser(bytes.NewReader(data))
-					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), hookContextKey{}, hookSession)))
-					return
-				}
+			if a.serveHookTelemetry(w, next, r, token) {
+				return
 			}
 			http.Error(w, "individual credential required", 401)
 			return
