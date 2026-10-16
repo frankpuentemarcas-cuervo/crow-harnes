@@ -19,6 +19,8 @@ import (
 
 type mobileHostSession struct {
 	ID            string    `json:"id"`
+	HostID        string    `json:"hostId"`
+	Name          string    `json:"name,omitempty"`
 	ProjectID     string    `json:"projectId"`
 	Agent         string    `json:"agent"`
 	Mode          string    `json:"mode"`
@@ -342,7 +344,14 @@ func (a *App) mobileRevoke(w http.ResponseWriter, r *http.Request) {
 func (a *App) mobileAllowedSession(device mobileHostDevice, owner *AccessPrincipal, info SessionInfo) (mobileHostSession, bool) {
 	for _, project := range device.Projects {
 		if info.Root == project.Root && a.permittedRoot(owner, info.Root) && a.visible(owner, info) {
-			return mobileHostSession{ID: info.ID, ProjectID: project.ID, Agent: info.Agent, Mode: info.Mode, State: info.State, AgentState: info.AgentState, StartedAt: info.StartedAt, UpdatedAt: info.UpdatedAt, Seq: info.Seq, ExitCode: info.ExitCode, ReadOnly: info.ReadOnly || !a.operable(owner, info), CanOperate: !info.ReadOnly && a.operable(owner, info), ChatAvailable: info.OwnerID == owner.ID && supportsChatHistory(info)}, true
+			name := ""
+			a.mobile.mu.Lock()
+			hostID := a.mobile.file.HostID
+			if info.OwnerID == owner.ID {
+				name = a.mobile.file.SessionNames[owner.ID][info.ID]
+			}
+			a.mobile.mu.Unlock()
+			return mobileHostSession{ID: info.ID, HostID: hostID, Name: name, ProjectID: project.ID, Agent: info.Agent, Mode: info.Mode, State: info.State, AgentState: info.AgentState, StartedAt: info.StartedAt, UpdatedAt: info.UpdatedAt, Seq: info.Seq, ExitCode: info.ExitCode, ReadOnly: info.ReadOnly || !a.operable(owner, info), CanOperate: !info.ReadOnly && a.operable(owner, info), ChatAvailable: info.OwnerID == owner.ID && supportsChatHistory(info)}, true
 		}
 	}
 	return mobileHostSession{}, false

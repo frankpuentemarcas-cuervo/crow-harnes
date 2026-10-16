@@ -462,7 +462,16 @@ function registerIPC(): void {
       if ((identity.role !== 'admin' && identity.role !== 'installation') || !identity.id) throw new Error('Terminal no permitida para renombrar.')
       await connection(hostId).assignSessionOwner(sessionId, identity.id)
     }
-    return store.renameSession(hostId, sessionId, name)
+    const renamed = store.renameSession(hostId, sessionId, name)
+    // Keep the host-anchored Android view in sync without delaying the local rename.
+    const saved = store.snapshot(), host = saved.hosts.find(item => item.id === hostId)
+    const projects = saved.projects.filter(item => item.hostId === hostId && item.root === session.root).map(({ id, name, root }) => ({ id, name, root }))
+    if (host && projects.length) {
+      const prefix = `${hostId}:`
+      const sessionNames = Object.fromEntries(Object.entries(saved.sessionNames).filter(([key, value]) => key.startsWith(prefix) && value.trim()).map(([key, value]) => [key.slice(prefix.length), value]))
+      void connection(hostId).api('POST', '/api/mobile/config', { hostId, hostName: host.name, projects, sessionNames }).catch(() => { /* Best effort; the Windows alias stays saved. */ })
+    }
+    return renamed
   })
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
   handle('crow:cache-warning', async (hostId: string, sessionId: string) => {
@@ -508,7 +517,9 @@ function registerIPC(): void {
       }
       const projects = selected.filter(project => project.hostId === host.id).map(project => ({ id: project.id, name: project.name, root: project.root }))
       try {
-        await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects })
+        const prefix = `${host.id}:`
+        const sessionNames = Object.fromEntries(Object.entries(saved.sessionNames).filter(([key, value]) => key.startsWith(prefix) && value.trim()).map(([key, value]) => [key.slice(prefix.length), value]))
+        await connection(host.id).api('POST', '/api/mobile/config', { hostId: host.id, hostName: host.name, projects, sessionNames })
         const enrollment = await connection(host.id).api('POST', '/api/mobile/invite')
         hostInvites.push({ hostId: host.id, hostName: host.name, enrollment })
       } catch (error) {

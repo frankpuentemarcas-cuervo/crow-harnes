@@ -41,6 +41,27 @@ func TestMobileStreamRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestMobileSessionsCarryHostAndOwnerScopedWindowsAlias(t *testing.T) {
+	a, _, root := accessFixture(t)
+	a.mobile = newMobileHostState()
+	project := mobileHostProject{ID: "project", Name: "Project", Root: root}
+	const sessionID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	a.mobile.file = mobileHostFile{HostID: "linux-a", SessionNames: map[string]map[string]string{"alice": {sessionID: "Mi terminal"}}}
+	info := SessionInfo{ID: sessionID, OwnerID: "alice", Root: root, Agent: "claude", State: "running"}
+	device := mobileHostDevice{Projects: []mobileHostProject{project}}
+	owner := &AccessPrincipal{ID: "alice", Label: "Alice", Role: "member", AllowedRoots: []string{root}}
+	session, ok := a.mobileAllowedSession(device, owner, info)
+	if !ok || session.HostID != "linux-a" || session.Name != "Mi terminal" {
+		t.Fatalf("mobile session metadata = %+v, allowed=%v", session, ok)
+	}
+	other := *owner
+	other.ID = "bob"
+	session, ok = a.mobileAllowedSession(device, &other, info)
+	if ok && session.Name != "" {
+		t.Fatalf("session alias leaked to another owner: %+v, allowed=%v", session, ok)
+	}
+}
+
 func TestMobileStreamChatSuppressesTerminalOutput(t *testing.T) {
 	a, _, root := accessFixture(t)
 	a.mobile = newMobileHostState()

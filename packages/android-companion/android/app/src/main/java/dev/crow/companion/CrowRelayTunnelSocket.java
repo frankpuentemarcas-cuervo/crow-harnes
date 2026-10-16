@@ -77,6 +77,7 @@ public final class CrowRelayTunnelSocket extends Socket {
                 .dispatcher(new Dispatcher())
                 .connectionPool(new ConnectionPool())
                 .retryOnConnectionFailure(false)
+                .pingInterval(20, TimeUnit.SECONDS)
                 .followRedirects(false)
                 .followSslRedirects(false)
                 .build();

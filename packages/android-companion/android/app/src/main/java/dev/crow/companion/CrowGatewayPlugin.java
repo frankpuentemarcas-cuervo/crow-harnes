@@ -186,6 +186,8 @@ public class CrowGatewayPlugin extends Plugin {
             JSONObject invitation = call.getObject("enrollment");
             if (invitation != null && invitation.getInt("version") == 1) throw new IllegalArgumentException("Actualizá Crow en Windows y generá un nuevo QR. Este vínculo requiere el protocolo nuevo.");
             if (invitation == null || invitation.getInt("version") != 2 || !Instant.parse(invitation.getString("expiresAt")).isAfter(Instant.now()) || invitation.getString("gatewayId").isEmpty()) throw new IllegalArgumentException("Invitación inválida o vencida.");
+            String mobileHostId = call.getString("mobileHostId", "");
+            if (!mobileHostId.matches("[A-Za-z0-9._~-]{1,200}")) throw new IllegalArgumentException("Host de invitación inválido.");
             java.util.Iterator<String> fields = invitation.keys(); while (fields.hasNext()) if (!fields.next().matches("version|gatewayId|invitationCode|expiresAt|endpoints")) throw new IllegalArgumentException("La invitación contiene campos desconocidos.");
             JSONArray endpoints = invitation.getJSONArray("endpoints"); int index = call.getInt("endpointIndex", -1);
             if (endpoints.length() > 8 || index < 0 || index >= endpoints.length()) throw new IllegalArgumentException("Seleccioná un endpoint de la invitación.");
@@ -217,7 +219,7 @@ public class CrowGatewayPlugin extends Plugin {
             if (endpoint.getString("kind").equals("lan-pinned") || endpoint.getString("kind").equals("relay")) approvedEndpoint.put("certSHA256", endpoint.getString("certSHA256"));
             if (endpoint.getString("kind").equals("relay")) approvedEndpoint.put("relayUrl", endpoint.getString("relayUrl")).put("relayRoute", endpoint.getString("relayRoute"));
             if (PangolinAuth.required(endpoint)) approvedEndpoint.put("provider", "pangolin").put("proxyAuthRequired", true);
-            JSONObject profile = new JSONObject().put("id", id).put("gatewayId", invitation.getString("gatewayId")).put("endpoint", approvedEndpoint).put("device", device);
+            JSONObject profile = new JSONObject().put("id", id).put("gatewayId", invitation.getString("gatewayId")).put("mobileHostId", call.getString("mobileHostId", "")).put("endpoint", approvedEndpoint).put("device", device);
             profile.put("version", 2);
             publicResponse(profile);
             assertCurrent(id, 0, e);
@@ -309,12 +311,14 @@ public class CrowGatewayPlugin extends Plugin {
             if (type.equals("input")) { String data = call.getString("data", ""); if (data.isEmpty() || data.length() > 4096 || !data.matches("[A-Za-z0-9+/]*={0,2}")) throw new IllegalArgumentException("Input inválido."); if (android.util.Base64.decode(data, android.util.Base64.NO_WRAP).length > 2048) throw new IllegalArgumentException("El envío supera 2048 bytes UTF-8. Acortá el texto: no se divide ni se envía automáticamente."); body.put("data", data); }
             else if (type.equals("resize")) { int cols = call.getInt("cols", 0), rows = call.getInt("rows", 0); if (cols < 2 || cols > 500 || rows < 2 || rows > 500) throw new IllegalArgumentException("Tamaño inválido."); body.put("cols", cols).put("rows", rows); }
             else throw new IllegalArgumentException("Acción de terminal inválida.");
-            try { http(record.getJSONObject("profile").getJSONObject("endpoint"), "/api/v1/" + type, "POST", mutationBody(record, body), accessCredential(stream.profileId, record, stream.generation, stream.epoch), stream.profileId, record.optJSONObject("proxyAuth")); }
-            catch (Exception ambiguous) { emit(stream, "disconnected", null); stop(stream); throw ambiguous; }
+            // A failed HTTP mutation does not prove the independent WSS stream is dead.
+            // Surface the outcome (especially transport-ambiguous writes) without
+            // tearing down the reader or ever replaying the command.
+            http(record.getJSONObject("profile").getJSONObject("endpoint"), "/api/v1/" + type, "POST", mutationBody(record, body), accessCredential(stream.profileId, record, stream.generation, stream.epoch), stream.profileId, record.optJSONObject("proxyAuth"));
             assertCurrent(stream.profileId, stream.generation, stream.epoch); if (!current(stream)) throw new IllegalStateException("La conexión cambió durante la acción. Verificá el resultado antes de repetirla."); call.resolve();
         });
     }
     @PluginMethod public void closeStream(PluginCall call) { String id = call.getString("connectionId", ""); streamGenerations.computeIfAbsent(id, ignored -> new AtomicLong()).incrementAndGet(); Stream stream = streams.get(id); if (stream != null) stop(stream); call.resolve(); }
-    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); }
+    @Override protected void handleOnPause() { for (Stream stream : streams.values()) emit(stream, "disconnected", null); epoch.incrementAndGet(); for (Stream stream : streams.values()) stop(stream); transports.clear(); }
     @Override protected void handleOnDestroy() { epoch.incrementAndGet(); accessCredentials.clear(); for (Stream stream : streams.values()) stop(stream); transports.clear(); worker.shutdownNow(); readWorker.shutdownNow(); }
 }

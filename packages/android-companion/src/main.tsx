@@ -23,6 +23,7 @@ function MobileApp() {
   const generation = useRef(0), active = useRef(''), back = useRef(() => {}), profileListGeneration = useRef(0), foreground = useRef(true), retryRequested = useRef(false), retryAttempt = useRef(0)
   const sessionHeading = useRef<HTMLHeadingElement>(null), sessionOrigin = useRef<HTMLElement | null>(null), restoreSessionFocus = useRef(false)
   const profile = profiles.find(item => item.id === profileId)
+  const terminalProfile = terminal ? profiles.find(item => item.mobileHostId === terminal.hostId && item.mobileHostId !== 'windows') || profile : profile
   const native = Capacitor.isNativePlatform()
   function openSession(session: MobileSession, origin: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null) {
     sessionOrigin.current = origin === document.body ? null : origin
@@ -48,7 +49,7 @@ function MobileApp() {
   const fail = useCallback((text: string) => { setError(previous => { const warning = previous.includes('No se repite automáticamente') && !text.includes('No se repite automáticamente') ? ' No se repite automáticamente. Verificá la sesión antes de volver a intentar.' : ''; return `${text}${warning}` }); if (/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401/i.test(text)) { retryRequested.current = false; setStatus('revoked'); setBootstrap(null); setSessions([]); setNotices([]); setQuotas([]); setTerminal(null) } else if (/sin conexión con crow en windows|sin conexión|desconectad|network/i.test(text)) { retryRequested.current = true; setStatus('disconnected') } }, [])
   const loadProfiles = useCallback(async () => {
     const version = ++profileListGeneration.current
-    try { const result = await Gateway.listProfiles(); if (profileListGeneration.current !== version) return; setProfiles(result.profiles); if (!active.current && result.profiles[0]) changeProfile(result.profiles[0].id) }
+    try { const result = await Gateway.listProfiles(); if (profileListGeneration.current !== version) return; setProfiles(result.profiles); const preferred = result.profiles.find(item => item.mobileHostId === 'windows') || result.profiles[0]; if (!active.current && preferred) changeProfile(preferred.id) }
     catch (reason) { if (profileListGeneration.current === version) fail(message(reason)) }
   }, [changeProfile, fail])
   useEffect(() => { if (native) void loadProfiles(); else setError('Vista de desarrollo sin conexión nativa. Vinculación y terminal requieren Android; no se usan datos ficticios.') }, [native, loadProfiles])
@@ -75,8 +76,13 @@ function MobileApp() {
           setError(`No se pudo actualizar el uso de cuentas: ${text}`)
         }
       }
-    } catch (reason) { if (active.current === id && generation.current === version) { const text = message(reason); fail(text); if (!/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401|sin conexión|desconectad|network/i.test(text)) setStatus('disconnected') } }
-  }, [fail])
+    } catch (reason) { if (active.current === id && generation.current === version) {
+      const text = message(reason)
+      const directHost = profile?.mobileHostId === 'windows' ? profiles.find(candidate => candidate.mobileHostId && candidate.mobileHostId !== 'windows') : undefined
+      if (directHost) { changeProfile(directHost.id); return }
+      fail(text); if (!/revocado|vencido|forgotten|rechazó la autenticación del dispositivo|HTTP 401|sin conexión|desconectad|network/i.test(text)) setStatus('disconnected')
+    } }
+  }, [changeProfile, fail, profile?.mobileHostId, profiles])
   useEffect(() => { if (profileId) void refresh() }, [profileId, refresh])
   useEffect(() => {
     if (!profileId || status !== 'disconnected' || !retryRequested.current || !foreground.current) return
@@ -120,7 +126,7 @@ function MobileApp() {
   return <div className={`app ${terminal ? 'with-terminal' : ''}`}>
     <header><div><span className="brand">CROW · COMPANION</span><h1 ref={sessionHeading} tabIndex={-1}>{terminal ? sessionMode === 'chat' ? 'Chat' : 'Terminal' : enrolling ? 'Vincular equipos' : page}</h1></div>{!terminal && <button className="header-refresh" aria-label="Actualizar datos" title="Actualizar datos" disabled={!profile || busy || status === 'connecting'} onClick={() => void refresh()}><RefreshCw size={21} aria-hidden="true" /></button>}</header>
     {error && <div className="error" role="alert"><span>{error}</span><button aria-label="Descartar aviso" onClick={() => setError('')}>Cerrar</button></div>}
-    {terminal && profile ? <>
+    {terminal && terminalProfile ? <>
       {terminal.chatAvailable === true ? <>
       <div className="session-mode-tabs" role="tablist" aria-label="Vista de la sesión" onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -135,16 +141,16 @@ function MobileApp() {
         <button id="session-terminal-tab" type="button" role="tab" tabIndex={sessionMode === 'terminal' ? 0 : -1} aria-controls="session-terminal-panel" aria-selected={sessionMode === 'terminal'} onClick={() => setSessionMode('terminal')}>Terminal</button>
       </div>
       <div id="session-chat-panel" role="tabpanel" aria-labelledby="session-chat-tab" className="session-mode-panel" hidden={sessionMode !== 'chat' || terminal.chatAvailable !== true}>
-        {terminal.chatAvailable === true && <ChatView profile={profile} hostId={hostId} session={terminal} isActive={sessionMode === 'chat'} onBack={() => setTerminal(null)} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />}
+        {terminal.chatAvailable === true && <ChatView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} isActive={sessionMode === 'chat'} onBack={() => setTerminal(null)} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />}
       </div>
       <div id="session-terminal-panel" role="tabpanel" aria-labelledby="session-terminal-tab" className="session-mode-panel" hidden={sessionMode === 'chat' && terminal.chatAvailable === true}>
-        <TerminalView profile={profile} hostId={hostId} session={terminal} isActive={sessionMode === 'terminal'} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />
+        <TerminalView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} isActive={sessionMode === 'terminal'} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />
       </div>
-      </> : <div className="session-mode-panel"><TerminalView profile={profile} hostId={hostId} session={terminal} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} /></div>}
+      </> : <div className="session-mode-panel"><TerminalView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} /></div>}
     </> : <main>
       {enrolling ? <Enrollment onCancel={() => setEnrolling(false)} onError={setError} onPaired={values => { profileListGeneration.current++; setProfiles(previous => [...previous, ...values]); changeProfile(values[0].id); setEnrolling(false); setPage('Inicio') }} /> : <>
         <section className={`connection connection-${status}`} aria-live="polite"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? 'Vínculo activo' : status === 'connecting' ? 'Comprobando la conexión…' : status === 'revoked' ? 'Acceso rechazado o vencido · revisá el vínculo' : retryRequested.current ? 'Sin conexión · reintentando automáticamente' : 'Sin conexión · revisá el aviso y actualizá'}</small></div></section>
-        {profiles.length > 1 && <section className="card"><label htmlFor="active-gateway">Equipo</label><select id="active-gateway" value={profileId} onChange={event => changeProfile(event.target.value)}>{profiles.map(item => <option value={item.id} key={item.id}>{item.device.label}</option>)}</select></section>}
+        {profiles.length > 1 && <section className="card"><label htmlFor="active-gateway">Equipo de trabajo</label><select id="active-gateway" value={profileId} onChange={event => changeProfile(event.target.value)}>{profiles.map(item => <option value={item.id} key={item.id}>{item.device.label} · {item.mobileHostId === 'windows' ? 'Crow Windows' : item.mobileHostId || 'equipo vinculado'}</option>)}</select></section>}
         {!profile && <section className="card"><h2>Tu workspace, desde Android</h2><p>Escaneá una vez el QR de Crow Windows. Después podés seguir las terminales de tus hosts Linux aunque apagues la PC. Android no guarda llaves SSH.</p><button className="primary" disabled={!native} onClick={() => setEnrolling(true)}>Vincular con QR</button></section>}
         {profile && bootstrap && <section className="host-picker" aria-label="Servidor actual"><label htmlFor="host">Servidor</label><select id="host" value={hostId} onChange={event => { setHostId(event.target.value); setSessions([]) }}>{bootstrap.hosts.map(host => <option value={host.id} key={host.id}>{host.name} · {hostStateLabel(host.status)}</option>)}</select></section>}
         {profile && page === 'Inicio' && <>
@@ -194,7 +200,7 @@ function Enrollment({ onCancel, onError, onPaired }: { onCancel(): void; onError
     try {
       for (const item of invitations) {
         const endpointIndex = Math.max(0, item.enrollment.endpoints.findIndex(endpoint => endpoint.kind === 'relay'))
-        const result = await Gateway.pair({ enrollment: item.enrollment, endpointIndex, deviceName: `${label.trim()} · ${item.hostName}`.slice(0, 80), destinationConfirmed: confirmed })
+        const result = await Gateway.pair({ enrollment: item.enrollment, endpointIndex, deviceName: `${label.trim()} · ${item.hostName}`.slice(0, 80), destinationConfirmed: confirmed, mobileHostId: item.hostId })
         paired.push(result.profile)
       }
       if (!mounted.current) { for (const item of paired) await Gateway.deleteProfile({ profileId: item.id }); return }

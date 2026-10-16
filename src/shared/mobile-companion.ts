@@ -54,7 +54,7 @@ export interface MobileDeviceChallenge { version: 2; gatewayId: string; deviceId
 export type MobileProjectAvailability = 'available' | 'server-disconnected' | 'authorization-required'
 export interface MobileProject { id: string; hostId: string; name: string; availability?: MobileProjectAvailability }
 export interface MobileHost { id: string; name: string; status: ConnectionStatus }
-export interface MobileSession extends Omit<SessionInfo, 'root' | 'promptCache'> { projectId: string; name?: string; canOperate: boolean; chatAvailable?: boolean }
+export interface MobileSession extends Omit<SessionInfo, 'root' | 'promptCache'> { hostId?: string; projectId: string; name?: string; canOperate: boolean; chatAvailable?: boolean }
 export interface MobileChatMessage { id: string; sessionId: string; seq: number; role: 'user' | 'assistant'; content: string; truncated?: boolean; createdAt: string }
 export interface MobileChatPage { messages: MobileChatMessage[]; hasMore: boolean; nextBefore: number }
 export interface MobileNotice { id: string; hostId: string; sessionId: string; kind: 'turn-complete' | 'process-exited' | 'chat-history-limit'; at: string; requiresAttention?: boolean }

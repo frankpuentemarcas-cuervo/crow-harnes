@@ -145,6 +145,34 @@ test('desktop connector and actual broker exchange bounded opaque TLS bytes and 
   await eventually(() => gateway.status().activeStreams === 0)
 })
 
+test('relay ignores late frames for a retired stream without disconnecting other devices', async t => {
+  const relay = createRelayServer({ maxRoutes: 1, maxStreamsPerRoute: 2, openTimeoutMs: 1000 })
+  const address = await relay.listen(0, '127.0.0.1')
+  const route = Buffer.alloc(32, 9).toString('base64url')
+  const gateway = new WebSocket(`ws://127.0.0.1:${address.port}/v1/tunnel`, { headers: { 'X-Crow-Route': route, 'X-Crow-Role': 'gateway' } })
+  const firstId = randomUUID(), secondId = randomUUID()
+  let first, second
+  t.after(async () => { gateway.terminate(); first?.terminate(); second?.terminate(); await relay.close() })
+  await new Promise((resolve, reject) => { gateway.once('open', resolve); gateway.once('error', reject) })
+  const opens = new Set()
+  gateway.on('message', (data, binary) => { if (!binary) { const message = JSON.parse(data.toString()); if (message.type === 'open') { opens.add(message.streamId); sendControl(gateway, { type: 'accept', streamId: message.streamId }) } } })
+  first = new WebSocket(`ws://127.0.0.1:${address.port}/v1/tunnel`, { headers: { 'X-Crow-Route': route, 'X-Crow-Role': 'device', 'X-Crow-Stream': firstId } })
+  second = new WebSocket(`ws://127.0.0.1:${address.port}/v1/tunnel`, { headers: { 'X-Crow-Route': route, 'X-Crow-Role': 'device', 'X-Crow-Stream': secondId } })
+  await Promise.all([first, second].map(ws => new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })))
+  await eventually(() => opens.size === 2)
+  await eventually(() => first.readyState === WebSocket.OPEN && second.readyState === WebSocket.OPEN)
+  const firstClosed = new Promise(resolve => first.once('close', resolve))
+  first.close()
+  await firstClosed
+  await eventually(() => !relay.routes.get(route)?.streams.has(firstId))
+  sendControl(gateway, { type: 'close', streamId: firstId })
+  sendEnvelope(gateway, firstId, Buffer.from('late data'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(gateway.readyState, WebSocket.OPEN)
+  assert.equal(second.readyState, WebSocket.OPEN)
+  assert.equal(relay.routes.get(route)?.streams.has(secondId), true)
+})
+
 test('rejects wrong route credentials and refuses non-WSS or wrong-path configuration', async t => {
   const tls = makeCertificate()
   const https = createHttpsServer(tls)
@@ -184,6 +212,30 @@ test('closes the relay connection on unknown and malformed stream envelopes', as
   await eventually(() => harness.client.status().activeStreams === 0)
 })
 
+test('desktop connector drops late close/data for a retired stream but keeps gateway alive', async t => {
+  const harness = await makeHarness({ tcpHandler: socket => socket.on('data', () => {}) })
+  t.after(() => harness.close())
+  harness.client.start()
+  const ws = await new Promise(resolve => harness.wss.once('connection', resolve))
+  await eventually(() => harness.client.status().state === 'connected')
+  const firstId = randomUUID()
+  const accepted = waitMessage(ws, (data, binary) => !binary && JSON.parse(data.toString()).type === 'accept')
+  sendControl(ws, { type: 'open', streamId: firstId })
+  await accepted
+  sendControl(ws, { type: 'close', streamId: firstId })
+  await eventually(() => harness.client.status().activeStreams === 0)
+  sendControl(ws, { type: 'close', streamId: firstId })
+  sendEnvelope(ws, firstId, Buffer.from('late data'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(ws.readyState, WebSocket.OPEN)
+  assert.equal(harness.client.status().state, 'connected')
+  const secondId = randomUUID()
+  const secondAccepted = waitMessage(ws, (data, binary) => !binary && JSON.parse(data.toString()).type === 'accept')
+  sendControl(ws, { type: 'open', streamId: secondId })
+  await secondAccepted
+  assert.equal(harness.client.status().activeStreams, 1)
+})
+
 test('enforces 8 active streams and caps queued TCP bytes per stream', async t => {
   const harness = await makeHarness({ tcpHandler: socket => { socket.pause() } })
   t.after(() => harness.close())
@@ -221,11 +273,16 @@ test('disconnects cleanly, reconnects with jitter, and stop prevents later recon
   const first = [...harness.wss.clients][0]
   first.terminate()
   await eventually(() => harness.client.status().reconnectAttempts >= 1)
+  await eventually(() => harness.client.status().lastDisconnect?.cause === 'socket-close')
+  assert.equal(harness.client.status().lastDisconnect?.code, 1006)
   await eventually(() => connections >= 2)
   assert.equal(harness.client.status().activeStreams, 0)
   harness.client.stop()
   const count = connections
   await new Promise(resolve => setTimeout(resolve, 100))
   assert.equal(connections, count)
-  assert.deepEqual(harness.client.status(), { state: 'stopped', activeStreams: 0, reconnectAttempts: harness.client.status().reconnectAttempts })
+  assert.equal(harness.client.status().state, 'stopped')
+  assert.equal(harness.client.status().activeStreams, 0)
+  assert.equal(typeof harness.client.status().reconnectAttempts, 'number')
+  assert.equal(harness.client.status().lastDisconnect?.cause, 'socket-close')
 })

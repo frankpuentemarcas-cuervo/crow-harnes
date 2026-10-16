@@ -232,7 +232,8 @@ export class MobileGateway {
 
   status(): MobileStatus {
     this.ensureTrust()
-    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined, remoteProvider: this.remoteProvider, relayUrl: this.relayUrl || undefined, relayState: this.relayClient?.status().state } : { running: false, devices: this.devices(), paired: this.registry.list().length > 0, relayUrl: this.relayUrl || undefined }
+    const relay = this.relayClient?.status()
+    return this.server ? { running: true, url: this.origin, pairingCode: this.pairingCode && Date.now() < this.pairingExpires ? this.pairingCode : undefined, fingerprint: this.fingerprint, paired: this.registry.list().length > 0 || (!!this.cookieToken && !this.pairingCode), enrollment: this.registry.invitation(), devices: this.devices(), loopbackUrl: this.loopbackUrl || undefined, remoteProvider: this.remoteProvider, relayUrl: this.relayUrl || undefined, relayState: relay?.state, relayLastDisconnect: relay?.lastDisconnect } : { running: false, devices: this.devices(), paired: this.registry.list().length > 0, relayUrl: this.relayUrl || undefined, relayLastDisconnect: relay?.lastDisconnect }
   }
   devices(): MobileDevice[] { this.ensureTrust(); return this.registry.list() }
   revoke(id: string): void {
@@ -484,7 +485,7 @@ export class MobileGateway {
     const legacyAdminSession = !info.ownerId && scope.binding.role === 'admin'
     const name = ownsSession || legacyAdminSession ? this.deps.snapshot().sessionNames[`${scope.hostId}:${info.id}`] : undefined
     const ownsChat = !!info.ownerId && info.ownerId === scope.binding.actorId
-    return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate, chatAvailable: ownsChat && (info.agent === 'claude' || info.agent === 'codex') && info.hooksActive === true }
+    return { id: info.id, hostId: scope.hostId, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate, chatAvailable: ownsChat && (info.agent === 'claude' || info.agent === 'codex') && info.hooksActive === true }
   }
   private canOperate(info: SessionInfo, binding: MobileActorBinding): boolean { return info.readOnly !== true && !!info.ownerId && (info.ownerId === binding.actorId || binding.operateOthers) }
   private async sessions(record: DeviceRecord, hostId: string, projectId?: string): Promise<MobileSession[]> {

@@ -18,6 +18,10 @@ import (
 const mobileRelayFrameLimit = 64 * 1024
 const mobileRelayStreamLimit = 8
 const mobileRelayEnvelopeBytes = 40
+const mobileRelayRetiredTTL = 30 * time.Second
+const mobileRelayRetiredLimit = 128
+const mobileRelayPingInterval = 20 * time.Second
+const mobileRelayPongTimeout = 60 * time.Second
 
 var mobileRelayStreamID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
@@ -30,7 +34,44 @@ type mobileRelayConnection struct {
 	ws      *websocket.Conn
 	mu      sync.Mutex
 	streams map[string]net.Conn
+	retired map[string]time.Time
 	closed  bool
+}
+
+func (c *mobileRelayConnection) retireLocked(id string) {
+	if c.retired == nil {
+		c.retired = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for streamID, retiredAt := range c.retired {
+		if now.Sub(retiredAt) > mobileRelayRetiredTTL {
+			delete(c.retired, streamID)
+		}
+	}
+	delete(c.retired, id)
+	c.retired[id] = now
+	for len(c.retired) > mobileRelayRetiredLimit {
+		var oldestID string
+		var oldest time.Time
+		for streamID, retiredAt := range c.retired {
+			if oldest.IsZero() || retiredAt.Before(oldest) {
+				oldestID, oldest = streamID, retiredAt
+			}
+		}
+		delete(c.retired, oldestID)
+	}
+}
+
+func (c *mobileRelayConnection) isRetiredLocked(id string) bool {
+	retiredAt, ok := c.retired[id]
+	if !ok {
+		return false
+	}
+	if time.Since(retiredAt) > mobileRelayRetiredTTL {
+		delete(c.retired, id)
+		return false
+	}
+	return true
 }
 
 func validMobileRelay(urlText, route string) bool {
@@ -67,6 +108,7 @@ func (c *mobileRelayConnection) close() {
 	for id, stream := range c.streams {
 		_ = stream.Close()
 		delete(c.streams, id)
+		c.retireLocked(id)
 	}
 	_ = c.ws.Close()
 	c.mu.Unlock()
@@ -76,6 +118,9 @@ func (c *mobileRelayConnection) remove(id string, notify bool) {
 	c.mu.Lock()
 	stream := c.streams[id]
 	delete(c.streams, id)
+	if stream != nil {
+		c.retireLocked(id)
+	}
 	c.mu.Unlock()
 	if stream != nil {
 		_ = stream.Close()
@@ -107,6 +152,7 @@ func (c *mobileRelayConnection) open(ctx context.Context, id string, localAddres
 		return
 	}
 	c.streams[id] = stream
+	delete(c.retired, id)
 	c.mu.Unlock()
 	if c.control("accept", id) != nil {
 		c.remove(id, false)
@@ -135,6 +181,8 @@ func (c *mobileRelayConnection) open(ctx context.Context, id string, localAddres
 
 func (c *mobileRelayConnection) receive(ctx context.Context, localAddress string) error {
 	c.ws.SetReadLimit(mobileRelayFrameLimit)
+	_ = c.ws.SetReadDeadline(time.Now().Add(mobileRelayPongTimeout))
+	c.ws.SetPongHandler(func(string) error { return c.ws.SetReadDeadline(time.Now().Add(mobileRelayPongTimeout)) })
 	for {
 		kind, payload, err := c.ws.ReadMessage()
 		if err != nil {
@@ -150,6 +198,13 @@ func (c *mobileRelayConnection) receive(ctx context.Context, localAddress string
 			case "open":
 				go c.open(ctx, control.StreamID, localAddress)
 			case "close":
+				c.mu.Lock()
+				_, active := c.streams[control.StreamID]
+				retired := c.isRetiredLocked(control.StreamID)
+				c.mu.Unlock()
+				if !active && !retired {
+					return errors.New("unknown relay stream")
+				}
 				c.remove(control.StreamID, false)
 			default:
 				return errors.New("invalid relay control")
@@ -164,8 +219,12 @@ func (c *mobileRelayConnection) receive(ctx context.Context, localAddress string
 			}
 			c.mu.Lock()
 			stream := c.streams[id]
+			retired := c.isRetiredLocked(id)
 			c.mu.Unlock()
 			if stream == nil {
+				if retired {
+					continue
+				}
 				return errors.New("unknown relay stream")
 			}
 			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -191,10 +250,31 @@ func runMobileRelay(ctx context.Context, endpoint, route, localAddress string, d
 		headers := http.Header{"X-Crow-Route": {route}, "X-Crow-Role": {"gateway"}}
 		ws, _, err := dialer.DialContext(ctx, endpoint, headers)
 		if err == nil {
-			connection := &mobileRelayConnection{ws: ws, streams: make(map[string]net.Conn)}
+			connection := &mobileRelayConnection{ws: ws, streams: make(map[string]net.Conn), retired: make(map[string]time.Time)}
 			stop := context.AfterFunc(ctx, connection.close)
+			connectedAt := time.Now()
+			pingCtx, cancelPing := context.WithCancel(ctx)
+			pingDone := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(mobileRelayPingInterval)
+				defer ticker.Stop()
+				defer close(pingDone)
+				for {
+					select {
+					case <-pingCtx.Done():
+						return
+					case <-ticker.C:
+						_ = ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+					}
+				}
+			}()
 			_ = connection.receive(ctx, localAddress)
+			cancelPing()
+			if time.Since(connectedAt) >= 30*time.Second {
+				backoff = time.Second
+			}
 			stop()
+			<-pingDone
 			connection.close()
 		}
 		select {

@@ -50,6 +50,8 @@ test('v2 pair stores a private alias but never bearer, and no secrets reach the 
   assert.doesNotMatch(native, /saved\.put\("credential"/)
   assert.doesNotMatch(native, /profile\.put\("(?:signingAlias|credential|privateKey)"/)
   assert.match(native, /private final ConcurrentHashMap<String, AccessCredential> accessCredentials/)
+  assert.match(native, /mobileHostId.*matches\("\[A-Za-z0-9\._~-\]\{1,200\}"\)/)
+  assert.match(native, /put\("mobileHostId", call\.getString\("mobileHostId", ""\)\)/)
 })
 
 test('legacy stored profiles keep their own expiry but new enrollment never calls v1 pair', () => {
@@ -80,7 +82,8 @@ test('transient failures retain profiles and keys; explicit forget removes both 
   assert.doesNotMatch(listing, /forget\(id\)/)
   assert.match(native, /DeviceSigningKey\.delete\(alias\)/)
   assert.match(native, /accessCredentials\.remove\(id\)/)
-  assert.match(native, /handleOnPause\(\)[^\n]*accessCredentials\.clear\(\)/)
+  assert.match(native, /handleOnDestroy\(\)[^\n]*accessCredentials\.clear\(\)/)
+  assert.doesNotMatch(native.match(/handleOnPause\(\)[^\n]*/)?.[0] ?? '', /accessCredentials\.clear\(\)/)
 })
 
 test('every explicit v2 mutation gets a fresh native body requestId without modifying JS payloads', () => {
@@ -100,4 +103,12 @@ test('every explicit v2 mutation gets a fresh native body requestId without modi
   assert.doesNotMatch(helper, /store\.save|accessCredentials\.put|http\(/)
   assert.match(native, /retryOnConnectionFailure\(false\)/)
   assert.doesNotMatch(request + send, /for\s*\(|while\s*\(|catch[^\n]*http\(/)
+})
+
+test('an HTTP mutation failure does not tear down the independent terminal stream', () => {
+  const native = source('CrowGatewayPlugin')
+  const send = native.slice(native.indexOf('@PluginMethod public void send'), native.indexOf('@PluginMethod public void closeStream'))
+  assert.doesNotMatch(send, /catch\s*\(Exception[^)]*\)\s*\{[^}]*stop\(stream\)/)
+  assert.match(send, /failed HTTP mutation does not prove the independent WSS stream is dead/)
+  assert.match(native, /retryOnConnectionFailure\(false\)/)
 })

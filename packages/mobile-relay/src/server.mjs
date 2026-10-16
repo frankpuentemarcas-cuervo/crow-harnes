@@ -15,6 +15,8 @@ export const MAX_REQUEST_TIMEOUT_MS = 10_000
 export const MAX_CONNECTIONS_CHECK_INTERVAL_MS = 1_000
 const MAX_HEADER_BYTES = 8 * 1024
 const MAX_HEADER_COUNT = 32
+const RETIRED_STREAM_TTL_MS = 30_000
+const MAX_RETIRED_STREAMS = 128
 
 function boundedEnvInteger(env, name, fallback, maximum) {
   const raw = env[name]
@@ -104,11 +106,33 @@ function clearPending(stream) {
   stream.timer = undefined
 }
 
+function retireStream(route, streamId) {
+  if (!route?.retiredStreams) return
+  const now = Date.now()
+  for (const [id, retiredAt] of route.retiredStreams) {
+    if (now - retiredAt > RETIRED_STREAM_TTL_MS) route.retiredStreams.delete(id)
+  }
+  route.retiredStreams.delete(streamId)
+  route.retiredStreams.set(streamId, now)
+  while (route.retiredStreams.size > MAX_RETIRED_STREAMS) route.retiredStreams.delete(route.retiredStreams.keys().next().value)
+}
+
+function isRetiredStream(route, streamId) {
+  const retiredAt = route?.retiredStreams?.get(streamId)
+  if (retiredAt === undefined) return false
+  if (Date.now() - retiredAt > RETIRED_STREAM_TTL_MS) {
+    route.retiredStreams.delete(streamId)
+    return false
+  }
+  return true
+}
+
 function detachStream(route, streamId, notifyGateway = false, closeDevice = true) {
   const stream = route?.streams.get(streamId)
   if (!stream) return
   clearPending(stream)
   route.streams.delete(streamId)
+  retireStream(route, streamId)
   if (notifyGateway && route.gateway?.readyState === WebSocket.OPEN) {
     sendText(route.gateway, JSON.stringify({ type: 'close', streamId }))
   }
@@ -235,20 +259,23 @@ export function createRelayServer({
 
     if (role === 'gateway') {
       if (route?.gateway || routes.size >= maxRoutes && !route) return fail(ws, 'unavailable')
-      if (!route) { route = { gateway: null, streams: new Map() }; routes.set(routeKey, route) }
+      if (!route) { route = { gateway: null, streams: new Map(), retiredStreams: new Map() }; routes.set(routeKey, route) }
       route.gateway = ws
       ws.on('message', (data, isBinary) => {
         if (data.length > MAX_FRAME_BYTES) return fail(ws, 'protocol')
         if (isBinary) {
           const parsed = parseEnvelope(data)
           const stream = parsed && route.streams.get(parsed.streamId)
-          if (!parsed || !stream || stream.state !== 'active') return fail(ws, 'protocol')
+          if (!parsed) return fail(ws, 'protocol')
+          if (!stream) return isRetiredStream(route, parsed.streamId) ? undefined : fail(ws, 'protocol')
+          if (stream.state !== 'active') return fail(ws, 'protocol')
           if (!sendBinary(stream.device, parsed.payload)) detachStream(route, parsed.streamId, false)
           return
         }
         const message = parseControl(data.toString())
         const stream = message && route.streams.get(message.streamId)
-        if (!message || !stream) return fail(ws, 'protocol')
+        if (!message) return fail(ws, 'protocol')
+        if (!stream) return message.type === 'close' && isRetiredStream(route, message.streamId) ? undefined : fail(ws, 'protocol')
         if (message.type === 'accept') {
           if (stream.state !== 'pending') return fail(ws, 'protocol')
           stream.state = 'active'
@@ -260,6 +287,7 @@ export function createRelayServer({
         }
         clearPending(stream)
         route.streams.delete(message.streamId)
+        retireStream(route, message.streamId)
         if (message.type === 'reject') fail(stream.device, 'rejected')
         else if (stream.device.readyState === WebSocket.OPEN) stream.device.close(1000, 'stream closed')
       })
@@ -271,6 +299,7 @@ export function createRelayServer({
     if (!route?.gateway || route.streams.has(streamId)) return fail(ws, 'unavailable')
     if (route.streams.size >= maxStreamsPerRoute) return fail(ws, 'limit')
     const stream = { device: ws, state: 'pending', timer: undefined }
+    route.retiredStreams?.delete(streamId)
     route.streams.set(streamId, stream)
     stream.timer = setTimeout(() => {
       if (route.streams.get(streamId) !== stream) return

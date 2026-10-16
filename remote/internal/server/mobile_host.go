@@ -31,6 +31,7 @@ const mobileHostPort = "47322"
 const mobileHostRelayURL = "wss://crow.frabubu.com/v1/tunnel"
 
 var mobileHostID = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,200}$`)
+var mobileSessionNameID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type mobileHostProject struct {
 	ID   string `json:"id"`
@@ -48,17 +49,18 @@ type mobileHostDevice struct {
 }
 
 type mobileHostFile struct {
-	Version     int                 `json:"version"`
-	GatewayID   string              `json:"gatewayId"`
-	HostID      string              `json:"hostId"`
-	HostName    string              `json:"hostName"`
-	RelayURL    string              `json:"relayUrl"`
-	RelayRoute  string              `json:"relayRoute"`
-	Certificate string              `json:"certificate"`
-	PrivateKey  string              `json:"privateKey"`
-	Fingerprint string              `json:"fingerprint"`
-	Projects    []mobileHostProject `json:"projects"`
-	Devices     []mobileHostDevice  `json:"devices"`
+	Version      int                          `json:"version"`
+	GatewayID    string                       `json:"gatewayId"`
+	HostID       string                       `json:"hostId"`
+	HostName     string                       `json:"hostName"`
+	RelayURL     string                       `json:"relayUrl"`
+	RelayRoute   string                       `json:"relayRoute"`
+	Certificate  string                       `json:"certificate"`
+	PrivateKey   string                       `json:"privateKey"`
+	Fingerprint  string                       `json:"fingerprint"`
+	Projects     []mobileHostProject          `json:"projects"`
+	Devices      []mobileHostDevice           `json:"devices"`
+	SessionNames map[string]map[string]string `json:"sessionNames,omitempty"`
 }
 
 type mobileHostInvite struct {
@@ -209,9 +211,10 @@ func (a *App) handleMobileConfigure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		HostID   string              `json:"hostId"`
-		HostName string              `json:"hostName"`
-		Projects []mobileHostProject `json:"projects"`
+		HostID       string              `json:"hostId"`
+		HostName     string              `json:"hostName"`
+		Projects     []mobileHostProject `json:"projects"`
+		SessionNames map[string]string   `json:"sessionNames"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
@@ -227,6 +230,16 @@ func (a *App) handleMobileConfigure(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ids[project.ID] = true
+	}
+	if len(body.SessionNames) > 1000 {
+		http.Error(w, "invalid mobile session names", 400)
+		return
+	}
+	for sessionID, name := range body.SessionNames {
+		if !mobileSessionNameID.MatchString(sessionID) || len(strings.TrimSpace(name)) == 0 || len(name) > 80 {
+			http.Error(w, "invalid mobile session names", 400)
+			return
+		}
 	}
 	a.mobile.mu.Lock()
 	if a.mobile.file.GatewayID != "" && a.mobile.file.HostID != body.HostID {
@@ -272,6 +285,12 @@ func (a *App) handleMobileConfigure(w http.ResponseWriter, r *http.Request) {
 			a.mobile.file.Projects = append(a.mobile.file.Projects, project)
 			known[project.ID] = project.Root
 		}
+	}
+	if body.SessionNames != nil {
+		if a.mobile.file.SessionNames == nil {
+			a.mobile.file.SessionNames = make(map[string]map[string]string)
+		}
+		a.mobile.file.SessionNames[principal.ID] = body.SessionNames
 	}
 	if err := a.saveMobileLocked(); err != nil {
 		a.mobile.mu.Unlock()

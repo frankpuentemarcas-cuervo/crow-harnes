@@ -76,6 +76,28 @@ func TestLinuxMobileRelayRoutesOnlyToFixedLocalListener(t *testing.T) {
 			done <- context.DeadlineExceeded
 			return
 		}
+		if err := ws.WriteJSON(mobileRelayControl{Type: "close", StreamID: streamID}); err != nil {
+			done <- err
+			return
+		}
+		if err := ws.WriteMessage(websocket.BinaryMessage, append([]byte("CHT1"+streamID), []byte("late")...)); err != nil {
+			done <- err
+			return
+		}
+		secondID := "223e4567-e89b-42d3-a456-426614174001"
+		if err := ws.WriteJSON(mobileRelayControl{Type: "open", StreamID: secondID}); err != nil {
+			done <- err
+			return
+		}
+		for {
+			if err := ws.ReadJSON(&control); err != nil {
+				done <- err
+				return
+			}
+			if control.Type == "accept" && control.StreamID == secondID {
+				break
+			}
+		}
 		done <- nil
 	}))
 	defer server.Close()

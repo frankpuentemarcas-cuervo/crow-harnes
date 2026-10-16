@@ -52,6 +52,7 @@ export interface MobileStatus {
   remoteProvider?: MobileRemoteProvider
   relayUrl?: string
   relayState?: 'stopped' | 'connecting' | 'connected' | 'reconnecting'
+  relayLastDisconnect?: { at: string; code: number; cause: 'socket-close' | 'heartbeat-timeout' | 'protocol' }
 }
 
 export interface Project {

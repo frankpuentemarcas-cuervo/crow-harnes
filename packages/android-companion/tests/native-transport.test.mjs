@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 const native = readFileSync(new URL('../android/app/src/main/java/dev/crow/companion/CrowGatewayPlugin.java', import.meta.url), 'utf8')
+const relaySocket = readFileSync(new URL('../android/app/src/main/java/dev/crow/companion/CrowRelayTunnelSocket.java', import.meta.url), 'utf8')
 
 test('read-only history and stream setup cannot queue ahead of explicit terminal input', () => {
   assert.match(native, /readWorker = Executors\.newFixedThreadPool\(2\)/)
@@ -24,4 +25,9 @@ test('reuses profile-bound transports and releases them only on unlink or lifecy
 
 test('authorized state can restore input after a session becomes writable without granting missing input capability', () => {
   assert.match(native, /stream\.writable = stream\.inputGranted && frame\.getJSONObject\("info"\)\.optBoolean\("canOperate"\) && !frame\.getJSONObject\("info"\)\.optBoolean\("readOnly"\)/)
+})
+
+test('Android relay tunnel sends keepalives while an existing terminal is idle', () => {
+  assert.match(relaySocket, /pingInterval\(20, TimeUnit\.SECONDS\)/)
+  assert.match(native, /pingInterval\(20, TimeUnit\.SECONDS\)/)
 })

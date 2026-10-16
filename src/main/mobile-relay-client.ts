@@ -6,6 +6,8 @@ const ENVELOPE_HEADER_BYTES = 40
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_QUEUED_BYTES = 1024 * 1024
 const MAX_ACTIVE_STREAMS = 8
+const RETIRED_STREAM_TTL_MS = 30_000
+const MAX_RETIRED_STREAMS = 128
 const STREAM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 type RelayControl = { type: 'open'; streamId: string } | { type: 'accept' | 'reject' | 'close'; streamId: string }
@@ -28,7 +30,10 @@ export interface MobileRelayStatus {
   state: 'stopped' | 'connecting' | 'connected' | 'reconnecting'
   activeStreams: number
   reconnectAttempts: number
+  lastDisconnect?: { at: string; code: number; cause: RelayDisconnectCause }
 }
+
+type RelayDisconnectCause = 'socket-close' | 'heartbeat-timeout' | 'protocol'
 
 interface ActiveStream {
   socket: Socket
@@ -72,12 +77,15 @@ export class MobileRelayClient {
   private readonly makeWebSocket: (url: string, options: ClientOptions) => WebSocket
   private readonly random: () => number
   private readonly streams = new Map<string, ActiveStream>()
+  private readonly retiredStreams = new Map<string, number>()
   private socket?: WebSocket
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private heartbeatTimer?: ReturnType<typeof setInterval>
   private reconnectAttempts = 0
   private connectedAt = 0
   private lastPongAt = 0
+  private pendingDisconnectCause?: RelayDisconnectCause
+  private lastDisconnect?: MobileRelayStatus['lastDisconnect']
   private stopping = true
   private state: MobileRelayStatus['state'] = 'stopped'
 
@@ -125,7 +133,7 @@ export class MobileRelayClient {
   }
 
   status(): MobileRelayStatus {
-    return { state: this.state, activeStreams: this.streams.size, reconnectAttempts: this.reconnectAttempts }
+    return { state: this.state, activeStreams: this.streams.size, reconnectAttempts: this.reconnectAttempts, lastDisconnect: this.lastDisconnect }
   }
 
   private openConnection(): void {
@@ -158,13 +166,14 @@ export class MobileRelayClient {
       if (!isBinary) return this.handleControl(ws, frame)
       this.handleData(ws, frame)
     })
-    ws.on('close', () => this.connectionEnded(ws))
+    ws.on('close', code => this.connectionEnded(ws, code))
     ws.on('error', () => { /* Close handler performs cleanup; never expose transport details. */ })
   }
 
   private heartbeat(ws: WebSocket): void {
     if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) return
     if (Date.now() - this.lastPongAt > this.heartbeatIntervalMs * 2) {
+      this.pendingDisconnectCause = 'heartbeat-timeout'
       ws.terminate()
       return
     }
@@ -176,12 +185,13 @@ export class MobileRelayClient {
     if (!control) return this.protocolFailure(ws)
     if (control.type === 'close') {
       const stream = this.streams.get(control.streamId)
-      if (!stream) return this.protocolFailure(ws)
+      if (!stream) return this.isRetired(control.streamId) ? undefined : this.protocolFailure(ws)
       return this.closeStream(control.streamId, stream, false)
     }
     if (control.type !== 'open') return this.protocolFailure(ws)
     if (this.streams.has(control.streamId)) return this.reject(ws, control.streamId)
     if (this.streams.size >= MAX_ACTIVE_STREAMS) return this.reject(ws, control.streamId)
+    this.retiredStreams.delete(control.streamId)
 
     const stream: ActiveStream = { socket: connectTcp({ host: this.localHost, port: this.localPort }), queuedBytes: 0, ready: false }
     this.streams.set(control.streamId, stream)
@@ -221,7 +231,8 @@ export class MobileRelayClient {
     const streamId = frame.subarray(4, ENVELOPE_HEADER_BYTES).toString('ascii')
     if (!isStreamId(streamId)) return this.protocolFailure(ws)
     const stream = this.streams.get(streamId)
-    if (!stream || !stream.ready) return this.protocolFailure(ws)
+    if (!stream) return this.isRetired(streamId) ? undefined : this.protocolFailure(ws)
+    if (!stream.ready) return this.protocolFailure(ws)
     const data = frame.subarray(ENVELOPE_HEADER_BYTES)
     if (stream.queuedBytes + stream.socket.writableLength + data.length > MAX_QUEUED_BYTES) {
       return this.closeStream(streamId, stream)
@@ -246,6 +257,7 @@ export class MobileRelayClient {
   }
 
   private protocolFailure(ws: WebSocket): void {
+    this.pendingDisconnectCause = 'protocol'
     if (ws.readyState === WebSocket.OPEN) ws.close(1008, 'Invalid relay protocol')
     else ws.terminate()
   }
@@ -253,17 +265,35 @@ export class MobileRelayClient {
   private closeStream(streamId: string, stream: ActiveStream, notifyRelay = true): void {
     if (this.streams.get(streamId) !== stream) return
     this.streams.delete(streamId)
+    this.retire(streamId)
     const ws = this.socket
     if (notifyRelay && stream.ready && ws?.readyState === WebSocket.OPEN) this.sendControl(ws, { type: 'close', streamId })
     stream.socket.destroy()
+  }
+
+  private retire(streamId: string): void {
+    const now = Date.now()
+    for (const [id, at] of this.retiredStreams) if (now - at > RETIRED_STREAM_TTL_MS) this.retiredStreams.delete(id)
+    this.retiredStreams.delete(streamId)
+    this.retiredStreams.set(streamId, now)
+    while (this.retiredStreams.size > MAX_RETIRED_STREAMS) this.retiredStreams.delete(this.retiredStreams.keys().next().value!)
+  }
+
+  private isRetired(streamId: string): boolean {
+    const at = this.retiredStreams.get(streamId)
+    if (at === undefined) return false
+    if (Date.now() - at > RETIRED_STREAM_TTL_MS) { this.retiredStreams.delete(streamId); return false }
+    return true
   }
 
   private closeAllStreams(): void {
     for (const [id, stream] of this.streams) this.closeStream(id, stream)
   }
 
-  private connectionEnded(ws: WebSocket): void {
+  private connectionEnded(ws: WebSocket, code: number): void {
     if (this.socket !== ws) return
+    this.lastDisconnect = { at: new Date().toISOString(), code: Number.isInteger(code) ? code : 1006, cause: this.pendingDisconnectCause || 'socket-close' }
+    this.pendingDisconnectCause = undefined
     this.socket = undefined
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
     this.heartbeatTimer = undefined
