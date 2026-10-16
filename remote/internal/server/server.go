@@ -131,6 +131,8 @@ func Run() error {
 	mux.HandleFunc("POST /api/task-dispatch", a.handleTaskDispatch)
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/wake", a.handleWakeSession)
+	mux.HandleFunc("POST /api/sessions/{id}/input", a.handleSessionInput)
+	mux.HandleFunc("POST /api/sessions/{id}/resize", a.handleSessionResize)
 	mux.HandleFunc("POST /api/sessions/{id}/cache", a.handlePromptCache)
 	mux.HandleFunc("GET /api/sessions/{id}/chat", a.handleChatHistory)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)

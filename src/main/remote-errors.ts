@@ -4,6 +4,7 @@ const newerRuntimeRoutes = [
   /^PUT \/api\/hooks$/,
   /^DELETE \/api\/sessions\/[0-9a-f]{32}$/,
   /^POST \/api\/sessions\/[0-9a-f]{32}\/wake$/,
+  /^POST \/api\/sessions\/[0-9a-f]{32}\/(input|resize)$/,
   /^POST \/api\/files\/upload$/,
   /^POST \/api\/mobile\/(config|invite)$/,
   /^GET \/api\/files\/download$/

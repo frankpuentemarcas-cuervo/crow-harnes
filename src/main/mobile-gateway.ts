@@ -677,7 +677,8 @@ export class MobileGateway {
         if (!stream || stream.device !== record || stream.client.readyState !== WebSocket.OPEN) throw new Error('Terminal desconectada.')
         this.validateStreamCredential(stream)
         await this.allowedSession(stream.hostId, stream.sessionId, record, true)
-        stream.connection.send(stream.streamId, this.inputFrame(body, route))
+        const { type: _type, ...operation } = this.inputFrame(body, route) as Record<string, unknown>
+        await stream.connection.api('POST', `/api/sessions/${encodeURIComponent(stream.sessionId)}/${route}`, operation)
         return { status: 200, body: { ok: true } }
       }
       const hostId = this.string(body, 'hostId')
@@ -757,7 +758,7 @@ export class MobileGateway {
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || Buffer.from(data, 'base64').length > 2048) throw new Error('Entrada inválida.')
       return { type: 'input', data }
     }
-    if (!Number.isInteger(body.cols) || !Number.isInteger(body.rows) || Number(body.cols) < 1 || Number(body.cols) > 500 || Number(body.rows) < 1 || Number(body.rows) > 500) throw new Error('Tamaño inválido.')
+    if (!Number.isInteger(body.cols) || !Number.isInteger(body.rows) || Number(body.cols) < 2 || Number(body.cols) > 500 || Number(body.rows) < 2 || Number(body.rows) > 500) throw new Error('Tamaño inválido.')
     return { type: 'resize', cols: body.cols, rows: body.rows }
   }
 

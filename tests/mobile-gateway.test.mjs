@@ -37,6 +37,7 @@ const source = ts('../src/main/mobile-gateway.ts')
   .replace("from './mobile-mutation-ledger'", `from '${ledgerURL}'`)
 const { MobileGateway, mobileRemoteConfig, mobileRelayConfig, listenMobileLoopback } = await import(dataURL(source))
 const SESSION = 'a'.repeat(32), FOREIGN = 'b'.repeat(32), OUTSIDE = 'c'.repeat(32)
+const terminalWrites = (c, type) => c.calls.filter(call => call.stream && (!type || call.body.type === type) || call.method === 'POST' && (type ? call.path.endsWith(`/${type}`) : /\/(input|resize)$/.test(call.path)))
 function fixture(trustStore = { load: () => undefined, save() {} }) {
   const state = { hosts: [{ id: 'host', name: 'Windows', target: 'user@mock', port: 22, remotePort: 47000 }], projects: [{ id: 'p1', hostId: 'host', name: 'Work', root: '/work' }, { id: 'p2', hostId: 'host', name: 'Other', root: '/other' }], sessionNames: { [`host:${SESSION}`]: 'Mi terminal de QA', [`host:${FOREIGN}`]: 'Sesión privada' }, notices: [] }
   let binding = { actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'member' }
@@ -52,7 +53,7 @@ function fixture(trustStore = { load: () => undefined, save() {} }) {
     status: () => hostStatus,
     api: async (method, path, body) => {
       calls.push({ method, path, body })
-      apiHook(method, path, body)
+      await apiHook(method, path, body)
       if (method === 'GET' && path.includes('/chat')) return { messages: [], hasMore: false, nextBefore: 0 }
       if (method === 'GET') return structuredClone(sessions)
       if (method === 'DELETE') return {}
@@ -197,12 +198,12 @@ test('v2 installation input and resize preserve owner checks and dispatch once',
     const body = { streamId, requestId: randomUUID(), ...value }
     assert.equal((await c.request(`/api/v1/${route}`, 'POST', body, paired.body.credential)).status, 200)
     assert.equal((await c.request(`/api/v1/${route}`, 'POST', body, paired.body.credential)).status, 200)
-    assert.equal(c.calls.filter(call => call.stream && call.body.type === route).length, 1)
+    assert.equal(terminalWrites(c, route).length, 1)
   }
   c.sessions([{ id: SESSION, agent: 'claude', root: '/work', ownerId: `installation:${'e'.repeat(32)}`, readOnly: true }])
   const denied = await c.request('/api/v1/input', 'POST', { streamId, requestId: randomUUID(), data: 'aGk=' }, paired.body.credential)
   assert.notEqual(denied.status, 200)
-  assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 1)
+  assert.equal(terminalWrites(c, 'input').length, 1)
 })
 test('offline or unauthorized selected projects remain visible but receive no operational scope', async () => {
   const c = fixture()
@@ -289,7 +290,7 @@ test('native stream uses bearer headers, sequenced replay, bounded HTTP input an
   assert.ok(ready.streamId); assert.equal(c.streams.get(ready.streamId).from, 4)
   const post = body => c.request('/api/v1/input', 'POST', body, paired.credential)
   assert.equal((await post({ streamId: ready.streamId, data: Buffer.from('hello').toString('base64') })).status, 200)
-  assert.equal(c.calls.filter(call => call.stream).length, 1)
+  assert.equal(terminalWrites(c).length, 1)
   for (const data of ['a', '@@@@', Buffer.alloc(2049).toString('base64')]) assert.equal((await post({ streamId: ready.streamId, data })).status, 400)
   const another = await c.pair({ input: true })
   assert.equal((await c.request('/api/v1/input', 'POST', { streamId: ready.streamId, data: 'aGk=' }, another.credential)).status, 400)
@@ -348,7 +349,7 @@ test('resize validates dimensions and input denied after ownership changes', asy
   assert.equal((await c.request('/api/v1/resize', 'POST', { streamId, cols: 80, rows: 24 }, paired.credential)).status, 200)
   c.sessions([{ id: SESSION, root: '/work', ownerId: 'bob', readOnly: true }])
   assert.equal((await c.request('/api/v1/input', 'POST', { streamId, data: 'aGk=' }, paired.credential)).status, 400)
-  assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 0)
+  assert.equal(terminalWrites(c, 'input').length, 0)
 })
 test('output is sequenced, allowlisted and backpressure closes slow consumers', async () => {
   const c = fixture(), paired = await c.pair(), client = await c.socket(paired.credential)
@@ -588,13 +589,13 @@ test('v2 terminal survives short bearer expiry, operates once, and closes on rev
     client.emit('message', Buffer.from(JSON.stringify({ type: 'input', requestId: randomUUID(), data: 'aGk=' })))
     await new Promise(ok => setImmediate(ok))
     assert.equal(client.frames.some(frame => frame.type === 'output' && frame.seq === 5), true)
-    assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 0, 'expired WS mutation context cannot bypass renewed HTTP authorization')
+    assert.equal(terminalWrites(c, 'input').length, 0, 'expired WS mutation context cannot bypass renewed HTTP authorization')
     assert.equal(client.ended, false, 'reading continues while Android renews its HTTP credential')
     const challenge = await c.request('/api/v2/device-challenge', 'POST', { deviceId: paired.body.device.id })
     const renewed = await c.request('/api/v2/device-renew', 'POST', { deviceId: paired.body.device.id, challengeId: challenge.body.challengeId, signature: sign('sha256', mobileAuth.deviceProofPayload(challenge.body), keys.privateKey).toString('base64') })
     const input = { streamId: stream.streamId, requestId: randomUUID(), data: 'aGk=' }
     assert.equal((await c.request('/api/v1/input', 'POST', input, renewed.body.credential)).status, 200)
-    assert.equal(c.calls.filter(call => call.stream && call.body.type === 'input').length, 1, 'Android HTTP mutation is executed once after renewal')
+    assert.equal(terminalWrites(c, 'input').length, 1, 'Android HTTP mutation is executed once after renewal')
     if (invalidation === 'revoke') c.gateway.revoke(paired.body.device.id)
     else { c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/work', '/other'], operateOthers: false, role: 'admin' }); await c.gateway.auditStreams() }
     assert.equal(client.ended, true)
@@ -644,6 +645,29 @@ async function keyFixture() {
   const paired = await c.request('/api/v2/pair', 'POST', { invitationCode: invitation.invitationCode, deviceName: 'Android', publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') })
   return { ...c, credential: paired.body.credential }
 }
+test('mobile input waits for remote PTY acknowledgement and never silently falls back to a queued WebSocket write', async () => {
+  const c = await keyFixture(), client = await c.socket(c.credential), streamId = client.frames[0].streamId
+  let release
+  const gate = new Promise(ok => { release = ok })
+  c.apiHook(async (method, path) => { if (method === 'POST' && path.endsWith('/input')) await gate })
+  const body = { streamId, requestId: randomUUID(), data: 'aGk=' }
+  let resolved = false
+  const pending = c.request('/api/v1/input', 'POST', body, c.credential).then(result => { resolved = true; return result })
+  await new Promise(ok => setImmediate(ok))
+  assert.equal(resolved, false)
+  assert.equal(c.calls.filter(call => call.path === `/api/sessions/${SESSION}/input`).length, 1)
+  assert.equal(c.calls.filter(call => call.stream).length, 0)
+  release()
+  assert.equal((await pending).status, 200)
+  assert.equal((await c.request('/api/v1/input', 'POST', body, c.credential)).status, 200)
+  assert.equal(terminalWrites(c).length, 1)
+
+  c.apiHook(method => { if (method === 'POST') throw new Error('PTY acknowledgement lost') })
+  const uncertain = { ...body, requestId: randomUUID() }
+  assert.equal((await c.request('/api/v1/input', 'POST', uncertain, c.credential)).status, 502)
+  assert.equal((await c.request('/api/v1/input', 'POST', uncertain, c.credential)).status, 502)
+  assert.equal(terminalWrites(c).length, 2, 'unknown operations must not be retried or sent again through WebSocket')
+})
 test('all HTTP v2 mutations require requestId and replay the same result without reexecution', async () => {
   for (const route of ['sessions', 'wake', 'close', 'input', 'resize']) {
     const c = await keyFixture(), client = await c.socket(c.credential), streamId = client.frames[0].streamId
@@ -674,17 +698,17 @@ test('WS v2 uses the same contextual ledger, including missing IDs, concurrent r
   const c = await keyFixture(), client = await c.socket(c.credential), streamId = client.frames[0].streamId
   const send = frame => client.emit('message', Buffer.from(JSON.stringify(frame)))
   send({ type: 'input', data: 'aGk=' }); await new Promise(ok => setImmediate(ok))
-  assert.equal(c.calls.filter(call => call.stream).length, 0)
+  assert.equal(terminalWrites(c).length, 0)
   assert.equal(client.ended, false)
   assert.equal(client.frames.some(frame => frame.type === 'mutation-result' && frame.status === 400), true)
   const requestId = randomUUID(), frame = { type: 'input', requestId, data: 'aGk=' }
   send(frame); send(frame); await new Promise(ok => setImmediate(ok))
-  assert.equal(c.calls.filter(call => call.stream).length, 1)
+  assert.equal(terminalWrites(c).length, 1)
   const replay = await c.request('/api/v1/input', 'POST', { requestId, streamId, data: 'aGk=' }, c.credential)
-  assert.equal(replay.status, 200); assert.equal(c.calls.filter(call => call.stream).length, 1)
+  assert.equal(replay.status, 200); assert.equal(terminalWrites(c).length, 1)
   send({ ...frame, data: 'd3Jvbmc=' }); await new Promise(ok => setImmediate(ok))
   assert.equal(client.frames.some(value => value.type === 'mutation-result' && value.status === 409), true)
-  assert.equal(c.calls.filter(call => call.stream).length, 1)
+  assert.equal(terminalWrites(c).length, 1)
 })
 test('bootstrap advertises gateway support separately from per-device grants', async () => {
   const c = fixture(), paired = await c.pair()

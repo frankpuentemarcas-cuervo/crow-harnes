@@ -7,6 +7,8 @@ test('missing new runtime routes explain that crowd must be updated', () => {
     ['GET', '/api/host/metrics'],
     ['GET', '/api/hooks'],
     ['DELETE', `/api/sessions/${'a'.repeat(32)}`],
+    ['POST', `/api/sessions/${'a'.repeat(32)}/input`],
+    ['POST', `/api/sessions/${'a'.repeat(32)}/resize`],
     ['POST', '/api/files/upload'],
     ['POST', '/api/mobile/config'],
     ['POST', '/api/mobile/invite'],
