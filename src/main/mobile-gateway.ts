@@ -483,7 +483,8 @@ export class MobileGateway {
     // alias belonging to another explicitly assigned owner.
     const legacyAdminSession = !info.ownerId && scope.binding.role === 'admin'
     const name = ownsSession || legacyAdminSession ? this.deps.snapshot().sessionNames[`${scope.hostId}:${info.id}`] : undefined
-    return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate }
+    const ownsChat = !!info.ownerId && info.ownerId === scope.binding.actorId
+    return { id: info.id, agent: info.agent, mode: info.mode, state: info.state, agentState: info.agentState, startedAt: info.startedAt, updatedAt: info.updatedAt, seq: info.seq, exitCode: info.exitCode, readOnly: info.readOnly, projectId: scope.projectId, name, canOperate, chatAvailable: ownsChat && (info.agent === 'claude' || info.agent === 'codex') && info.hooksActive === true }
   }
   private canOperate(info: SessionInfo, binding: MobileActorBinding): boolean { return info.readOnly !== true && !!info.ownerId && (info.ownerId === binding.actorId || binding.operateOthers) }
   private async sessions(record: DeviceRecord, hostId: string, projectId?: string): Promise<MobileSession[]> {
@@ -606,6 +607,26 @@ export class MobileGateway {
       json(res, 200, { version: 1, device: { ...record.device, unavailableProjects: unavailable.length ? unavailable : undefined }, hosts: saved.hosts.filter(host => hostIds.has(host.id)).map(host => ({ id: host.id, name: host.name, status: this.deps.connection(host.id).status() })), projects, actor: { label: this.deps.actorLabel?.() || 'Usuario vinculado' }, devices: [record.device], supportedFeatures: MOBILE_SUPPORTED_FEATURES }); return
     }
     if (req.method === 'GET' && route === 'sessions') { json(res, 200, await this.sessions(record, url.searchParams.get('hostId') || '', url.searchParams.get('projectId') || undefined)); return }
+    if (req.method === 'GET' && route === 'chat') {
+      const query = url.searchParams
+      const hostIds = query.getAll('hostId'), sessionIds = query.getAll('sessionId')
+      if (hostIds.length !== 1 || sessionIds.length !== 1 || ['after', 'before', 'limit'].some(key => query.getAll(key).length > 1) || (query.has('after') && query.has('before'))) throw new Error('Paginación inválida.')
+      const hostId = this.string({ hostId: hostIds[0] }, 'hostId')
+      const sessionId = this.string({ sessionId: sessionIds[0] }, 'sessionId')
+      const after = query.get('after'), before = query.get('before'), limit = query.get('limit')
+      for (const cursor of [after, before]) if (cursor !== null && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) throw new Error('Cursor inválido.')
+      if (limit !== null && (!/^\d+$/.test(limit) || !Number.isInteger(Number(limit)) || Number(limit) < 1 || Number(limit) > 100)) throw new Error('Tamaño de página inválido.')
+      const { connection, info } = await this.allowedSession(hostId, sessionId, record)
+      const ownsChat = !!info.ownerId && record.scopes.some(scope => scope.hostId === hostId && scope.root === info.root && scope.binding.actorId === info.ownerId)
+      if (!ownsChat) { json(res, 403, mobileError('GRANT_REQUIRED', 'Sesión no autorizada.')); return }
+      if ((info.agent !== 'claude' && info.agent !== 'codex') || info.hooksActive !== true) { json(res, 501, mobileError('STRUCTURED_CHAT_UNAVAILABLE', 'El historial de esta sesión no está disponible.')); return }
+      const cursor = after !== null ? `after=${encodeURIComponent(after)}` : before !== null ? `before=${encodeURIComponent(before)}` : ''
+      const pageSize = limit !== null ? `limit=${encodeURIComponent(limit)}` : ''
+      const params = [cursor, pageSize].filter(Boolean).join('&')
+      const history = await connection.api('GET', `/api/sessions/${encodeURIComponent(sessionId)}/chat${params ? `?${params}` : ''}`)
+      await this.validateDevice(record)
+      json(res, 200, history); return
+    }
     if (req.method === 'GET' && route === 'quotas') {
       if (!record.device.capabilities.quotas) { json(res, 403, mobileError('GRANT_REQUIRED', 'Cuotas no habilitadas para este dispositivo.')); return }
       const quotas = (this.deps.quotas?.() || []).filter(account => account.provider === 'claude' || account.provider === 'codex').slice(0, 64).map(account => ({ id: account.id, label: account.label, provider: account.provider, state: account.state, sampledAt: account.sampledAt, windows: account.windows.slice(0, 16).map(({ label, usedPercent, resetsAt }) => ({ label, usedPercent: typeof usedPercent === 'number' && Number.isFinite(usedPercent) && usedPercent >= 0 && usedPercent <= 100 ? usedPercent : null, resetsAt })) }))
@@ -770,7 +791,11 @@ export class MobileGateway {
       const sessionId = url.searchParams.get('sessionId') || ''
       const from = Number(url.searchParams.get('from') || 0)
       if (!Number.isSafeInteger(from) || from < 0 || url.searchParams.has('token') || url.searchParams.has('credential')) throw new Error('Secuencia inválida.')
-      const { connection } = await this.allowedSession(hostId, sessionId, device)
+      const mode = url.searchParams.get('mode') ?? 'terminal'
+      if ((mode !== 'terminal' && mode !== 'chat') || url.searchParams.getAll('mode').length > 1 || (!native && mode !== 'terminal')) throw new Error('Modo de stream inválido.')
+      const { connection, info } = await this.allowedSession(hostId, sessionId, device)
+      const cursor = mode === 'chat' ? info.seq : from
+      if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('Secuencia inválida.')
       if (this.clients.size >= 32) throw new Error('Demasiadas terminales.')
       this.sockets.handleUpgrade(req, socket, head, client => {
         const streamId = randomUUID()
@@ -809,7 +834,9 @@ export class MobileGateway {
         let queueBytes = 0
         let outputPaused = false
         let frames = Promise.resolve()
-        void connection.attach(streamId, sessionId, from, frame => {
+        void connection.attach(streamId, sessionId, cursor, frame => {
+          // Chat consumes state only: terminal replay must not enter its bounded queue.
+          if (mode === 'chat' && frame.type === 'output') return
           const bytes = Buffer.byteLength(JSON.stringify(frame))
           // Pause the backend before the queue fills. ws may still deliver frames
           // already decoded from the current TCP packet; retain that bounded burst.

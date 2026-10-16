@@ -53,6 +53,7 @@ function fixture(trustStore = { load: () => undefined, save() {} }) {
     api: async (method, path, body) => {
       calls.push({ method, path, body })
       apiHook(method, path, body)
+      if (method === 'GET' && path.includes('/chat')) return { messages: [], hasMore: false, nextBefore: 0 }
       if (method === 'GET') return structuredClone(sessions)
       if (method === 'DELETE') return {}
       return { ...sessions[0], root: body?.root || sessions[0].root }
@@ -136,6 +137,39 @@ test('native pairing and bootstrap expose scoped DTOs, not reusable QR tokens or
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).status, 403)
   assert.equal((await c.request('/api/v1/bootstrap', 'GET', undefined, paired.credential, { origin: 'https://attacker.invalid' })).headers['X-Crow-Mobile-API'], '1')
   assert.equal((await c.request('/api/state', 'GET', undefined, paired.credential, {}, true)).status, 404)
+})
+
+test('Windows gateway exposes chat history only to the owner and forwards authorized pages', async () => {
+  const c = fixture()
+  c.sessions([
+    { id: SESSION, agent: 'claude', mode: 'normal', ownerId: 'alice', root: '/work', state: 'running', hooksActive: true, seq: 8 },
+    { id: FOREIGN, agent: 'codex', mode: 'normal', ownerId: 'bob', root: '/work', state: 'running', hooksActive: true, seq: 3 },
+  ])
+  const paired = await c.pair({ input: true })
+  const sessions = await c.request('/api/v1/sessions?hostId=host', 'GET', undefined, paired.credential)
+  assert.equal(sessions.status, 200)
+  assert.deepEqual(sessions.body.map(session => [session.agent, session.chatAvailable]), [['claude', true], ['codex', false]])
+  const result = await c.request(`/api/v1/chat?hostId=host&sessionId=${SESSION}&after=4&limit=12`, 'GET', undefined, paired.credential)
+  assert.equal(result.status, 200, JSON.stringify(result.body))
+  assert.deepEqual(result.body, { messages: [], hasMore: false, nextBefore: 0 })
+  assert.equal(c.calls.at(-1).path, `/api/sessions/${SESSION}/chat?after=4&limit=12`)
+  assert.equal(c.calls.at(-1).method, 'GET')
+  const codex = await c.request(`/api/v1/chat?hostId=host&sessionId=${FOREIGN}`, 'GET', undefined, paired.credential)
+    assert.equal(codex.status, 403)
+    assert.notEqual(c.calls.at(-1).path, `/api/sessions/${FOREIGN}/chat`)
+  assert.equal((await c.request(`/api/v1/chat?hostId=host&sessionId=${SESSION}&after=4&before=2`, 'GET', undefined, paired.credential)).status, 400)
+  assert.equal((await c.request(`/api/v1/chat?hostId=host&hostId=host&sessionId=${SESSION}`, 'GET', undefined, paired.credential)).status, 400)
+  assert.equal((await c.request(`/api/v1/chat?hostId=host&sessionId=${SESSION}&limit=0`, 'GET', undefined, paired.credential)).status, 400)
+})
+
+test('administrator override does not grant access to a foreign chat transcript', async () => {
+  const c = fixture()
+  c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/work'], operateOthers: true, role: 'admin' })
+  c.sessions([{ id: FOREIGN, agent: 'codex', mode: 'normal', ownerId: 'bob', root: '/work', state: 'running', hooksActive: true }])
+  const paired = await c.pair({ input: true })
+  const response = await c.request(`/api/v1/chat?hostId=host&sessionId=${FOREIGN}`, 'GET', undefined, paired.credential)
+  assert.equal(response.status, 403)
+  assert.notEqual(c.calls.at(-1).path, `/api/sessions/${FOREIGN}/chat`)
 })
 
 test('multi-project device authorization checks the host once per validation', async () => {
@@ -327,6 +361,54 @@ test('output is sequenced, allowlisted and backpressure closes slow consumers', 
   client.bufferedAmount = 1024 * 1024 + 1
   emit({ type: 'output', seq: 7, data: 'ZA==' })
   assert.equal(client.ended, true)
+})
+
+test('chat streams attach at fresh session sequence and ignore output before queue accounting', async () => {
+  const c = fixture(), paired = await c.pair()
+  const info = { id: SESSION, agent: 'claude', mode: 'normal', ownerId: 'alice', root: '/work', state: 'running', seq: 9000 }
+  c.sessions([info])
+  const connection = c.gateway.deps.connection('host'), attach = connection.attach
+  let pauses = 0
+  connection.pauseStream = () => pauses++
+  connection.attach = async (id, sessionId, from, emit) => {
+    await attach(id, sessionId, from, emit)
+    emit({ type: 'output', seq: 9001, data: 'x'.repeat(2 * 1024 * 1024) })
+    for (let seq = 9002; seq < 14002; seq++) emit({ type: 'output', seq, data: 'aGk=' })
+    emit({ type: 'state', info })
+  }
+  const client = await c.socket(paired.credential, SESSION, 1, '&mode=chat')
+  assert.ok(client)
+  assert.equal([...c.streams.values()][0].from, 9000, 'chat ignores the stale caller replay cursor')
+  assert.equal(client.ended, false, 'ignored replay exceeds both byte and frame queue limits without closing chat')
+  assert.equal(pauses, 0, 'discarded output never pauses upstream')
+  assert.equal(client.frames.filter(frame => frame.type === 'state').length, 1)
+  assert.equal(client.frames.filter(frame => frame.type === 'ready').length, 1)
+  assert.equal(client.frames.some(frame => frame.type === 'output'), false)
+  const emit = [...c.streams.values()][0].emit
+  emit({ type: 'disconnected' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(client.frames.at(-1).type, 'disconnected')
+  client.bufferedAmount = 1024 * 1024 + 1
+  emit({ type: 'output', seq: 14002, data: 'aGk=' })
+  assert.equal(client.ended, false, 'output stays ignored even while transport is backpressured')
+  emit({ type: 'state', info })
+  assert.equal(client.ended, true, 'state retains the existing slow-consumer protection')
+})
+
+test('stream modes fail closed while explicit terminal preserves the caller cursor and output', async () => {
+  const c = fixture(), paired = await c.pair()
+  for (const mode of ['other', '', 'chat&mode=terminal']) {
+    assert.equal(await c.socket(paired.credential, SESSION, 1, '&mode=' + mode), null)
+  }
+  c.sessions([{ id: SESSION, agent: 'claude', mode: 'normal', ownerId: 'alice', root: '/work', state: 'running', seq: -1 }])
+  assert.equal(await c.socket(paired.credential, SESSION, 1, '&mode=chat'), null, 'invalid fresh cursor cannot silently replay from zero')
+  const client = await c.socket(paired.credential, SESSION, 1, '&mode=terminal')
+  assert.ok(client)
+  const stream = [...c.streams.values()][0]
+  assert.equal(stream.from, 1)
+  stream.emit({ type: 'output', seq: 2, data: 'aGk=' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(client.frames.at(-1), { type: 'output', seq: 2, data: 'aGk=' })
 })
 
 test('terminal replay bursts pause upstream and render without disconnecting or dropping frames', async () => {
@@ -617,7 +699,7 @@ test('bootstrap advertises gateway support separately from per-device grants', a
     notices: true,
     quotas: true,
     pushNotifications: false,
-    structuredChat: false,
+    structuredChat: true,
     approvalActions: false,
     fileBrowser: false,
     gitStatus: false,

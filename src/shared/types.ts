@@ -123,7 +123,7 @@ export interface RemoteEvent {
   id: string
   seq: number
   sessionId: string
-  kind: 'turn-complete' | 'process-exited'
+  kind: 'turn-complete' | 'process-exited' | 'chat-history-limit'
   requiresAttention?: boolean
   at: string
   /** Opt-in, transient text. Never persisted or forwarded to renderer/mobile. */

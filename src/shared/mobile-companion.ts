@@ -4,7 +4,7 @@ export type MobileRemoteProvider = 'tailscale' | 'pangolin'
 export interface MobileStartInput { address: string; publicOrigin?: string; remoteProvider?: MobileRemoteProvider; loopbackPort?: number; relayUrl?: string }
 export interface MobileEndpoint { kind: 'lan-pinned' | 'remote-public' | 'relay'; url: string; certSHA256?: string; provider?: 'pangolin'; proxyAuthRequired?: true; relayUrl?: string; relayRoute?: string }
 export interface MobileCapabilities { input: boolean; create: boolean; close: boolean; quotas: boolean }
-export type MobileErrorCode = 'INVALID_ORIGIN' | 'GATEWAY_UNAVAILABLE' | 'HOST_UNAVAILABLE' | 'DEVICE_REJECTED' | 'GRANT_REQUIRED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'REQUEST_CONFLICT'
+export type MobileErrorCode = 'INVALID_ORIGIN' | 'GATEWAY_UNAVAILABLE' | 'HOST_UNAVAILABLE' | 'DEVICE_REJECTED' | 'GRANT_REQUIRED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'REQUEST_CONFLICT' | 'STRUCTURED_CHAT_UNAVAILABLE'
 export interface MobileErrorEnvelope { code: MobileErrorCode; error: string }
 /** Gateway implementation support, independent from each device's authorization grants. */
 export interface MobileSupportedFeatures {
@@ -32,7 +32,7 @@ export const MOBILE_SUPPORTED_FEATURES: MobileSupportedFeatures = {
   notices: true,
   quotas: true,
   pushNotifications: false,
-  structuredChat: false,
+  structuredChat: true,
   approvalActions: false,
   fileBrowser: false,
   gitStatus: false,
@@ -54,15 +54,17 @@ export interface MobileDeviceChallenge { version: 2; gatewayId: string; deviceId
 export type MobileProjectAvailability = 'available' | 'server-disconnected' | 'authorization-required'
 export interface MobileProject { id: string; hostId: string; name: string; availability?: MobileProjectAvailability }
 export interface MobileHost { id: string; name: string; status: ConnectionStatus }
-export interface MobileSession extends Omit<SessionInfo, 'root' | 'promptCache'> { projectId: string; name?: string; canOperate: boolean }
-export interface MobileNotice { id: string; hostId: string; sessionId: string; kind: 'turn-complete' | 'process-exited'; at: string; requiresAttention?: boolean }
+export interface MobileSession extends Omit<SessionInfo, 'root' | 'promptCache'> { projectId: string; name?: string; canOperate: boolean; chatAvailable?: boolean }
+export interface MobileChatMessage { id: string; sessionId: string; seq: number; role: 'user' | 'assistant'; content: string; truncated?: boolean; createdAt: string }
+export interface MobileChatPage { messages: MobileChatMessage[]; hasMore: boolean; nextBefore: number }
+export interface MobileNotice { id: string; hostId: string; sessionId: string; kind: 'turn-complete' | 'process-exited' | 'chat-history-limit'; at: string; requiresAttention?: boolean }
 export interface MobileQuota { id: string; label: string; provider: 'claude' | 'codex'; state: string; windows: { label: string; usedPercent: number | null; resetsAt: string | null }[]; sampledAt: string | null }
 export interface MobileBootstrap { version: 1; device: MobileDevice; hosts: MobileHost[]; projects: MobileProject[]; actor: { label: string }; devices: MobileDevice[]; supportedFeatures?: MobileSupportedFeatures }
 
 /** Native API: POST pair {invitationCode,deviceName}; Bearer required thereafter.
- * GET bootstrap; GET sessions?hostId=&projectId=; POST sessions {hostId,projectId,agent:'claude'|'codex'};
+ * GET bootstrap; GET sessions?hostId=&projectId=; GET chat?hostId=&sessionId=&after|before=&limit= returns the durable transcript captured by managed Claude/Codex hooks; POST sessions {hostId,projectId,agent:'claude'|'codex'};
  * POST wake/close {hostId,sessionId}; POST input {streamId,data:base64}; POST resize {streamId,cols,rows};
- * GET notices; GET quotas; WSS stream?hostId=&sessionId=&from= (Authorization header, never query token).
+ * GET notices; GET quotas; GET chat?hostId=&sessionId=&after|before=&limit=; WSS stream?hostId=&sessionId=&from= (Authorization header, never query token).
  * Key-based v2 mutations require a UUID requestId in the JSON body (also input/resize WS frames).
  * Deduplication is scoped to the authenticated short-credential context, retained through expiry + skew,
  * not durable exactly-once across restart. Unknown outcomes are tombstoned, never automatically retried.

@@ -64,7 +64,7 @@ test('native gateway translates only bounded known Crow error codes without chan
   assert.match(errors, /fromResponse\(int status, ResponseBody body, String crowMarker\)/)
   assert.match(errors, /if \(!"1"\.equals\(crowMarker\)\) return fallback/)
   assert.match(errors, /MAX_ERROR_BODY_BYTES\s*=\s*8192/)
-  for (const code of ['INVALID_ORIGIN', 'GATEWAY_UNAVAILABLE', 'HOST_UNAVAILABLE', 'DEVICE_REJECTED', 'GRANT_REQUIRED', 'RATE_LIMITED', 'NOT_FOUND', 'INVALID_REQUEST', 'REQUEST_CONFLICT']) assert.match(errors, new RegExp(`case "${code}"`))
+  for (const code of ['INVALID_ORIGIN', 'GATEWAY_UNAVAILABLE', 'HOST_UNAVAILABLE', 'DEVICE_REJECTED', 'GRANT_REQUIRED', 'RATE_LIMITED', 'NOT_FOUND', 'INVALID_REQUEST', 'REQUEST_CONFLICT', 'STRUCTURED_CHAT_UNAVAILABLE']) assert.match(errors, new RegExp(`case "${code}"`))
   assert.match(errors, /Crow rechazó la acción \(HTTP /)
   assert.match(errors, /if \(body == null\) return fallback/)
   assert.match(errors, /if \(!\(codeValue instanceof String\)\) return fallback/)

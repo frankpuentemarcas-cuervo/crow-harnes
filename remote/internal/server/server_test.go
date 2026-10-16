@@ -60,15 +60,21 @@ func TestCodexCommandTracksSubagentLifecycle(t *testing.T) {
 	}
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"notify=[\"/tmp/crow hook\",\"turn-complete\"]",
+		"hooks.UserPromptSubmit=",
+		"hooks.Stop=",
 		"hooks.SubagentStart=",
 		"hooks.SubagentStop=",
+		"'/tmp/crow hook' user-prompt",
+		"'/tmp/crow hook' turn-complete",
 		"'/tmp/crow hook' subagent-start",
 		"'/tmp/crow hook' subagent-stop",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Codex args %q missing %q", joined, want)
 		}
+	}
+	if strings.Contains(joined, "hooks.AfterAgent=") || strings.Contains(joined, "notify=") {
+		t.Fatalf("Codex args %q use unsupported completion hook configuration", joined)
 	}
 }
 

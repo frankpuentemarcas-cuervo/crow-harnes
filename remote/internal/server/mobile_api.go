@@ -18,18 +18,19 @@ import (
 )
 
 type mobileHostSession struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"projectId"`
-	Agent      string    `json:"agent"`
-	Mode       string    `json:"mode"`
-	State      string    `json:"state"`
-	AgentState string    `json:"agentState,omitempty"`
-	StartedAt  time.Time `json:"startedAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	Seq        uint64    `json:"seq"`
-	ExitCode   *int      `json:"exitCode,omitempty"`
-	ReadOnly   bool      `json:"readOnly"`
-	CanOperate bool      `json:"canOperate"`
+	ID            string    `json:"id"`
+	ProjectID     string    `json:"projectId"`
+	Agent         string    `json:"agent"`
+	Mode          string    `json:"mode"`
+	State         string    `json:"state"`
+	AgentState    string    `json:"agentState,omitempty"`
+	StartedAt     time.Time `json:"startedAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	Seq           uint64    `json:"seq"`
+	ExitCode      *int      `json:"exitCode,omitempty"`
+	ReadOnly      bool      `json:"readOnly"`
+	CanOperate    bool      `json:"canOperate"`
+	ChatAvailable bool      `json:"chatAvailable"`
 }
 
 func mobileAPIError(w http.ResponseWriter, status int, code, detail string) {
@@ -139,6 +140,7 @@ func (a *App) mobileHandler() http.Handler {
 	mux.HandleFunc("POST /api/v2/device-revoke", a.mobileRevoke)
 	mux.HandleFunc("GET /api/v1/bootstrap", a.mobileBootstrap)
 	mux.HandleFunc("GET /api/v1/sessions", a.mobileSessions)
+	mux.HandleFunc("GET /api/v1/chat", a.mobileChatHistory)
 	mux.HandleFunc("GET /api/v1/notices", func(w http.ResponseWriter, _ *http.Request) { jsonResponse(w, 200, []any{}) })
 	mux.HandleFunc("GET /api/v1/quotas", func(w http.ResponseWriter, _ *http.Request) {
 		mobileAPIError(w, 403, "GRANT_REQUIRED", "Cuotas no disponibles en modo host.")
@@ -340,7 +342,7 @@ func (a *App) mobileRevoke(w http.ResponseWriter, r *http.Request) {
 func (a *App) mobileAllowedSession(device mobileHostDevice, owner *AccessPrincipal, info SessionInfo) (mobileHostSession, bool) {
 	for _, project := range device.Projects {
 		if info.Root == project.Root && a.permittedRoot(owner, info.Root) && a.visible(owner, info) {
-			return mobileHostSession{ID: info.ID, ProjectID: project.ID, Agent: info.Agent, Mode: info.Mode, State: info.State, AgentState: info.AgentState, StartedAt: info.StartedAt, UpdatedAt: info.UpdatedAt, Seq: info.Seq, ExitCode: info.ExitCode, ReadOnly: info.ReadOnly || !a.operable(owner, info), CanOperate: !info.ReadOnly && a.operable(owner, info)}, true
+			return mobileHostSession{ID: info.ID, ProjectID: project.ID, Agent: info.Agent, Mode: info.Mode, State: info.State, AgentState: info.AgentState, StartedAt: info.StartedAt, UpdatedAt: info.UpdatedAt, Seq: info.Seq, ExitCode: info.ExitCode, ReadOnly: info.ReadOnly || !a.operable(owner, info), CanOperate: !info.ReadOnly && a.operable(owner, info), ChatAvailable: info.OwnerID == owner.ID && supportsChatHistory(info)}, true
 		}
 	}
 	return mobileHostSession{}, false
@@ -359,7 +361,7 @@ func (a *App) mobileBootstrap(w http.ResponseWriter, r *http.Request) {
 	for _, project := range device.Projects {
 		projects = append(projects, map[string]any{"id": project.ID, "hostId": hostID, "name": project.Name, "availability": "available"})
 	}
-	jsonResponse(w, 200, map[string]any{"version": 1, "device": a.mobileDevicePublic(device), "hosts": []any{map[string]any{"id": hostID, "name": hostName, "status": "connected"}}, "projects": projects, "actor": map[string]string{"label": owner.Label}, "devices": []any{a.mobileDevicePublic(device)}, "supportedFeatures": map[string]bool{"sessionList": true, "terminalStream": true, "terminalInput": true, "sessionCreate": false, "sessionWake": false, "sessionClose": false, "notices": false, "quotas": false, "pushNotifications": false, "structuredChat": false, "approvalActions": false, "fileBrowser": false, "gitStatus": false}})
+	jsonResponse(w, 200, map[string]any{"version": 1, "device": a.mobileDevicePublic(device), "hosts": []any{map[string]any{"id": hostID, "name": hostName, "status": "connected"}}, "projects": projects, "actor": map[string]string{"label": owner.Label}, "devices": []any{a.mobileDevicePublic(device)}, "supportedFeatures": map[string]bool{"sessionList": true, "terminalStream": true, "terminalInput": true, "sessionCreate": false, "sessionWake": false, "sessionClose": false, "notices": false, "quotas": false, "pushNotifications": false, "structuredChat": true, "approvalActions": false, "fileBrowser": false, "gitStatus": false}})
 }
 
 func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
@@ -385,9 +387,52 @@ func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, result)
 }
 
+func (a *App) mobileChatHistory(w http.ResponseWriter, r *http.Request) {
+	device, owner, ok := a.mobileAuthenticate(r)
+	if !ok {
+		mobileAPIError(w, 401, "DEVICE_REJECTED", "Vínculo no disponible.")
+		return
+	}
+	a.mobile.mu.Lock()
+	hostID := a.mobile.file.HostID
+	a.mobile.mu.Unlock()
+	sessionID := r.URL.Query().Get("sessionId")
+	if r.URL.Query().Get("hostId") != hostID || !validChatSessionID(sessionID) {
+		mobileAPIError(w, 403, "GRANT_REQUIRED", "Terminal no autorizada.")
+		return
+	}
+	s := a.session(sessionID)
+	if s == nil {
+		mobileAPIError(w, 404, "NOT_FOUND", "Terminal no encontrada.")
+		return
+	}
+	info := s.snapshot()
+	if _, allowed := a.mobileAllowedSession(device, owner, info); !allowed {
+		mobileAPIError(w, 404, "NOT_FOUND", "Terminal no encontrada.")
+		return
+	}
+	if !supportsChatHistory(info) {
+		mobileAPIError(w, http.StatusNotImplemented, "STRUCTURED_CHAT_UNAVAILABLE", "Esta sesión todavía no ofrece historial estructurado.")
+		return
+	}
+	if info.OwnerID != owner.ID {
+		mobileAPIError(w, 404, "NOT_FOUND", "Terminal no encontrada.")
+		return
+	}
+	a.chatPage(w, r, sessionID)
+}
+
 var mobileStreamUpgrader = websocket.Upgrader{ReadBufferSize: 16 * 1024, WriteBufferSize: 16 * 1024, CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "https://127.0.0.1:"+mobileHostPort }}
 
 func (a *App) mobileStream(w http.ResponseWriter, r *http.Request) {
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "terminal"
+	}
+	if mode != "terminal" && mode != "chat" {
+		mobileAPIError(w, 400, "INVALID_REQUEST", "Modo de transmisión inválido.")
+		return
+	}
 	device, owner, ok := a.mobileAuthenticate(r)
 	if !ok {
 		mobileAPIError(w, 401, "DEVICE_REJECTED", "Vínculo no disponible.")
@@ -409,6 +454,10 @@ func (a *App) mobileStream(w http.ResponseWriter, r *http.Request) {
 	info, allowed := a.mobileAllowedSession(device, owner, s.snapshot())
 	if !allowed {
 		mobileAPIError(w, 403, "GRANT_REQUIRED", "Terminal no autorizada.")
+		return
+	}
+	if mode == "chat" && !info.ChatAvailable {
+		mobileAPIError(w, 403, "CHAT_UNAVAILABLE", "El historial de chat no está disponible para esta terminal.")
 		return
 	}
 	from, err := strconv.ParseUint(r.URL.Query().Get("from"), 10, 64)
@@ -433,8 +482,25 @@ func (a *App) mobileStream(w http.ResponseWriter, r *http.Request) {
 	a.mobile.streams[streamID] = mobileHostStream{DeviceID: device.ID, SessionID: id, Connection: conn}
 	a.mobile.mu.Unlock()
 	defer func() { a.mobile.mu.Lock(); delete(a.mobile.streams, streamID); a.mobile.mu.Unlock() }()
-	ch, snapshot := s.subscribe()
+	ch, sessionInfo := s.subscribeSnapshot()
 	defer s.unsubscribe(ch)
+	// Authorize and publish the same snapshot captured atomically with the
+	// subscription; subsequent changes are queued on ch rather than lost.
+	current, currentOwner, valid := a.mobileCurrentDevice(device.ID)
+	if !valid {
+		return
+	}
+	info, allowed = a.mobileAllowedSession(current, currentOwner, sessionInfo)
+	if !allowed || (mode == "chat" && !info.ChatAvailable) {
+		return
+	}
+	snapshot := sessionInfo.Seq
+	if mode == "chat" {
+		// Chat clients render the structured transcript, not terminal history.
+		// Advancing the cursor to the subscription snapshot also avoids replaying
+		// the already-existing terminal log.
+		from = snapshot
+	}
 	if conn.WriteJSON(map[string]any{"type": "ready", "streamId": streamID}) != nil {
 		return
 	}
@@ -447,6 +513,9 @@ func (a *App) mobileStream(w http.ResponseWriter, r *http.Request) {
 			return errors.New("session revoked")
 		}
 		if frame.Type == "output" {
+			if mode == "chat" {
+				return nil
+			}
 			return conn.WriteJSON(map[string]any{"type": "output", "seq": frame.Seq, "data": frame.Data})
 		}
 		if frame.Type == "state" && frame.Info != nil {
@@ -571,6 +640,9 @@ func (a *App) mobileMutation(w http.ResponseWriter, r *http.Request, resize bool
 			err = a.bridge.WithManualInput(stream.SessionID, func() error { return s.write(input) })
 		} else {
 			err = s.write(input)
+		}
+		if err == nil {
+			a.markCodexInputWorking(stream.SessionID, input)
 		}
 	}
 	if err != nil {

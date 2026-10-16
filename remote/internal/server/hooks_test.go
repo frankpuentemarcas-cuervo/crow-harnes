@@ -90,6 +90,7 @@ func TestManagedShellWrapsClaudeWithoutEditingUserSettings(t *testing.T) {
 		"crow_entry/claude",
 		"\"$crow_claude\" --settings",
 		"UserPromptSubmit",
+		"user-prompt",
 		"SubagentStart",
 		"turn-complete",
 		"\"$@\"",

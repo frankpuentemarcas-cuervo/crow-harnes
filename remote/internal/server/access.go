@@ -148,7 +148,15 @@ func (a *App) sessionPermission(r *http.Request, id string, write bool) bool {
 	}
 	s := a.session(id)
 	if s == nil {
-		return false
+		marker, found, err := a.readSessionDeleteMarker(id)
+		if err != nil || !found {
+			return false
+		}
+		info := SessionInfo{OwnerID: marker.OwnerID}
+		if write {
+			return a.operable(p, info)
+		}
+		return a.visible(p, info)
 	}
 	info := s.snapshot()
 	if write {

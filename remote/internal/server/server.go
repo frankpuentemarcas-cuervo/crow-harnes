@@ -25,10 +25,12 @@ type App struct {
 	access        accessState
 	accessAuditMu sync.Mutex
 	dispatchMu    sync.Mutex
+	deleteMu      sync.Mutex
 	mu            sync.RWMutex
 	saveMu        sync.Mutex
 	fileMu        sync.Mutex
 	metricsMu     sync.Mutex
+	chatMu        sync.Mutex
 	lastCPU       cpuSample
 	dir           string
 	port          string
@@ -42,6 +44,7 @@ type App struct {
 	browsers      map[string]*browser
 	bridge        *bridge.Store
 	mobile        *mobileHostState
+	chat          *chatStore
 }
 
 func randomID() (string, error) {
@@ -129,6 +132,7 @@ func Run() error {
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/wake", a.handleWakeSession)
 	mux.HandleFunc("POST /api/sessions/{id}/cache", a.handlePromptCache)
+	mux.HandleFunc("GET /api/sessions/{id}/chat", a.handleChatHistory)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)
@@ -315,10 +319,14 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 				data, err := decodeInput(msg.Data)
 				if err == nil {
 					_, _ = a.wakeSession(id)
+					var writeErr error
 					if a.bridge != nil {
-						_ = a.bridge.WithManualInput(id, func() error { return s.write(data) })
+						writeErr = a.bridge.WithManualInput(id, func() error { return s.write(data) })
 					} else {
-						_ = s.write(data)
+						writeErr = s.write(data)
+					}
+					if writeErr == nil {
+						a.markCodexInputWorking(id, data)
 					}
 				}
 			case "resize":

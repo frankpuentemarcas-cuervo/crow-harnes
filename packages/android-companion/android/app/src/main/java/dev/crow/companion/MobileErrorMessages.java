@@ -47,6 +47,7 @@ final class MobileErrorMessages {
             case "NOT_FOUND": return "El recurso ya no está disponible. Actualizá la vista antes de continuar.";
             case "INVALID_REQUEST": return "Crow no aceptó la solicitud. Verificá los datos y el estado antes de repetirla.";
             case "REQUEST_CONFLICT": return "La solicitud entra en conflicto con el estado actual. Actualizá y verificá el resultado antes de intentar de nuevo.";
+            case "STRUCTURED_CHAT_UNAVAILABLE": return "El historial de chat no está disponible para esta sesión. Podés seguir usando la terminal.";
             default: return "Crow rechazó la acción (HTTP " + status + "). Verificá el estado antes de repetirla.";
         }
     }

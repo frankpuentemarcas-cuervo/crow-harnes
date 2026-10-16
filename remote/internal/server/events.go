@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
@@ -177,14 +179,22 @@ func boundedEventMessage(message string) (string, bool) {
 }
 
 func (a *App) addEvent(sessionID, kind string, attention bool, messages ...eventMessage) {
-	if kind == "process-exited" && a.bridge != nil {
-		_ = a.bridge.Interrupt(sessionID)
-	}
 	id, err := randomID()
 	if err != nil {
 		return
 	}
 	a.mu.Lock()
+	a.addEventLocked(id, sessionID, kind, attention, messages...)
+	a.mu.Unlock()
+	if kind == "process-exited" && a.bridge != nil {
+		_ = a.bridge.Interrupt(sessionID)
+	}
+}
+
+// addEventLocked appends an event while the caller holds App.mu. The caller
+// must acquire App.mu before any session mutex to preserve the event-reader
+// lock order (App.mu -> session.mu).
+func (a *App) addEventLocked(id, sessionID, kind string, attention bool, messages ...eventMessage) {
 	seq := uint64(1)
 	if len(a.events) > 0 {
 		seq = a.events[len(a.events)-1].Seq + 1
@@ -216,7 +226,55 @@ func (a *App) addEvent(sessionID, kind string, attention bool, messages ...event
 		_, _ = f.Write(append(encoded, '\n'))
 		_ = f.Close()
 	}
+}
+
+var errChatSessionDeleting = errors.New("chat session is being deleted")
+
+// captureChatMessage serializes transcript append with session deletion. If
+// deletion has begun, no late hook may recreate the file after it is removed.
+func (a *App) captureChatMessage(s *session, role, content, sourceID string, truncated bool) (ChatMessage, error) {
+	if s == nil {
+		return ChatMessage{}, errors.New("chat session unavailable")
+	}
+	s.mu.Lock()
+	if s.deleting {
+		s.mu.Unlock()
+		return ChatMessage{}, errChatSessionDeleting
+	}
+	sessionID := s.info.ID
+	store := a.chatHistory()
+	message, err := store.appendWithTruncation(sessionID, role, content, sourceID, truncated)
+	notifyLimit := errors.Is(err, errChatStoreLimit) && store.markLimitNotified(sessionID)
+	s.mu.Unlock()
+	if notifyLimit {
+		a.addEventIfSessionActive(s, sessionID, "chat-history-limit", true, eventMessage{text: "El historial del chat alcanzó su límite. Las terminales siguen funcionando, pero las respuestas nuevas ya no se guardan en Chat."})
+	}
+	return message, err
+}
+
+func (a *App) addEventIfSessionActive(s *session, sessionID, kind string, attention bool, messages ...eventMessage) {
+	if s == nil {
+		return
+	}
+	id, err := randomID()
+	if err != nil {
+		return
+	}
+	// Event listing holds App.mu while taking a session snapshot. Use the same
+	// lock order here so a concurrent hook and GET /api/events cannot deadlock.
+	a.mu.Lock()
+	s.mu.Lock()
+	if s.deleting {
+		s.mu.Unlock()
+		a.mu.Unlock()
+		return
+	}
+	a.addEventLocked(id, sessionID, kind, attention, messages...)
+	s.mu.Unlock()
 	a.mu.Unlock()
+	if kind == "process-exited" && a.bridge != nil {
+		_ = a.bridge.Interrupt(sessionID)
+	}
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -250,21 +308,34 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		SessionID        string `json:"sessionId"`
 		Kind             string `json:"kind"`
 		Message          string `json:"message"`
+		ChatMessage      string `json:"chatMessage"`
+		UserPrompt       string `json:"userPrompt"`
+		SourceID         string `json:"sourceId"`
+		ProviderThreadID string `json:"providerThreadId"`
 		AgentID          string `json:"agentId"`
 		Agent            string `json:"agent"`
 		MessageTruncated bool   `json:"messageTruncated"`
+		ChatTruncated    bool   `json:"chatTruncated"`
+		PromptTruncated  bool   `json:"promptTruncated"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
 	}
 	s := a.session(body.SessionID)
-	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "subagent-start" && body.Kind != "subagent-stop" && body.Kind != "agent-start" && body.Kind != "agent-stop") {
+	if s == nil || (body.Kind != "turn-complete" && body.Kind != "working" && body.Kind != "user-prompt" && body.Kind != "subagent-start" && body.Kind != "subagent-stop" && body.Kind != "agent-start" && body.Kind != "agent-stop") {
 		http.Error(w, "invalid event", http.StatusBadRequest)
 		return
 	}
 	if (body.Kind == "agent-start" || body.Kind == "agent-stop") && body.Agent != "claude" {
 		http.Error(w, "invalid managed shell agent", http.StatusBadRequest)
 		return
+	}
+	if body.Kind == "user-prompt" {
+		info := s.snapshot()
+		if (body.Agent != "claude" && body.Agent != "codex") || body.Agent != info.Agent {
+			http.Error(w, "invalid managed agent prompt", http.StatusBadRequest)
+			return
+		}
 	}
 	if (body.Kind == "subagent-start" || body.Kind == "subagent-stop") && strings.TrimSpace(body.AgentID) == "" {
 		http.Error(w, "missing subagent id", http.StatusBadRequest)
@@ -303,11 +374,81 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		_ = a.saveSessions()
 	} else if body.Kind == "working" {
 		a.markAgentState(body.SessionID, "working")
+	} else if body.Kind == "user-prompt" {
+		sourceID := body.SourceID
+		if sourceID == "" {
+			generatedID, err := randomID()
+			if err != nil {
+				http.Error(w, "chat event unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			sourceID = generatedID
+		}
+		content := body.ChatMessage
+		if content == "" {
+			content = body.Message
+		}
+		if content != "" {
+			kind := body.Kind
+			if body.Agent == "codex" {
+				kind = "codex-user"
+			}
+			if _, err := a.captureChatMessage(s, "user", content, chatSourceID(body.SessionID, kind, sourceID), body.ChatTruncated); err != nil {
+				log.Printf("crow chat capture failed for session %s: %v", body.SessionID, err)
+			}
+		}
+		a.markAgentState(body.SessionID, "working")
 	} else if body.Kind == "subagent-start" {
 		a.markSubagentState(body.SessionID, body.AgentID, true)
 	} else if body.Kind == "subagent-stop" {
 		a.markSubagentState(body.SessionID, body.AgentID, false)
 	} else {
+		info := s.snapshot()
+		chatSourceIDForTurn := func(kind string) string {
+			if info.Agent == "codex" && body.SourceID != "" {
+				if kind == "codex-user" {
+					return chatSourceID(body.SessionID, kind, body.SourceID)
+				}
+				if !validProviderThreadID(body.ProviderThreadID) {
+					return ""
+				}
+				return chatSourceID(body.SessionID, kind, body.ProviderThreadID+"\x00"+body.SourceID)
+			}
+			sourceID := body.SourceID
+			if sourceID == "" {
+				generatedID, err := randomID()
+				if err != nil {
+					return ""
+				}
+				sourceID = generatedID
+			}
+			return chatSourceID(body.SessionID, kind, sourceID)
+		}
+		chatMessage := body.ChatMessage
+		if chatMessage == "" {
+			chatMessage = body.Message
+		}
+		if info.Agent == "claude" && chatMessage != "" {
+			sourceID := chatSourceIDForTurn(body.Kind)
+			if sourceID != "" {
+				if _, err := a.captureChatMessage(s, "assistant", chatMessage, sourceID, body.ChatTruncated); err != nil {
+					log.Printf("crow chat capture failed for session %s: %v", body.SessionID, err)
+				}
+			}
+		} else if info.Agent == "codex" && body.Agent == "codex" && body.SourceID != "" {
+			if body.UserPrompt != "" {
+				if sourceID := chatSourceIDForTurn("codex-user"); sourceID != "" {
+					if _, err := a.captureChatMessage(s, "user", body.UserPrompt, sourceID, body.PromptTruncated); err != nil {
+						log.Printf("crow chat capture failed for session %s: %v", body.SessionID, err)
+					}
+				}
+			}
+			if chatMessage != "" {
+				if _, err := a.captureChatMessage(s, "assistant", chatMessage, chatSourceIDForTurn("codex-assistant"), body.ChatTruncated); err != nil {
+					log.Printf("crow chat capture failed for session %s: %v", body.SessionID, err)
+				}
+			}
+		}
 		a.markAgentState(body.SessionID, "completed")
 		if a.bridge != nil {
 			if err := a.bridge.Complete(body.SessionID, body.Message); err != nil {
@@ -316,29 +457,29 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		text, truncated := boundedEventMessage(body.Message)
-		a.addEvent(body.SessionID, body.Kind, requiresAttention(body.Message), eventMessage{text: text, truncated: truncated || body.MessageTruncated})
+		a.addEventIfSessionActive(s, body.SessionID, body.Kind, requiresAttention(body.Message), eventMessage{text: text, truncated: truncated || body.MessageTruncated})
 	}
 	jsonResponse(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
-const maxHookPayload = 128 * 1024
+const maxHookPayload = 4 * 1024 * 1024
 
-// RunHookNotify is invoked by managed agent hooks. Claude writes the hook JSON
-// to stdin; Codex notify passes its JSON payload as a command argument.
+// RunHookNotify is invoked by managed agent hooks. Hook payloads are read from
+// stdin; an optional argument form is retained for diagnostics.
 func RunHookNotify(args []string) error {
-	if len(args) == 0 || (args[0] != "working" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop" && args[0] != "agent-start" && args[0] != "agent-stop") {
-		return errors.New("usage: crowd hook-notify <working|turn-complete|subagent-start|subagent-stop|agent-start|agent-stop> [agent-payload]")
+	if len(args) == 0 || (args[0] != "working" && args[0] != "user-prompt" && args[0] != "turn-complete" && args[0] != "subagent-start" && args[0] != "subagent-stop" && args[0] != "agent-start" && args[0] != "agent-stop") {
+		return errors.New("usage: crowd hook-notify <working|user-prompt|turn-complete|subagent-start|subagent-stop|agent-start|agent-stop> [agent-payload]")
 	}
 	kind := args[0]
 	if os.Getenv("CROW_SESSION_ID") == "" {
 		return nil
 	}
 
-	var message, agentID string
+	var message, userPrompt, agentID, sourceID, providerThreadID string
 	var messageTruncated bool
-	if kind == "turn-complete" || kind == "subagent-start" || kind == "subagent-stop" {
+	if kind == "user-prompt" || kind == "turn-complete" || kind == "subagent-start" || kind == "subagent-stop" {
 		var payload []byte
-		if kind == "turn-complete" {
+		if kind == "turn-complete" || kind == "user-prompt" {
 			for _, arg := range args[1:] {
 				if json.Valid([]byte(arg)) {
 					payload = []byte(arg)
@@ -355,11 +496,33 @@ func RunHookNotify(args []string) error {
 		}
 		if kind == "turn-complete" {
 			message = hookAssistantMessage(payload)
-			message, messageTruncated = boundedEventMessage(message)
+			sourceID = hookEventID(payload)
+			if os.Getenv("CROW_AGENT") == "codex" {
+				userPrompt = hookCodexUserPrompt(payload)
+				providerThreadID = hookThreadID(payload)
+			}
+		} else if kind == "user-prompt" {
+			message = hookUserPrompt(payload)
+			sourceID = hookEventID(payload)
+			if os.Getenv("CROW_AGENT") == "codex" {
+				providerThreadID = hookThreadID(payload)
+			}
 		} else {
 			agentID = hookAgentID(payload)
 		}
 	}
+	if kind == "user-prompt" || kind == "turn-complete" {
+		if sourceID == "" {
+			var err error
+			sourceID, err = randomID()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	chatMessage, chatTruncated := boundedChatContent(message)
+	userPrompt, promptTruncated := boundedChatContent(userPrompt)
+	message, messageTruncated = boundedEventMessage(message)
 
 	baseURL := strings.TrimRight(os.Getenv("CROW_EVENT_URL"), "/")
 	parsedURL, err := url.ParseRequestURI(baseURL)
@@ -374,7 +537,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "agentId": agentID, "agent": os.Getenv("CROW_AGENT"), "messageTruncated": messageTruncated})
+	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "chatMessage": chatMessage, "userPrompt": userPrompt, "sourceId": sourceID, "providerThreadId": providerThreadID, "agentId": agentID, "agent": os.Getenv("CROW_AGENT"), "messageTruncated": messageTruncated, "chatTruncated": chatTruncated, "promptTruncated": promptTruncated})
 	if err != nil {
 		return err
 	}
@@ -404,6 +567,18 @@ func RunHookNotify(args []string) error {
 	return nil
 }
 
+func boundedChatContent(content string) (string, bool) {
+	if len(content) <= maxChatMessageBytes {
+		return content, false
+	}
+	const marker = "\n\n[Mensaje recortado por el límite del historial]"
+	maxContent := maxChatMessageBytes - len(marker)
+	for maxContent > 0 && !utf8.ValidString(content[:maxContent]) {
+		maxContent--
+	}
+	return content[:maxContent] + marker, true
+}
+
 func hookAgentID(payload []byte) string {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil {
@@ -428,4 +603,62 @@ func hookAssistantMessage(payload []byte) string {
 		}
 	}
 	return ""
+}
+
+func hookUserPrompt(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	var prompt string
+	if json.Unmarshal(fields["prompt"], &prompt) != nil {
+		return ""
+	}
+	return prompt
+}
+
+func hookEventID(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"uuid", "event_id", "eventId", "turn-id", "turn_id", "turnId"} {
+		var id string
+		if json.Unmarshal(fields[key], &id) == nil && strings.TrimSpace(id) != "" && len(id) <= 200 && !strings.ContainsAny(id, "\x00\r\n") {
+			return id
+		}
+	}
+	return ""
+}
+
+func hookCodexUserPrompt(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"input-messages", "input_messages", "inputMessages"} {
+		var messages []string
+		if json.Unmarshal(fields[key], &messages) == nil && len(messages) > 0 {
+			return messages[len(messages)-1]
+		}
+	}
+	return ""
+}
+
+func hookThreadID(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"thread-id", "thread_id", "threadId", "session-id", "session_id", "sessionId"} {
+		var id string
+		if json.Unmarshal(fields[key], &id) == nil && validProviderThreadID(id) {
+			return id
+		}
+	}
+	return ""
+}
+
+func validProviderThreadID(id string) bool {
+	return strings.TrimSpace(id) != "" && len(id) <= 200 && !strings.ContainsAny(id, "\x00\r\n/\\")
 }

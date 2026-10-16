@@ -250,6 +250,8 @@ public class CrowGatewayPlugin extends Plugin {
             String host = call.getString("hostId", ""), sessionId = call.getString("sessionId", "");
             if (!host.matches("[A-Za-z0-9._~-]{1,200}") || !sessionId.matches("[A-Za-z0-9._~-]{1,200}")) throw new IllegalArgumentException("Invalid session identity");
             long from = call.getLong("from", 0L); if (from < 0) throw new IllegalArgumentException("Invalid cursor");
+            String mode = call.getString("mode", "terminal");
+            if (!"terminal".equals(mode) && !"chat".equals(mode)) throw new IllegalArgumentException("Invalid stream mode");
             JSONObject record = record(id), profile = record.getJSONObject("profile"), endpoint = profile.getJSONObject("endpoint");
             String credential = accessCredential(id, record, g, e);
             Object raw = http(endpoint, "/api/v1/sessions?hostId=" + host, "GET", null, credential, id, record.optJSONObject("proxyAuth"));
@@ -260,7 +262,7 @@ public class CrowGatewayPlugin extends Plugin {
             if (streamGenerations.get(connectionId).get() != connectionGeneration) throw new IllegalStateException("Conexión cancelada antes de abrirse.");
             Stream stream = new Stream(connectionId, id, g, e, profile.getJSONObject("device").getJSONObject("capabilities").optBoolean("input") && session.optBoolean("canOperate") && !session.optBoolean("readOnly")); streams.put(connectionId, stream);
             String origin = EndpointPolicy.origin(endpoint);
-            HttpUrl url = HttpUrl.get(origin + "/api/v1/stream").newBuilder().addQueryParameter("hostId", host).addQueryParameter("sessionId", sessionId).addQueryParameter("from", String.valueOf(from)).build();
+            HttpUrl url = HttpUrl.get(origin + "/api/v1/stream").newBuilder().addQueryParameter("hostId", host).addQueryParameter("sessionId", sessionId).addQueryParameter("from", String.valueOf(from)).addQueryParameter("mode", mode).build();
             Request.Builder requestBuilder = new Request.Builder().url(url).header("Origin", origin).header("Authorization", "Bearer " + credential);
             PangolinAuth.headers(requestBuilder, endpoint, record.optJSONObject("proxyAuth"));
             Request request = requestBuilder.build();

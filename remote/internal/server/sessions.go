@@ -2,10 +2,12 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +38,10 @@ type session struct {
 func (s *session) snapshot() SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+func (s *session) snapshotLocked() SessionInfo {
 	info := s.info
 	if info.PromptCache != nil {
 		cache := *info.PromptCache
@@ -51,6 +57,14 @@ func (s *session) subscribe() (chan Frame, uint64) {
 	ch := make(chan Frame, 256)
 	s.subs[ch] = struct{}{}
 	return ch, s.info.Seq
+}
+
+func (s *session) subscribeSnapshot() (chan Frame, SessionInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := make(chan Frame, 256)
+	s.subs[ch] = struct{}{}
+	return ch, s.snapshotLocked()
 }
 
 func (s *session) unsubscribe(ch chan Frame) {
@@ -88,6 +102,9 @@ func (s *session) output(data []byte) {
 }
 
 func (s *session) replay(path string, from, through uint64, send func(Frame) error) error {
+	if through <= from {
+		return nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -110,15 +127,14 @@ func (s *session) replay(path string, from, through uint64, send func(Frame) err
 func (a *App) loadSessions() error {
 	path := filepath.Join(a.dir, "sessions.json")
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	var infos []SessionInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		return err
+	if err == nil {
+		if err := json.Unmarshal(data, &infos); err != nil {
+			return err
+		}
 	}
 	for _, info := range infos {
 		info.PromptCache = nil // Native reports describe a live CLI, not a persisted conversation.
@@ -144,6 +160,216 @@ func (a *App) loadSessions() error {
 			hookHash = tokenHash(strings.TrimSpace(string(token)))
 		}
 		a.sessions[info.ID] = &session{hookHash: hookHash, info: info, rootAgentState: info.AgentState, activeSubagents: make(map[string]struct{}), subs: make(map[chan Frame]struct{})}
+	}
+	return a.reconcilePendingSessionDeletes()
+}
+
+const sessionDeleteMarkerDirName = ".session-delete-pending"
+
+type sessionDeleteMarker struct {
+	Version int    `json:"version"`
+	OwnerID string `json:"ownerId"`
+}
+
+func (a *App) sessionDeleteMarkerDir() string {
+	return filepath.Join(a.dir, sessionDeleteMarkerDirName)
+}
+
+func (a *App) ensureSessionDeleteMarkerDir(create bool) error {
+	dir := a.sessionDeleteMarkerDir()
+	if create {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) && !create {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("session delete marker path is not a directory")
+	}
+	return os.Chmod(dir, 0700)
+}
+
+func (a *App) readSessionDeleteMarker(id string) (sessionDeleteMarker, bool, error) {
+	if !safeID(id) {
+		return sessionDeleteMarker{}, false, errors.New("invalid session id")
+	}
+	if err := a.ensureSessionDeleteMarkerDir(false); errors.Is(err, os.ErrNotExist) {
+		return sessionDeleteMarker{}, false, nil
+	} else if err != nil {
+		return sessionDeleteMarker{}, false, err
+	}
+	path := filepath.Join(a.sessionDeleteMarkerDir(), id)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return sessionDeleteMarker{}, false, nil
+	}
+	if err != nil {
+		return sessionDeleteMarker{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return sessionDeleteMarker{}, false, errors.New("invalid session delete marker file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sessionDeleteMarker{}, false, err
+	}
+	var marker sessionDeleteMarker
+	if err := json.Unmarshal(data, &marker); err != nil || marker.Version != 1 {
+		return sessionDeleteMarker{}, false, errors.New("invalid session delete marker contents")
+	}
+	return marker, true, nil
+}
+
+func (a *App) writeSessionDeleteMarker(id, ownerID string) error {
+	if !safeID(id) {
+		return errors.New("invalid session id")
+	}
+	if marker, found, err := a.readSessionDeleteMarker(id); err != nil {
+		return err
+	} else if found {
+		if marker.OwnerID != ownerID {
+			return errors.New("session delete marker owner mismatch")
+		}
+		return syncSessionDeleteMarkerDir(a.sessionDeleteMarkerDir())
+	}
+	if err := a.ensureSessionDeleteMarkerDir(true); err != nil {
+		return err
+	}
+	data, err := json.Marshal(sessionDeleteMarker{Version: 1, OwnerID: ownerID})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(a.sessionDeleteMarkerDir(), id)
+	tmp := path + ".tmp"
+	if info, err := os.Lstat(tmp); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("session delete marker temp path is not a regular file")
+		}
+		if err := os.Remove(tmp); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if written, err := file.Write(data); err != nil || written != len(data) {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		if err != nil {
+			return err
+		}
+		return errors.New("short write for session delete marker")
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncSessionDeleteMarkerDir(a.sessionDeleteMarkerDir())
+}
+
+func syncSessionDeleteMarkerDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil // Windows does not expose directory fsync through os.File.
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func (a *App) removeSessionDeleteMarker(id string) error {
+	if _, found, err := a.readSessionDeleteMarker(id); err != nil {
+		return err
+	} else if !found {
+		return nil
+	}
+	if err := os.Remove(filepath.Join(a.sessionDeleteMarkerDir(), id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// A stale marker is safe: startup cleanup is idempotent. If directory
+	// syncing is unsupported or fails, prefer success over a false delete error.
+	_ = syncSessionDeleteMarkerDir(a.sessionDeleteMarkerDir())
+	return nil
+}
+
+func (a *App) reconcilePendingSessionDeletes() error {
+	a.deleteMu.Lock()
+	defer a.deleteMu.Unlock()
+	if err := a.ensureSessionDeleteMarkerDir(false); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(a.sessionDeleteMarkerDir())
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasSuffix(name, ".tmp") {
+			id := strings.TrimSuffix(name, ".tmp")
+			if !safeID(id) {
+				return errors.New("invalid session delete marker temp name")
+			}
+			info, err := os.Lstat(filepath.Join(a.sessionDeleteMarkerDir(), name))
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return errors.New("invalid session delete marker temp file")
+			}
+			_ = os.Remove(filepath.Join(a.sessionDeleteMarkerDir(), name))
+			continue
+		}
+		if !safeID(name) {
+			return errors.New("invalid session delete marker name")
+		}
+		_, found, err := a.readSessionDeleteMarker(name)
+		if err != nil || !found {
+			if err != nil {
+				return err
+			}
+			return errors.New("session delete marker disappeared during startup")
+		}
+		if a.session(name) != nil {
+			// Metadata was not durably removed; keep the session and cancel intent.
+			if err := a.removeSessionDeleteMarker(name); err != nil {
+				log.Printf("crowd: could not clear uncommitted session delete marker %s: %v", name, err)
+			}
+			continue
+		}
+		if err := a.cleanupDeletedSessionFiles(name); err != nil {
+			log.Printf("crowd: cleanup pending for deleted session %s: %v", name, err)
+			continue
+		}
+		if err := a.removeSessionDeleteMarker(name); err != nil {
+			log.Printf("crowd: cleanup completed but marker remains for session %s: %v", name, err)
+		}
 	}
 	return nil
 }
@@ -228,8 +454,9 @@ func agentCommand(agent, mode, hook string, statusLine ...map[string]any) (strin
 	case "codex":
 		args := []string{}
 		if hook != "" {
-			args = append(args, "-c", fmt.Sprintf("notify=[%q,%q]", hook, "turn-complete"))
 			args = append(args,
+				"-c", codexCommandHookConfig("UserPromptSubmit", shellQuote(hook)+" user-prompt"),
+				"-c", codexCommandHookConfig("Stop", shellQuote(hook)+" turn-complete"),
 				"-c", codexCommandHookConfig("SubagentStart", shellQuote(hook)+" subagent-start"),
 				"-c", codexCommandHookConfig("SubagentStop", shellQuote(hook)+" subagent-stop"),
 			)
@@ -258,7 +485,7 @@ func firstStatusLine(statusLines []map[string]any) map[string]any {
 
 func claudeHookSettings(hook string, statusLine map[string]any) []byte {
 	config := map[string]any{"hooks": map[string]any{
-		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " working"}}}},
+		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " user-prompt"}}}},
 		"Stop":             []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " turn-complete"}}}},
 		"SubagentStart":    []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-start"}}}},
 		"SubagentStop":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(hook) + " subagent-stop"}}}},
@@ -432,8 +659,17 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "CROW_SESSION_ID="+id, "CROW_HOOK_TOKEN="+hookToken,
-		"CROW_EVENT_URL=http://127.0.0.1:"+a.port+"/api/events", "CROW_STATUSLINE_COMMAND="+originalStatusLine)
+	cmd.Env = os.Environ()
+	for _, variable := range [][2]string{
+		{"TERM", "xterm-256color"},
+		{"CROW_SESSION_ID", id},
+		{"CROW_HOOK_TOKEN", hookToken},
+		{"CROW_EVENT_URL", "http://127.0.0.1:" + a.port + "/api/events"},
+		{"CROW_STATUSLINE_COMMAND", originalStatusLine},
+		{"CROW_AGENT", agent},
+	} {
+		cmd.Env = setEnvironmentVariable(cmd.Env, variable[0], variable[1])
+	}
 	if shellAgentPath != "" {
 		cmd.Env = setEnvironmentVariable(cmd.Env, "PATH", shellAgentPath+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
@@ -516,9 +752,25 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 }
 
 func (a *App) deleteSession(id string) error {
+	a.deleteMu.Lock()
+	defer a.deleteMu.Unlock()
+	if !safeID(id) {
+		return errors.New("invalid session id")
+	}
 	s := a.session(id)
 	if s == nil {
-		return os.ErrNotExist
+		if _, found, err := a.readSessionDeleteMarker(id); err != nil {
+			return err
+		} else if !found {
+			return os.ErrNotExist
+		}
+		if err := a.cleanupDeletedSessionFiles(id); err != nil {
+			return fmt.Errorf("session cleanup is still pending: %w", err)
+		}
+		if err := a.removeSessionDeleteMarker(id); err != nil {
+			return fmt.Errorf("session files removed but cleanup marker remains: %w", err)
+		}
+		return nil
 	}
 	s.mu.Lock()
 	if s.deleting {
@@ -548,28 +800,14 @@ func (a *App) deleteSession(id string) error {
 		s.mu.Unlock()
 		return err
 	}
-	logPath := filepath.Join(a.dir, "terminal-"+id+".jsonl")
-	if err := os.Remove(logPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := a.writeSessionDeleteMarker(id, s.snapshot().OwnerID); err != nil {
 		s.mu.Lock()
 		s.deleting = false
 		s.mu.Unlock()
-		return err
+		return fmt.Errorf("could not record pending session deletion: %w", err)
 	}
-	_ = os.RemoveAll(filepath.Join(a.dir, "shell-agent-"+id))
-	_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
-	s.mu.Lock()
-	for ch := range s.subs {
-		delete(s.subs, ch)
-		close(ch)
-	}
-	s.mu.Unlock()
 	a.mu.Lock()
 	delete(a.sessions, id)
-	for _, event := range a.events {
-		if event.SessionID == id {
-			delete(a.eventMessages, event.ID)
-		}
-	}
 	a.mu.Unlock()
 	if err := a.saveSessions(); err != nil {
 		a.mu.Lock()
@@ -578,7 +816,51 @@ func (a *App) deleteSession(id string) error {
 		s.mu.Lock()
 		s.deleting = false
 		s.mu.Unlock()
+		if markerErr := a.removeSessionDeleteMarker(id); markerErr != nil {
+			return fmt.Errorf("could not persist session deletion: %v; pending marker cleanup failed: %w", err, markerErr)
+		}
 		return err
+	}
+	// The metadata removal is now durable. Only now discard streams and
+	// session-owned files, so a persistence failure can restore the visible
+	// session without silently losing its transcript or terminal log.
+	s.mu.Lock()
+	for ch := range s.subs {
+		delete(s.subs, ch)
+		close(ch)
+	}
+	s.mu.Unlock()
+	a.mu.Lock()
+	for _, event := range a.events {
+		if event.SessionID == id {
+			delete(a.eventMessages, event.ID)
+		}
+	}
+	a.mu.Unlock()
+	if err := a.cleanupDeletedSessionFiles(id); err != nil {
+		return fmt.Errorf("session removed but cleanup is pending: %w", err)
+	}
+	if err := a.removeSessionDeleteMarker(id); err != nil {
+		return fmt.Errorf("session files removed but cleanup marker remains: %w", err)
+	}
+	return nil
+}
+
+func (a *App) cleanupDeletedSessionFiles(id string) error {
+	if !safeID(id) {
+		return errors.New("invalid session id")
+	}
+	if err := a.chatHistory().remove(id); err != nil {
+		return fmt.Errorf("chat transcript cleanup failed: %w", err)
+	}
+	if err := os.Remove(filepath.Join(a.dir, "terminal-"+id+".jsonl")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("terminal log cleanup failed: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(a.dir, "shell-agent-"+id)); err != nil {
+		return fmt.Errorf("agent data cleanup failed: %w", err)
+	}
+	if err := os.Remove(filepath.Join(a.dir, "hook-"+id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hook cleanup failed: %w", err)
 	}
 	return nil
 }
@@ -618,6 +900,28 @@ func (a *App) markAgentState(id, state string) {
 		return
 	}
 	s.rootAgentState = state
+	s.updateAgentStateLocked()
+	s.lastActivity = time.Now().UTC()
+	info := s.info
+	s.broadcast(Frame{Type: "state", Info: &info})
+}
+
+// Codex exposes only a turn-complete notification, so a submitted line must
+// transition the session to working while the agent processes that turn.
+func (a *App) markCodexInputWorking(id string, input []byte) {
+	if !bytes.ContainsAny(input, "\r\n") {
+		return
+	}
+	s := a.session(id)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleting || s.info.State != "running" || !s.info.HooksActive || s.info.Agent != "codex" {
+		return
+	}
+	s.rootAgentState = "working"
 	s.updateAgentStateLocked()
 	s.lastActivity = time.Now().UTC()
 	info := s.info
