@@ -127,6 +127,13 @@ export class MobileRelayClient {
     this.socket = undefined
     if (ws) {
       ws.removeAllListeners()
+      if (ws.readyState !== WebSocket.CLOSED) {
+        // Aborting a CONNECTING ws emits an asynchronous error before close.
+        // Retain only shutdown listeners until then; retired events cannot
+        // reconnect or mutate a client that has already restarted.
+        ws.on('error', () => {})
+        ws.once('close', () => ws.removeAllListeners())
+      }
       if (ws.readyState === WebSocket.OPEN) ws.terminate()
       else if (ws.readyState === WebSocket.CONNECTING) ws.close()
     }

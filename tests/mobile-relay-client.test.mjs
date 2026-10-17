@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
 import { randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createTcpServer } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -82,6 +84,111 @@ function waitMessage(ws, predicate = () => true) {
 
 function sendControl(ws, value) { ws.send(JSON.stringify(value)) }
 function sendEnvelope(ws, id, data) { ws.send(Buffer.concat([Buffer.from('CHT1'), Buffer.from(id), data]), { binary: true, compress: false }) }
+
+for (const reconnect of [false, true]) {
+  test(`stop safely aborts a real CONNECTING WebSocket during ${reconnect ? 'reconnect' : 'initial connection'}`, () => {
+    // Isolate the real ws next-tick error: an unhandled shutdown error must crash
+    // the child, not be swallowed by a process-wide uncaughtException handler.
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+      import { strict as assert } from 'node:assert'
+      import { WebSocket } from 'ws'
+      import { MobileRelayClient } from ${JSON.stringify(new URL('../src/main/mobile-relay-client.ts', import.meta.url).href)}
+      const sockets = []
+      const client = new MobileRelayClient({
+        url: 'wss://127.0.0.1:1/v1/tunnel', routeId: 'A'.repeat(43), localPort: 1,
+        reconnectMinMs: 1, random: () => 0,
+        webSocketFactory: (url, options) => {
+          const ws = new WebSocket(url.replace(/^wss:/, 'ws:'), options)
+          sockets.push(ws)
+          if (${reconnect} && sockets.length === 2) queueMicrotask(stopConnecting)
+          return ws
+        }
+      })
+      function stopConnecting() {
+        assert.equal(sockets.at(-1).readyState, WebSocket.CONNECTING)
+        assert.equal(client.status().state, ${JSON.stringify(reconnect ? 'reconnecting' : 'connecting')})
+        client.stop()
+        client.stop()
+      }
+      client.start()
+      // Abort before any network I/O. In reconnect mode the first abort is a
+      // transport disconnect, so it schedules a genuine second connection.
+      if (${reconnect}) sockets[0].close()
+      else stopConnecting()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      assert.equal(client.status().state, 'stopped')
+      assert.equal(client.status().activeStreams, 0)
+      assert.equal(sockets.length, ${reconnect ? 2 : 1})
+      assert.ok(sockets.every(ws => ws.readyState === WebSocket.CLOSED))
+      assert.equal(sockets.at(-1).listenerCount('error'), 0)
+      assert.equal(sockets.at(-1).listenerCount('close'), 0)
+    `], { encoding: 'utf8', timeout: 5000 })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+  })
+}
+
+test('stop is idempotent and stale shutdown events cannot affect a restarted client', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: Date.now() })
+  class ControlledWebSocket extends EventEmitter {
+    readyState = WebSocket.CONNECTING
+    closes = 0
+    pings = 0
+    close() {
+      this.closes += 1
+      const connecting = this.readyState === WebSocket.CONNECTING
+      this.readyState = WebSocket.CLOSING
+      queueMicrotask(() => {
+        if (connecting) this.emit('error', new Error('WebSocket was closed before the connection was established'))
+        this.readyState = WebSocket.CLOSED
+        this.emit('close', 1006)
+      })
+    }
+    terminate() { this.close() }
+    ping() { this.pings += 1; this.emit('pong') }
+  }
+  const sockets = []
+  const client = new MobileRelayClient({
+    url: 'wss://127.0.0.1/v1/tunnel', routeId, localPort: 1,
+    heartbeatIntervalMs: 50, reconnectMinMs: 1,
+    webSocketFactory: () => {
+      const ws = new ControlledWebSocket()
+      sockets.push(ws)
+      return ws
+    }
+  })
+  t.after(() => client.stop())
+  client.start()
+  const first = sockets[0]
+  client.stop()
+  client.stop()
+  assert.equal(first.closes, 1)
+  assert.equal(client.status().state, 'stopped')
+  client.start()
+  const second = sockets[1]
+  // These events arrive from the retired transport before its close event.
+  first.emit('open')
+  first.emit('pong')
+  first.emit('message', Buffer.from('invalid late control'), false)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(first.eventNames(), [])
+  assert.equal(client.status().state, 'connecting')
+  assert.equal(client.status().reconnectAttempts, 0)
+  second.readyState = WebSocket.OPEN
+  second.emit('open')
+  t.mock.timers.tick(50)
+  assert.equal(second.pings, 1)
+  client.stop()
+  client.stop()
+  const pings = second.pings
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(150)
+  assert.equal(second.closes, 1)
+  assert.equal(second.pings, pings)
+  assert.deepEqual(second.eventNames(), [])
+  assert.equal(sockets.length, 2)
+  assert.equal(client.status().state, 'stopped')
+})
 
 test('opens a fixed local TCP stream and accepts only after connect, then routes binary data both ways', async t => {
   let tcpPeer
