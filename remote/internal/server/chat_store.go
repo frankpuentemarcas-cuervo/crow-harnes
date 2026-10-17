@@ -341,6 +341,19 @@ func (s *chatStore) page(sessionID string, after, before uint64, limit int) ([]C
 	return page, false, nil
 }
 
+func (s *chatStore) latestSequence(sessionID string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index, err := s.sessionLocked(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if len(index.messages) == 0 {
+		return 0, nil
+	}
+	return index.messages[len(index.messages)-1].Seq, nil
+}
+
 func chatSourceID(sessionID, kind, providerID string) string {
 	digest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + providerID))
 	return hex.EncodeToString(digest[:])

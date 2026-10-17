@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 export interface MobileMutationContext { readonly id: string; readonly deviceId: string; readonly expiresAt: number }
 export interface MobileMutationResult { status: number; body: unknown }
-export type MobileMutationRoute = 'sessions' | 'wake' | 'close' | 'input' | 'resize'
+export type MobileMutationRoute = 'sessions' | 'wake' | 'close' | 'input' | 'resize' | 'chat-submit'
 export class MobileMutationRejectedError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }

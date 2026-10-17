@@ -140,6 +140,8 @@ func (a *App) mobileHandler() http.Handler {
 	mux.HandleFunc("POST /api/v2/device-challenge", a.mobileChallenge)
 	mux.HandleFunc("POST /api/v2/device-renew", a.mobileRenew)
 	mux.HandleFunc("POST /api/v2/device-revoke", a.mobileRevoke)
+	mux.HandleFunc("POST /api/v2/chat-submit", a.mobileChatSubmit)
+	mux.HandleFunc("GET /api/v2/chat-submit", a.mobileChatSubmit)
 	mux.HandleFunc("GET /api/v1/bootstrap", a.mobileBootstrap)
 	mux.HandleFunc("GET /api/v1/sessions", a.mobileSessions)
 	mux.HandleFunc("GET /api/v1/chat", a.mobileChatHistory)

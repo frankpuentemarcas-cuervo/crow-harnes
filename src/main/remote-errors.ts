@@ -5,6 +5,8 @@ const newerRuntimeRoutes = [
   /^DELETE \/api\/sessions\/[0-9a-f]{32}$/,
   /^POST \/api\/sessions\/[0-9a-f]{32}\/wake$/,
   /^POST \/api\/sessions\/[0-9a-f]{32}\/(input|resize)$/,
+  /^POST \/api\/sessions\/[0-9a-f]{32}\/chat\/submit$/,
+  /^GET \/api\/sessions\/[0-9a-f]{32}\/chat\/submit\?requestId=[0-9a-f-]+$/,
   /^POST \/api\/files\/upload$/,
   /^POST \/api\/mobile\/(config|invite)$/,
   /^GET \/api\/files\/download$/

@@ -31,6 +31,8 @@ type session struct {
 	done            chan struct{}
 	deleting        bool
 	userDraft       bool
+	bracketedPaste  bool
+	modeProbe       string
 	lastActivity    time.Time
 	subs            map[chan Frame]struct{}
 }
@@ -90,6 +92,21 @@ func (s *session) broadcast(frame Frame) {
 func (s *session) output(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// DECSET 2004 may be split across PTY reads. Retain only a short suffix,
+	// enough to recognize the mode switch without buffering terminal output.
+	probe := s.modeProbe + string(data)
+	for _, mode := range []struct {
+		seq     string
+		enabled bool
+	}{{"\x1b[?2004h", true}, {"\x1b[?2004l", false}} {
+		if strings.Contains(probe, mode.seq) {
+			s.bracketedPaste = mode.enabled
+		}
+	}
+	if len(probe) > 16 {
+		probe = probe[len(probe)-16:]
+	}
+	s.modeProbe = probe
 	s.info.Seq++
 	s.info.UpdatedAt = time.Now().UTC()
 	s.lastActivity = s.info.UpdatedAt
@@ -843,6 +860,9 @@ func (a *App) deleteSession(id string) error {
 	}
 	if err := a.removeSessionDeleteMarker(id); err != nil {
 		return fmt.Errorf("session files removed but cleanup marker remains: %w", err)
+	}
+	if err := a.forgetDeletedChatSubmits(id); err != nil {
+		return fmt.Errorf("session removed but chat submit ledger cleanup is pending: %w", err)
 	}
 	return nil
 }

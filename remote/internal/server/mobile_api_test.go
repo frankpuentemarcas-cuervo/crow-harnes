@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -59,6 +60,38 @@ func TestMobileSessionsCarryHostAndOwnerScopedWindowsAlias(t *testing.T) {
 	session, ok = a.mobileAllowedSession(device, &other, info)
 	if ok && session.Name != "" {
 		t.Fatalf("session alias leaked to another owner: %+v, allowed=%v", session, ok)
+	}
+}
+
+func TestLinuxDirectMobileChatSubmitUsesScopedDurableStructuredOperation(t *testing.T) {
+	a, _, root := accessFixture(t)
+	a.mobile = newMobileHostState()
+	a.chatSubmits = make(map[string]chatSubmitRecord)
+	project := mobileHostProject{ID: "project", Name: "Project", Root: root}
+	const sessionID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const credential = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	a.mobile.file = mobileHostFile{HostID: "host", Projects: []mobileHostProject{project}, Devices: []mobileHostDevice{{ID: "device", OwnerID: "alice", Projects: []mobileHostProject{project}}}}
+	a.mobile.credentials[tokenHash(credential)] = mobileHostCredential{DeviceID: "device", ExpiresAt: time.Now().Add(time.Hour)}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	a.sessions[sessionID] = &session{pty: writer, info: SessionInfo{ID: sessionID, OwnerID: "alice", Root: root, Agent: "claude", Mode: "normal", State: "running", AgentState: "waiting", HooksActive: true}, bracketedPaste: true, activeSubagents: make(map[string]struct{}), subs: make(map[chan Frame]struct{})}
+	handler := a.mobileHandler()
+	body := `{"hostId":"host","sessionId":"` + sessionID + `","requestId":"e6c53571-f2d0-4eeb-9841-685c02a89a90","text":"hello"}`
+	first := mobileTestRequest(handler, credential, http.MethodPost, "/api/v2/chat-submit", body)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"status":"written"`) {
+		t.Fatalf("direct submit=%d %s", first.Code, first.Body)
+	}
+	data := make([]byte, len("\x1b[200~hello\x1b[201~\r"))
+	if _, err := io.ReadFull(reader, data); err != nil || string(data) != "\x1b[200~hello\x1b[201~\r" {
+		t.Fatalf("direct PTY=%q err=%v", data, err)
+	}
+	status := mobileTestRequest(handler, credential, http.MethodGet, "/api/v2/chat-submit?hostId=host&sessionId="+sessionID+"&requestId=e6c53571-f2d0-4eeb-9841-685c02a89a90", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"status":"written"`) {
+		t.Fatalf("direct status=%d %s", status.Code, status.Body)
 	}
 }
 

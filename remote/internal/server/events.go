@@ -406,8 +406,10 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if body.Agent == "codex" {
 				kind = "codex-user"
 			}
-			if _, err := a.captureChatMessage(s, "user", content, chatSourceID(body.SessionID, kind, sourceID), body.ChatTruncated); err != nil {
+			if message, err := a.captureChatMessage(s, "user", content, chatSourceID(body.SessionID, kind, sourceID), body.ChatTruncated); err != nil {
 				log.Printf("crow chat capture failed for session %s: %v", body.SessionID, err)
+			} else if body.Agent == "claude" || body.Agent == "codex" {
+				a.markChatSubmitHook(body.SessionID, content, message.Seq)
 			}
 		}
 		a.markAgentState(body.SessionID, "working")

@@ -640,7 +640,7 @@ export class MobileGateway {
       await this.validateDevice(record)
       json(res, 200, notices); return
     }
-    if (req.method === 'POST' && ['sessions', 'wake', 'close', 'input', 'resize'].includes(route)) {
+    if (req.method === 'POST' && ['sessions', 'wake', 'close', 'input', 'resize', 'chat-submit'].includes(route)) {
       const body = await readJSON(req)
       // A short bearer may expire while its request body is being read; never execute using only durable trust.
       await this.nativeAuth(req)
@@ -660,17 +660,39 @@ export class MobileGateway {
       if (record.publicKey && (!context || !this.registry.contextActive(context, record))) throw new MobileMutationRejectedError(401, 'El contexto de autorización venció. Renovalo antes de otra acción.')
     }
     await authorize()
-    if (!['sessions', 'wake', 'close', 'input', 'resize'].includes(route)) throw new MobileMutationRejectedError(400, 'Operación inválida.')
+    if (!['sessions', 'wake', 'close', 'input', 'resize', 'chat-submit'].includes(route)) throw new MobileMutationRejectedError(400, 'Operación inválida.')
     if (!record.publicKey) return this.mutationOperation(record, route, body)
     const { requestId, ...operation } = body
     const result = await this.mutations.run(context!, requestId, route, body, async () => {
       await authorize()
-      return this.mutationOperation(record, route, operation)
+      return this.mutationOperation(record, route, route === 'chat-submit' ? { ...operation, requestId } : operation)
     })
     await authorize()
     return result
   }
   private async mutationOperation(record: DeviceRecord, route: MobileMutationRoute, body: Record<string, unknown>): Promise<MobileMutationResult> {
+      if (route === 'chat-submit') {
+        if (!record.device.capabilities.input) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Envío no habilitado para este dispositivo.') }
+        if (Object.keys(body).some(key => !['hostId', 'sessionId', 'requestId', 'text'].includes(key))) throw new MobileMutationRejectedError(400, 'Solicitud de chat inválida.')
+        const hostId = this.string(body, 'hostId'), sessionId = this.string(body, 'sessionId')
+        const { connection, info } = await this.allowedSession(hostId, sessionId, record, true)
+        const scope = record.scopes.find(scope => scope.hostId === hostId && scope.root === info.root && scope.binding.actorId === info.ownerId)
+        if (!scope || (info.agent !== 'claude' && info.agent !== 'codex')) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Sesión no autorizada para chat.') }
+        if (info.hooksActive !== true || (info.agent !== 'claude' && info.agent !== 'codex')) return { status: 501, body: mobileError('STRUCTURED_CHAT_UNAVAILABLE', 'Envío estructurado disponible solo para Claude o Codex con hooks activos en un host actualizado.') }
+        const text = this.string(body, 'text', 4096)
+        if (!text.trim() || /[\u0000-\u0008\u000B-\u001F\u007F\u001B\u009B]/.test(text)) throw new MobileMutationRejectedError(400, 'El mensaje contiene controles no permitidos.')
+        try {
+          const result = await connection.api('POST', `/api/sessions/${encodeURIComponent(sessionId)}/chat/submit`, { requestId: this.string(body, 'requestId', 36), text })
+          await this.validateDevice(record)
+          return { status: 200, body: result }
+        } catch (error) {
+          const status = error instanceof Error ? (error as Error & { status?: number }).status : undefined
+          if (status === 404) return { status: 501, body: mobileError('STRUCTURED_CHAT_UNAVAILABLE', 'El host necesita una actualización para admitir envío estructurado; no se envió el mensaje.') }
+          if (status === 409) throw new MobileMutationRejectedError(409, 'La terminal no está disponible para un envío nuevo o el resultado anterior sigue pendiente. Revisá el estado antes de continuar.')
+          if (status === 400) throw new MobileMutationRejectedError(400, 'El host rechazó el mensaje estructurado.')
+          throw error
+        }
+      }
       if (route === 'input' || route === 'resize') {
         if (!record.device.capabilities.input) return { status: 403, body: mobileError('GRANT_REQUIRED', 'Entrada no habilitada.') }
         const stream = this.clients.get(this.string(body, 'streamId'))
@@ -711,7 +733,23 @@ export class MobileGateway {
   }
   private async keyHandle(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     if (!this.nativeOrigin(req)) { json(res, 403, mobileError('INVALID_ORIGIN', 'Origen inválido.')); return }
-    if (req.method !== 'POST' || !['pair', 'device-challenge', 'device-renew', 'device-revoke'].includes(url.pathname.slice('/api/v2/'.length))) { json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.')); return }
+    if (url.pathname === '/api/v2/chat-submit' && req.method === 'GET') {
+      try {
+        const record = await this.nativeAuth(req)
+        const query = url.searchParams, hostIds = query.getAll('hostId'), sessionIds = query.getAll('sessionId'), requestIds = query.getAll('requestId')
+        if (hostIds.length !== 1 || sessionIds.length !== 1 || requestIds.length !== 1) throw new MobileMutationRejectedError(400, 'Consulta de estado inválida.')
+        const hostId = this.string({ hostId: hostIds[0] }, 'hostId'), sessionId = this.string({ sessionId: sessionIds[0] }, 'sessionId'), requestId = this.string({ requestId: requestIds[0] }, 'requestId', 36)
+        const { connection, info } = await this.allowedSession(hostId, sessionId, record, true)
+        if (!record.scopes.some(scope => scope.hostId === hostId && scope.root === info.root && scope.binding.actorId === info.ownerId) || (info.agent !== 'claude' && info.agent !== 'codex') || info.hooksActive !== true) { json(res, 403, mobileError('GRANT_REQUIRED', 'Sesión no autorizada para chat.')); return }
+        const result = await connection.api('GET', `/api/sessions/${encodeURIComponent(sessionId)}/chat/submit?requestId=${encodeURIComponent(requestId)}`)
+        await this.validateDevice(record); json(res, 200, result); return
+      } catch (error) {
+        const status = error instanceof Error ? (error as Error & { status?: number }).status : undefined
+        if (status === 404) { json(res, 501, mobileError('STRUCTURED_CHAT_UNAVAILABLE', 'El host necesita una actualización para admitir consulta de estado; no se repitió el mensaje.')); return }
+        json(res, error instanceof MobileHostUnavailableError ? 503 : error instanceof MobileMutationRejectedError ? error.status : status || 400, mobileError(error instanceof MobileHostUnavailableError ? 'HOST_UNAVAILABLE' : error instanceof MobileMutationRejectedError && error.status === 409 ? 'REQUEST_CONFLICT' : 'INVALID_REQUEST', error instanceof Error ? error.message : 'Consulta rechazada.')); return
+      }
+    }
+    if (req.method !== 'POST' || !['pair', 'device-challenge', 'device-renew', 'device-revoke', 'chat-submit'].includes(url.pathname.slice('/api/v2/'.length))) { json(res, 404, mobileError('NOT_FOUND', 'Ruta no encontrada.')); return }
     try {
       const body = await readJSON(req), route = url.pathname.slice('/api/v2/'.length)
       if (route === 'device-revoke') {
@@ -720,7 +758,17 @@ export class MobileGateway {
         this.revoke(record.device.id)
         json(res, 200, { ok: true }); return
       }
-      const fields = route === 'pair' ? ['invitationCode', 'deviceName', 'publicKey'] : route === 'device-challenge' ? ['deviceId'] : ['deviceId', 'challengeId', 'signature']
+      const fields = route === 'pair' ? ['invitationCode', 'deviceName', 'publicKey'] : route === 'device-challenge' ? ['deviceId'] : route === 'chat-submit' ? ['hostId', 'sessionId', 'requestId', 'text'] : ['deviceId', 'challengeId', 'signature']
+      if (route === 'chat-submit') {
+        const record = await this.nativeAuth(req)
+        if (Object.keys(body).some(key => !fields.includes(key))) throw new MobileMutationRejectedError(400, 'Solicitud de chat inválida.')
+        const text = this.string(body, 'text', 4096)
+        const requestId = this.string(body, 'requestId', 36)
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId) || !text.trim() || /[\u0000-\u0008\u000B-\u001F\u007F\u001B\u009B]/.test(text)) throw new MobileMutationRejectedError(400, 'El mensaje contiene controles o formato no permitido.')
+        const credential = /^Bearer ([0-9a-f]{64})$/.exec(req.headers.authorization || '')?.[1]
+        const result = await this.executeMutation(record, credential ? this.registry.credentialContext(credential) : undefined, 'chat-submit', body)
+        json(res, result.status, result.body); return
+      }
       if (Object.keys(body).some(key => !fields.includes(key))) throw new Error('Solicitud inválida.')
       if (route === 'pair') {
         const code = this.string(body, 'invitationCode', 32).toUpperCase()
@@ -741,9 +789,10 @@ export class MobileGateway {
       const limited = error instanceof Error && error.message === 'RATE_LIMIT'
       const unavailable = error instanceof MobileHostUnavailableError
       const gatewayUnavailable = unavailable && !!this.trustFault
-      json(res, unavailable ? 503 : limited ? 429 : 401, mobileError(
-        gatewayUnavailable ? 'GATEWAY_UNAVAILABLE' : unavailable ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : 'DEVICE_REJECTED',
-        gatewayUnavailable ? 'No se pudo guardar el vínculo en Crow Windows. El acceso está bloqueado.' : unavailable ? 'Acceso pausado. Comprobá Crow y el host en Windows.' : 'Dispositivo o prueba no autorizados. La invitación o el desafío pueden haber vencido.'
+      const mutation = error instanceof MobileMutationRejectedError
+      json(res, unavailable ? 503 : limited ? 429 : mutation ? error.status : 401, mobileError(
+        gatewayUnavailable ? 'GATEWAY_UNAVAILABLE' : unavailable ? 'HOST_UNAVAILABLE' : limited ? 'RATE_LIMITED' : mutation && error.status === 409 ? 'REQUEST_CONFLICT' : mutation && error.status === 429 ? 'RATE_LIMITED' : mutation && error.status === 403 ? 'GRANT_REQUIRED' : mutation && error.status === 501 ? 'STRUCTURED_CHAT_UNAVAILABLE' : mutation && error.status === 400 ? 'INVALID_REQUEST' : 'DEVICE_REJECTED',
+        gatewayUnavailable ? 'No se pudo guardar el vínculo en Crow Windows. El acceso está bloqueado.' : unavailable ? 'Acceso pausado. Comprobá Crow y el host en Windows.' : limited ? 'Demasiadas solicitudes. Esperá y reintentá.' : mutation ? error.message : 'Dispositivo o prueba no autorizados. La invitación o el desafío pueden haber vencido.'
       ))
     }
   }

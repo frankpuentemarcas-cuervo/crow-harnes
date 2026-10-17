@@ -31,6 +31,8 @@ type App struct {
 	fileMu        sync.Mutex
 	metricsMu     sync.Mutex
 	chatMu        sync.Mutex
+	chatSubmitMu  sync.Mutex
+	chatSubmits   map[string]chatSubmitRecord
 	lastCPU       cpuSample
 	dir           string
 	port          string
@@ -89,7 +91,7 @@ func Run() error {
 	} else if err != nil {
 		return err
 	}
-	a := &App{dir: dir, port: port, token: strings.TrimSpace(string(tokenBytes)), binaryPath: binaryPath, sessions: make(map[string]*session), browsers: make(map[string]*browser)}
+	a := &App{dir: dir, port: port, token: strings.TrimSpace(string(tokenBytes)), binaryPath: binaryPath, sessions: make(map[string]*session), browsers: make(map[string]*browser), chatSubmits: make(map[string]chatSubmitRecord)}
 	if a.token == "" {
 		return errors.New("empty token")
 	}
@@ -106,6 +108,9 @@ func Run() error {
 		return err
 	}
 	if err := a.loadEvents(); err != nil {
+		return err
+	}
+	if err := a.loadChatSubmits(); err != nil {
 		return err
 	}
 	a.bridge, err = bridge.Open(dir)
@@ -135,6 +140,8 @@ func Run() error {
 	mux.HandleFunc("POST /api/sessions/{id}/resize", a.handleSessionResize)
 	mux.HandleFunc("POST /api/sessions/{id}/cache", a.handlePromptCache)
 	mux.HandleFunc("GET /api/sessions/{id}/chat", a.handleChatHistory)
+	mux.HandleFunc("POST /api/sessions/{id}/chat/submit", a.handleChatSubmit)
+	mux.HandleFunc("GET /api/sessions/{id}/chat/submit", a.handleChatSubmitStatus)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", a.handleStream)
 	mux.HandleFunc("GET /api/events", a.handleEvents)
 	mux.HandleFunc("POST /api/events", a.handleEvents)

@@ -163,6 +163,26 @@ test('Windows gateway exposes chat history only to the owner and forwards author
   assert.equal((await c.request(`/api/v1/chat?hostId=host&sessionId=${SESSION}&limit=0`, 'GET', undefined, paired.credential)).status, 400)
 })
 
+test('v2 structured chat submit is idempotent, validates text, and fails closed for old hosts', async () => {
+  const c = await keyFixture()
+  c.sessions([{ id: SESSION, agent: 'claude', mode: 'normal', ownerId: 'alice', root: '/work', state: 'running', hooksActive: true, seq: 8 }])
+  const body = { hostId: 'host', sessionId: SESSION, requestId: randomUUID(), text: 'hello 🙂' }
+  const route = '/api/v2/chat-submit'
+  const first = await c.request(route, 'POST', body, c.credential)
+  assert.equal(first.status, 200, JSON.stringify({ body:first.body, calls:c.calls }))
+  assert.equal((await c.request(route, 'POST', body, c.credential)).status, 200)
+  assert.equal(c.calls.filter(call => call.path === `/api/sessions/${SESSION}/chat/submit`).length, 1)
+  const conflict = await c.request(route, 'POST', { ...body, text: 'different' }, c.credential)
+  assert.equal(conflict.status, 409)
+  const before = c.calls.length
+  assert.equal((await c.request(route, 'POST', { ...body, requestId: randomUUID(), text: 'bad\u001b' }, c.credential)).status, 400)
+  assert.equal(c.calls.length, before)
+  c.apiHook((method, path) => { if (method === 'POST' && path.endsWith('/chat/submit')) throw Object.assign(new Error('404 page not found'), { status: 404 }) })
+  const oldHost = await c.request(route, 'POST', { ...body, requestId: randomUUID() }, c.credential)
+  assert.equal(oldHost.status, 501, JSON.stringify({ body:oldHost.body, calls:c.calls.slice(-3) }))
+  assert.equal(oldHost.body.code, 'STRUCTURED_CHAT_UNAVAILABLE')
+})
+
 test('administrator override does not grant access to a foreign chat transcript', async () => {
   const c = fixture()
   c.binding({ actorId: 'alice', generation: 'one', allowedRoots: ['/work'], operateOthers: true, role: 'admin' })
