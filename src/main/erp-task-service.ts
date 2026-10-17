@@ -5,7 +5,7 @@ import type { SecretEncryption } from './alert-ai-settings'
 import type { AIConfiguration } from './attention-classifier'
 import { ERPNextClient, erpKanbanAssignee, validateERPURL, type ERPTaskRecord } from './erp-next-client.ts'
 import { classifyERPTask } from './erp-task-classifier.ts'
-import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskCard, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget } from '../shared/erp-task'
+import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskCard, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget, ERPExistingTerminalInput } from '../shared/erp-task'
 import type { GitLabRepositoryContext } from '../shared/types'
 
 export interface ERPTaskDependencies {
@@ -16,6 +16,9 @@ export interface ERPTaskDependencies {
   terminals?(projectId: string, hostId: string): Promise<ERPTerminalCandidate[]>
   submit?(job: ERPDispatchJob): Promise<{ sessionId: string; status: string }>
   submissionStatus?(target: ERPDispatchTarget, jobId: string): Promise<{ status: string }>
+  resolveTerminal?(input: ERPExistingTerminalInput): Promise<ERPTerminalCandidate>
+  authorizationGeneration?(): number
+  changed?(): void
   request?: typeof fetch
   now?: () => number
 }
@@ -42,6 +45,7 @@ export class ERPTaskService {
   private stopped = false
   private classifying = false
   private reading = false
+  private syncing?: Promise<ERPTaskSnapshot>
   private recoveryRequired = false
   private encryption: SecretEncryption
   private dependencies: ERPTaskDependencies
@@ -66,7 +70,7 @@ export class ERPTaskService {
         if (Array.isArray(value?.tasks)) for (const row of value.tasks) {
           if (!row || typeof row.key !== 'string' || typeof row.name !== 'string' || typeof row.subject !== 'string' || typeof row.description !== 'string' || typeof row.modified !== 'string' || !stages.includes(row.stage)) throw new Error('Invalid Task ledger')
           if (row.jobId !== undefined && (typeof row.jobId !== 'string' || !row.jobId || !['pending', 'uncertain', 'delivered'].includes(row.dispatchStatus))) throw new Error('Invalid Task dispatch ledger')
-          const card: ERPTaskCard = { key: row.key, name: row.name, subject: row.subject, description: '', descriptionLoaded: false, erpProject: typeof row.erpProject === 'string' ? row.erpProject : '', erpStatus: typeof row.erpStatus === 'string' ? row.erpStatus : '', priority: typeof row.priority === 'string' ? row.priority : '', modified: row.modified, stage: row.stage, stale: true }
+          const card: ERPTaskCard = { key: row.key, name: row.name, subject: row.subject, description: '', descriptionLoaded: false, erpProject: typeof row.erpProject === 'string' ? row.erpProject : '', erpStatus: typeof row.erpStatus === 'string' ? row.erpStatus : '', priority: typeof row.priority === 'string' ? row.priority : '', modified: row.modified, stage: row.stage, stale: true, metadataUnavailable: row.metadataUnavailable === true }
           // Old encrypted ledgers did not record assignees; never show those
           // cached rows until a fresh, server-filtered sync verifies ownership.
           if (Array.isArray(row.assignedTo) && row.assignedTo.every((user: unknown) => typeof user === 'string')) card.assignedTo = row.assignedTo
@@ -104,7 +108,7 @@ export class ERPTaskService {
   }
   snapshot(): ERPTaskSnapshot {
     const candidates = this.dependencies.projects()
-    return { connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, allowProjectContext: this.connection?.allowProjectContext ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].filter(card => card.assignedTo?.includes(erpKanbanAssignee)).map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, descriptionLoaded: card.descriptionLoaded, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, assignedTo: card.assignedTo, stage: card.stage, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), ...this.binding(card), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
+    return { refreshing: !!this.syncing, connection: { url: this.connection?.url ?? '', configured: !!this.connection, allowAIClassification: this.connection?.allowAIClassification ?? false, allowProjectContext: this.connection?.allowProjectContext ?? false, identity: this.connection?.identity, error: this.error }, links: { ...this.links }, tasks: [...this.cards.values()].filter(card => card.assignedTo?.includes(erpKanbanAssignee)).map(card => ({ key: card.key, name: card.name, subject: card.subject, description: card.description, descriptionLoaded: card.descriptionLoaded, erpProject: card.erpProject, erpStatus: card.erpStatus, priority: card.priority, modified: card.modified, assignedTo: card.assignedTo, stage: card.stage, metadataUnavailable: card.metadataUnavailable, stale: card.stale || (!!card.projectId && !candidates.some(project => project.id === card.projectId)), ...this.binding(card), projectId: card.projectId, reason: card.reason, sessionId: card.sessionId, jobId: card.jobId, dispatchStatus: card.dispatchStatus, error: card.error })) }
   }
   saveConnection(input: ERPConnectionInput): ERPTaskSnapshot {
     this.ensure()
@@ -121,7 +125,7 @@ export class ERPTaskService {
     const previous = { connection: this.connection, cards: this.cards, links: this.links, error: this.error }
     this.connection = next; if (changed) { this.cards = new Map(); this.links = Object.create(null) }; this.error = undefined
     try { this.persist() } catch (error) { this.connection = previous.connection; this.cards = previous.cards; this.links = previous.links; this.error = previous.error; throw error }
-    this.abort.abort(); this.abort = new AbortController(); this.generation++; this.approvals.clear(); return this.snapshot()
+    this.abort.abort(); this.abort = new AbortController(); this.generation++; this.syncing = undefined; this.reading = false; this.approvals.clear(); return this.snapshot()
   }
   private discardOtherIdentity(identity: string): void {
     if (this.connection?.identity && this.connection.identity !== identity) {
@@ -144,9 +148,21 @@ export class ERPTaskService {
     } catch (error) {
       if (generation === this.generation) { for (const card of this.cards.values()) card.stale = true; this.approvals.clear(); this.error = 'No se pudo verificar la conexión ERP. Las Tasks anteriores no autorizan ejecuciones.' }
       throw error
-    } finally { this.reading = false }
+    } finally { if (generation === this.generation) this.reading = false }
   }
-  async sync(): Promise<ERPTaskSnapshot> {
+  startupRefresh(): Promise<ERPTaskSnapshot> {
+    if (!this.connection || !this.encryption.isEncryptionAvailable() || this.recoveryRequired) return Promise.resolve(this.snapshot())
+    return this.sync()
+  }
+  sync(): Promise<ERPTaskSnapshot> {
+    if (this.syncing) return this.syncing
+    const operation = this.syncCatalogue()
+    this.syncing = operation
+    this.dependencies.changed?.()
+    void operation.finally(() => { if (this.syncing === operation) { this.syncing = undefined; this.dependencies.changed?.() } }).catch(() => undefined)
+    return operation
+  }
+  private async syncCatalogue(): Promise<ERPTaskSnapshot> {
     if (this.pending.size || this.reading) throw new Error('Esperá que termine la consulta o el despacho antes de sincronizar.')
     const client = this.client(), generation = this.generation
     this.reading = true; this.approvals.clear()
@@ -171,10 +187,10 @@ export class ERPTaskService {
         if (card.projectId && card.stage === 'review' && !changed) card.stage = 'ready'
         next.set(key, card)
       }
-      for (const card of this.cards.values()) if (!next.has(card.key) && card.jobId) next.set(card.key, { ...card, stale: true })
+      for (const card of this.cards.values()) if (!next.has(card.key) && card.jobId) next.set(card.key, { ...card, stale: true, metadataUnavailable: true })
       this.cards = next; this.error = undefined; this.persist(); return this.snapshot()
     } catch (error) { if (generation === this.generation) { for (const card of this.cards.values()) card.stale = true; this.approvals.clear(); this.error = 'No se pudieron actualizar las Tasks. El estado anterior no autoriza ejecuciones.' }; throw error }
-    finally { this.reading = false }
+    finally { if (generation === this.generation) this.reading = false }
   }
   private record(card: ERPTaskCard): ERPTaskRecord { return { name: card.name, subject: card.subject, description: card.description, project: card.erpProject, status: card.erpStatus, priority: card.priority, modified: card.modified, assignedTo: card.assignedTo ?? [] } }
   async loadDetail(key: string): Promise<ERPTaskSnapshot> {
@@ -194,7 +210,7 @@ export class ERPTaskService {
     } catch (error) {
       if (generation === this.generation && this.cards.get(key) === card) { card.stale = true; card.description = ''; card.descriptionLoaded = false; this.approvals.clear() }
       throw error
-    } finally { this.reading = false }
+    } finally { if (generation === this.generation) this.reading = false }
   }
   private card(key: string): ERPTaskCard { this.ensure(); if (this.reading) throw new Error('Esperá que termine la consulta ERP antes de continuar.'); const card = this.cards.get(key); if (!card || card.stale) throw new Error('Actualizá la Task antes de continuar.'); return card }
   private project(id: string, hostId?: string): ERPProjectCandidate { const project = this.dependencies.projects().find(candidate => candidate.id === id && (!hostId || candidate.hostId === hostId)); if (!project) throw new Error('Proyecto no permitido o no disponible.'); return project }
@@ -216,15 +232,26 @@ export class ERPTaskService {
     if (!terminal) throw new Error('Terminal no permitida o no disponible.')
     return terminal
   }
-  async assignTerminal(key: string, target: ERPTerminalTarget): Promise<ERPTaskSnapshot> {
-    const card = this.card(key)
+  private metadataCard(key: string): ERPTaskCard {
+    this.ensure()
+    const card = this.cards.get(key)
+    if (!card || card.metadataUnavailable || !this.connection?.identity || card.key !== hash([this.connection.url, this.connection.identity, card.name]) || !card.assignedTo?.includes(erpKanbanAssignee)) throw new Error('La Task ya no pertenece al catálogo autorizado.')
+    return card
+  }
+  async assignTerminal(key: string, input: ERPExistingTerminalInput & Partial<ERPTerminalTarget>): Promise<ERPTaskSnapshot> {
+    let card = this.metadataCard(key)
+    const generation = this.generation, authorization = this.dependencies.authorizationGeneration?.()
+    const target = this.dependencies.resolveTerminal ? await this.dependencies.resolveTerminal(input) : await this.terminal(input as ERPTerminalTarget)
     if (this.pending.size || card.dispatchStatus === 'pending') throw new Error('Esperá el despacho pendiente antes de cambiar la terminal.')
-    const generation = this.generation, authorized = await this.dependencies.authorizeProject(target.projectId, target.hostId)
-    const terminal = await this.terminal(target)
+    const authorized = await this.dependencies.authorizeProject(target.projectId, target.hostId)
+    const terminal = this.dependencies.resolveTerminal ? await this.dependencies.resolveTerminal(input) : await this.terminal(target)
+    if (terminal.projectId !== target.projectId || terminal.hostId !== target.hostId || terminal.sessionId !== target.sessionId) throw new Error('La terminal cambió de proyecto durante la asociación.')
     const actor = await this.dependencies.authorizeProject(target.projectId, target.hostId)
-    if (actor.actorId !== authorized.actorId || actor.root !== authorized.root || generation !== this.generation || this.card(key) !== card || this.pending.size) throw new Error('La Task o identidad cambió durante la asociación.')
+    if (actor.actorId !== authorized.actorId || actor.root !== authorized.root || generation !== this.generation || authorization !== this.dependencies.authorizationGeneration?.() || this.pending.size) throw new Error('La Task o identidad cambió durante la asociación.')
+    card = this.metadataCard(key)
+    if (card.dispatchStatus === 'pending') throw new Error('Esperá el despacho pendiente antes de cambiar la terminal.')
     const previous = { ...card }
-    Object.assign(card, { projectId: target.projectId, hostId: target.hostId, sessionId: terminal.sessionId, sessionName: terminal.name })
+    Object.assign(card, { projectId: terminal.projectId, hostId: target.hostId, sessionId: terminal.sessionId, sessionName: terminal.name })
     if (!card.jobId) card.stage = 'ready'
     try { this.persist() } catch (error) { Object.assign(card, previous); for (const field of Object.keys(card)) if (!(field in previous)) delete (card as unknown as Record<string, unknown>)[field]; throw error }
     this.approvals.clear(); return this.snapshot()
@@ -256,8 +283,8 @@ export class ERPTaskService {
     if (card.descriptionLoaded === false) await this.loadDetail(key)
     if (repositoryContext && (!Array.isArray(repositoryContext) || repositoryContext.length < 1 || repositoryContext.length > 5 || repositoryContext.some(file => !this.dependencies.projects().some(project => project.id === file.projectId && project.repositoryReadable) || typeof file.fileName !== 'string' || file.fileName.length > 300 || file.fileName.startsWith('/') || file.fileName.includes('..') || typeof file.content !== 'string' || file.content.length > 4000) || repositoryContext.reduce((sum, file) => sum + file.content.length, 0) > 12000)) throw new Error('Los fragmentos GitLab no están autorizados para esta clasificación o superan el límite permitido.')
     if (this.card(key) !== card || !this.connection?.allowAIClassification || card.jobId || this.classifying) throw new Error('La Task o el consentimiento cambió durante la consulta.')
-    const generation = this.generation, version = fingerprint(this.record(card)), projectId = card.projectId, stage = card.stage
-    const unchanged = (): boolean => generation === this.generation && this.cards.get(key) === card && fingerprint(this.record(card)) === version && card.projectId === projectId && card.stage === stage && !card.jobId && !card.stale
+    const generation = this.generation, version = fingerprint(this.record(card)), projectId = card.projectId, stage = card.stage, association = hash([card.projectId, card.hostId, card.sessionId])
+    const unchanged = (): boolean => generation === this.generation && this.cards.get(key) === card && fingerprint(this.record(card)) === version && card.projectId === projectId && card.stage === stage && hash([card.projectId, card.hostId, card.sessionId]) === association && !card.jobId && !card.stale
     this.classifying = true
     try {
       const result = await classifyERPTask(this.dependencies.aiConfiguration(), this.record(card), this.dependencies.projects(), this.dependencies.request, this.abort.signal, this.connection.allowProjectContext, repositoryContext)

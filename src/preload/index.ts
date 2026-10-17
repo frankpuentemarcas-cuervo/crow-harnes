@@ -29,6 +29,8 @@ const api: CrowAPI = {
   erpLinkProject: (erpProject, projectId) => ipcRenderer.invoke('crow:erp-link', erpProject, projectId),
   erpClassify: (taskKey, repositoryContext) => ipcRenderer.invoke('crow:erp-classify', taskKey, repositoryContext),
   erpAssign: (taskKey, projectId) => ipcRenderer.invoke('crow:erp-assign', taskKey, projectId),
+  onERPChanged: (listener) => { const wrapped = (): void => listener(); ipcRenderer.on('crow:erp-changed', wrapped); return () => { ipcRenderer.off('crow:erp-changed', wrapped) } },
+  erpTerminalCatalogue: () => ipcRenderer.invoke('crow:erp-terminal-catalogue'),
   erpTerminals: (projectId, hostId) => ipcRenderer.invoke('crow:erp-terminals', projectId, hostId),
   erpAssignTerminal: (key, target) => ipcRenderer.invoke('crow:erp-assign-terminal', key, target),
   erpTerminalView: (key, previous) => ipcRenderer.invoke('crow:erp-terminal-view', key, previous),

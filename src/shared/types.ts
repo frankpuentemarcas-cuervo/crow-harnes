@@ -2,7 +2,7 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'au
 import type { AlertAuditRecord, AlertAuditStatus, AlertAuditSummary, NoticeSoundOutcome } from './alert-diagnostics'
 import type { FreeLLMRuntimeStatus } from './free-llm-startup'
 import type { AccountUsageAPI } from './account-usage'
-import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate } from './erp-task'
+import type { ERPConnectionInput, ERPProjectCandidate, ERPTaskPreview, ERPTaskPreviewInput, ERPTaskSnapshot, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPExistingTerminalInput, ERPTerminalCatalogue } from './erp-task'
 import type { AccessIdentity } from './access'
 import type { MobileDevice, MobileEnrollmentMetadata, MobileEnrollmentInput, MobileInviteResult, MobileStartInput, MobileRemoteProvider } from './mobile-companion'
 
@@ -231,8 +231,10 @@ export interface CrowAPI extends AccountUsageAPI {
   erpLinkProject(erpProject: string, projectId: string): Promise<ERPTaskSnapshot>
   erpClassify(taskKey: string, repositoryContext?: GitLabRepositoryContext[]): Promise<ERPTaskSnapshot>
   erpAssign(taskKey: string, projectId: string): Promise<ERPTaskSnapshot>
+  onERPChanged(listener: () => void): () => void
+  erpTerminalCatalogue(): Promise<ERPTerminalCatalogue>
   erpTerminals(projectId: string, hostId: string): Promise<ERPTerminalCandidate[]>
-  erpAssignTerminal(taskKey: string, target: ERPTerminalTarget): Promise<ERPTaskSnapshot>
+  erpAssignTerminal(taskKey: string, target: ERPExistingTerminalInput): Promise<ERPTaskSnapshot>
   erpTerminalView(taskKey: string, previous?: boolean): Promise<ERPTerminalTarget>
   erpReconcile(taskKey: string): Promise<ERPTaskSnapshot>
   erpPreview(input: ERPTaskPreviewInput): Promise<ERPTaskPreview>

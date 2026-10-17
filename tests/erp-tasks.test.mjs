@@ -400,3 +400,64 @@ test('uncertain new-terminal dispatch preserves original project even without re
     await c.service.assignTerminal(key, c.terminals[0]); assert.equal(c.service.snapshot().tasks[0].dispatchTarget.sessionId, ''); assert.equal(c.service.snapshot().tasks[0].dispatchStatus, 'uncertain')
   } finally { c.cleanup() }
 })
+test('startup refresh is configured-only, coalesces manual sync, and publishes honest failure state', async () => {
+  const c = terminalSetup(setup()); try {
+    await c.service.startupRefresh(); assert.equal(c.calls.length, 0)
+    await c.ready(); c.calls.length = 0; let release, entered
+    const waiting = new Promise(resolve => { entered = resolve }), original = c.deps.request
+    c.deps.request = async (...args) => { if (args[0].includes('get_logged_user')) { entered(); await new Promise(resolve => { release = resolve }) }; return original(...args) }
+    const startup = c.service.startupRefresh(); await waiting
+    assert.equal(c.service.snapshot().refreshing, true); const manual = c.service.sync(); release(); await Promise.all([startup, manual]); assert.equal(c.calls.filter(call => call.url.includes('get_logged_user')).length, 1); assert.equal(c.service.snapshot().refreshing, false)
+    c.deps.request = async () => { throw new Error('offline') }; await assert.rejects(c.service.startupRefresh()); assert.equal(c.service.snapshot().refreshing, false); assert.equal(c.service.snapshot().tasks[0].stale, true); assert.equal(c.dispatched.length, 0)
+  } finally { c.cleanup() }
+})
+test('stale cached authorized Task links without project or ERP network and preserves execution staleness', async () => {
+  const c = terminalSetup(setup()); try {
+    const key = await c.ready(); c.service.cards.get(key).projectId = undefined; c.service.cards.get(key).stale = true
+    c.deps.resolveTerminal = async () => c.terminals[0]
+    c.deps.request = async () => { throw new Error('no ERP') }
+    const next = await c.service.assignTerminal(key, { hostId: 'h1', sessionId: 's-existing' })
+    assert.equal(next.tasks[0].projectId, 'p1'); assert.equal(next.tasks[0].stale, true); assert.equal(next.tasks[0].jobId, undefined); assert.equal(c.dispatched.length, 0)
+    await assert.rejects(c.service.preview({ taskKey: key, projectId: 'p1', hostId: 'h1', agent: 'codex', sessionId: 's-existing' }))
+    c.service.cards.get(key).assignedTo = ['foreign@example.org']; await assert.rejects(c.service.assignTerminal(key, { hostId: 'h1', sessionId: 's-existing' }))
+  } finally { c.cleanup() }
+})
+test('metadata link remains available during deferred ERP sync and survives the fresh catalogue commit', async () => {
+  const c = terminalSetup(setup()); try {
+    const key = await c.ready(); let release, entered; const waiting = new Promise(resolve => { entered = resolve }), original = c.deps.request
+    c.deps.resolveTerminal = async () => c.terminals[0]
+    c.deps.request = async (...args) => { if (!args[0].includes('get_logged_user') && !args[0].includes('/Task/')) { entered(); await new Promise(resolve => { release = resolve }) }; return original(...args) }
+    const sync = c.service.sync(); await waiting
+    await c.service.assignTerminal(key, { hostId: 'h1', sessionId: 's-existing' }); assert.equal(c.service.snapshot().tasks[0].sessionId, 's-existing'); release(); await sync
+    assert.equal(c.service.snapshot().tasks[0].sessionId, 's-existing'); assert.equal(c.dispatched.length, 0)
+  } finally { c.cleanup() }
+})
+test('old credential refresh completion cannot clear or satisfy a newer refresh generation', async () => {
+  const c = terminalSetup(setup()); try {
+    await c.ready(); let releaseOld, releaseNew, enterOld, enterNew; const oldEntered = new Promise(resolve=>{enterOld=resolve}), newEntered = new Promise(resolve=>{enterNew=resolve})
+    const original=c.deps.request
+    c.deps.request=async(url,options)=>{if(url.includes('get_logged_user')){if(options.headers.Authorization.includes('ERP-KEY')){enterOld();await new Promise(resolve=>{releaseOld=resolve})}else{enterNew();await new Promise(resolve=>{releaseNew=resolve})}}return original(url,options)}
+    const old=c.service.sync();await oldEntered
+    c.service.saveConnection({url:'https://erp.example.org',apiKey:'NEW-KEY',apiSecret:'NEW-SECRET',allowAIClassification:false})
+    const fresh=c.service.sync();await Promise.race([newEntered,new Promise((_,reject)=>setTimeout(()=>reject(new Error('new refresh incorrectly joined old generation')),1000))])
+    releaseOld();await assert.rejects(old);assert.equal(c.service.snapshot().refreshing,true);releaseNew();await fresh;assert.equal(c.service.snapshot().refreshing,false)
+  } finally { c.cleanup() }
+})
+test('late classifier cannot alter a terminal association made while AI is pending', async () => {
+  const c=terminalSetup(setup());try{
+    const key=await c.ready();c.service.saveConnection({url:'https://erp.example.org',allowAIClassification:true});await c.service.loadDetail(key)
+    const original=c.deps.request;let release,entered;const waiting=new Promise(resolve=>{entered=resolve})
+    c.deps.request=async(url,options)=>{if(url.includes('chat/completions')){entered();await new Promise(resolve=>{release=resolve});return json({choices:[{message:{content:JSON.stringify({projectId:null,reason:'Other project'})}}]})}return original(url,options)}
+    const classify=c.service.classify(key);await waiting;await c.service.assignTerminal(key,c.terminals[0]);release();await classify
+    assert.equal(c.service.snapshot().tasks[0].projectId,'p1');assert.equal(c.service.snapshot().tasks[0].sessionId,'s-existing')
+  }finally{c.cleanup()}
+})
+test('fresh catalogue omission forbids reassignment of historical jobs but keeps original view history', async () => {
+  const c=terminalSetup(setup());try{
+    const key=await c.ready(),preview=await c.preview(key);await c.service.approve(preview.previewId);c.task=null;await c.service.sync()
+    const card=c.service.snapshot().tasks[0];assert.equal(card.metadataUnavailable,true);assert.equal(card.dispatchTarget.sessionId,'s1');await assert.rejects(c.service.assignTerminal(key,c.terminals[0]))
+  }finally{c.cleanup()}
+})
+test('actor authorization generation switching during terminal resolution prevents cached metadata write',async()=>{
+ const c=terminalSetup(setup());try{const key=await c.ready();let epoch=1;c.deps.authorizationGeneration=()=>epoch;c.deps.resolveTerminal=async()=>{epoch++;return c.terminals[0]};await assert.rejects(c.service.assignTerminal(key,{hostId:'h1',sessionId:'s-existing'}));assert.equal(c.service.snapshot().tasks[0].sessionId,undefined)}finally{c.cleanup()}
+})

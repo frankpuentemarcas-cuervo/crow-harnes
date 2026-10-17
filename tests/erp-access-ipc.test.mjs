@@ -13,10 +13,10 @@ function harness() {
   const project = { id: 'project', name: 'Allowed', hostId: 'host', root: '/srv/allowed' }
   const state = { hosts: [{ id: 'host' }], projects: [project], notices: [], sessionNames: {}, tabs: [], activeTabs: {}, selectedProjectId: '', eventCursors: {} }
   const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, sessionList: [], assignSessionOwner: async (sessionId, ownerId) => { ownerAssignments.push([sessionId, ownerId]) }, api: async (method, path, body) => { remoteCalls.push([method, path, body]); if (method === 'GET' && path === '/api/sessions') return current.sessionList; dispatches.push(body); return current.receipt ?? { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
-  const store = { project: id => id === project.id ? project : undefined, host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; return state }, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
+  const store = { project: id => state.projects.find(item => item.id === id), host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; return state }, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
   const erp = { snapshot: () => ({ connection: {}, tasks: [], links: {} }), approve: async () => ({}) }
   const module = { exports: {} }
-  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.erpTerminals = erpTerminals; exports.submit = submitERPTask; exports.receipt = erpSubmissionStatus; exports.auditRecords = visibleAuditRecords;'
+  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.erpTerminals = erpTerminals; exports.catalogue = erpTerminalCatalogue; exports.addConnection = (host,current) => connections.set(host,current); exports.resolveTerminal = resolveERPTerminal; exports.submit = submitERPTask; exports.receipt = erpSubmissionStatus; exports.auditRecords = visibleAuditRecords;'
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
@@ -172,4 +172,36 @@ test('read-only receipt remains queryable after agent exit and rejects late acto
 })
 test('modified ERP sources remain valid UTF8 without replacement characters', () => {
   for (const path of ['src/main/erp-task-service.ts','src/main/index.ts','src/renderer/src/ERPTaskKanban.tsx','src/renderer/src/App.tsx']) assert.ok(!readFileSync(new URL('../' + path, import.meta.url), 'utf8').includes('\ufffd'), path)
+})
+
+test('global terminal discovery derives unique registered projects and isolates offline hosts', async () => {
+  const h = harness(); h.state.hosts[0].name = 'Readable host'; h.state.hosts.push({ id: 'offline', name: 'Offline host' })
+  h.state.projects.push({ id: 'other', name: 'Other project', hostId: 'host', root: '/srv/allowed/other' }, { id: 'offline-p', name: 'Offline', hostId: 'offline', root: '/srv/offline' })
+  h.current.sessionList = [{ id:'one',ownerId:'actor-a',root:'/srv/allowed',state:'running',agent:'codex',mode:'normal' },{ id:'two',ownerId:'actor-a',root:'/srv/allowed/other',state:'running',agent:'claude',mode:'normal' },{ id:'foreign',ownerId:'actor-b',root:'/srv/allowed',state:'running',agent:'codex',mode:'normal' }]
+  const result = await h.catalogue(); assert.equal(h.remoteCalls.filter(call=>call[0]==='GET'&&call[1]==='/api/sessions').length,1); assert.deepEqual(Array.from(result.terminals, item => item.projectId).sort(), ['other','project']); assert.equal(result.terminals[0].hostName,'Readable host'); assert.ok(result.warnings.some(message=>message.includes('Offline host')))
+  const linked = await h.resolveTerminal({hostId:'host',sessionId:'two',projectId:'project'});assert.equal(linked.projectId,'other')
+  h.state.projects.push({id:'ambiguous',name:'Ambiguous',hostId:'host',root:'/srv/allowed/other'})
+  const ambiguous = await h.catalogue(); assert.equal(ambiguous.terminals.some(item=>item.sessionId==='two'),false);await assert.rejects(h.resolveTerminal({hostId:'host',sessionId:'two'}));assert.ok(ambiguous.warnings.some(message=>/comparten|ambigu/i.test(message)))
+})
+test('ERP snapshot and metadata terminal assignment do not wait for a slow ERP operation', async () => {
+  const h = harness();let release,entered;const waiting = new Promise(resolve=>{entered=resolve})
+  h.erp.sync = async () => {entered();await new Promise(resolve=>{release=resolve});return {tasks:[]}}
+  h.erp.assignTerminal = async () => ({tasks:[{sessionId:'one'}]})
+  const refresh = h.invoke('crow:erp-sync');await waiting
+  const state = await h.invoke('crow:erp-snapshot');assert.equal(state.tasks.length,0)
+  const assigned = await h.invoke('crow:erp-assign-terminal','key',{hostId:'host',sessionId:'one'});assert.equal(assigned.tasks[0].sessionId,'one');release();await refresh
+})
+
+test('chosen-terminal resolution never waits for unrelated connected failing hosts', async () => {
+  const h=harness();h.state.hosts.push({id:'slow',name:'Slow'});h.state.projects.push({id:'slow-p',name:'Slow project',hostId:'slow',root:'/srv/slow'});let touched=false
+  h.addConnection('slow',{status:()=> 'connected',accessStatus:async()=>{touched=true;throw new Error('unavailable')}})
+  h.current.sessionList=[{id:'mine',ownerId:'actor-a',root:'/srv/allowed',state:'running',agent:'codex',mode:'normal'}]
+  assert.equal((await h.resolveTerminal({hostId:'host',sessionId:'mine'})).projectId,'project');assert.equal(touched,false)
+  const catalogue=await h.catalogue();assert.equal(catalogue.terminals.length,1);assert.ok(catalogue.warnings.some(message=>message.includes('Slow')))
+})
+test('actual app startup launches metadata refresh without awaiting it before host connections', () => {
+  const source=readFileSync(new URL('../src/main/index.ts',import.meta.url),'utf8')
+  const boot=source.slice(source.indexOf("app.whenReady().then"))
+  assert.match(boot,/createWindow\(\)[\s\S]*void refreshERPProjects\(\)\.then\(\(\) => erpTasks\.startupRefresh\(\)\)/)
+  assert.match(boot,/for \(const host of store\.snapshot\(\)\.hosts\) void connection\(host\.id\)\.connect\(\)/)
 })

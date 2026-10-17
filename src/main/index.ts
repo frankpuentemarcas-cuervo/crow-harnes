@@ -21,7 +21,7 @@ import { AlertAuditStore } from './alert-audit-store'
 import { AccountUsageService } from './account-usage-service'
 import { ERPTaskService } from './erp-task-service'
 import { GitLabTokenStore, listGitLabProjectFiles, readGitLabProjectFiles } from './gitlab-repository'
-import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget } from '../shared/erp-task'
+import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget, ERPExistingTerminalInput, ERPTerminalCatalogue } from '../shared/erp-task'
 import type { CrowAccessUserInput, GitLabRepositoryContext, ProjectInput, SavedState } from '../shared/types'
 import type { MobileActorBinding, MobileEnrollmentInput, MobileNotice, MobileQuota, MobileStartInput } from '../shared/mobile-companion'
 import { projectVisibleSessions, withoutHostWorkspace } from '../shared/access-visibility'
@@ -166,6 +166,57 @@ async function dispatchERPTask(job: ERPDispatchJob): Promise<{ sessionId: string
   const sessionId = result.sessionId || result.session?.id
   if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Entrega incierta: revisá la terminal antes de continuar.')
   return { sessionId }
+}
+
+let erpMetadataQueue: Promise<unknown> = Promise.resolve()
+function erpMetadataOperation<T>(action: () => T | Promise<T>): Promise<T> {
+  const next = erpMetadataQueue.catch(() => undefined).then(async () => { await refreshERPProjects(); return action() })
+  erpMetadataQueue = next.then(() => undefined, () => undefined)
+  return next
+}
+async function readERPHostTerminals(hostId: string): Promise<ERPTerminalCatalogue> {
+  const generation = accessGeneration, current = connection(hostId)
+  const identity = async (): Promise<Awaited<ReturnType<Connection['accessIdentity']>>> => {
+    if (current.status() !== 'connected') throw new Error('Host sin conexión.')
+    const status = await current.accessStatus(), actor = await current.accessIdentity()
+    if (!status.enabled && actor.role === 'legacy') return actor
+    if ((!status.enabled && actor.role !== 'installation') || actor.role === 'legacy' || actor.revoked) throw new Error('Identidad Crow no válida.')
+    return actor
+  }
+  const before = await identity(), sessions = await current.api<SessionInfo[]>('GET', '/api/sessions'), actor = await identity()
+  if (generation !== accessGeneration || connection(hostId) !== current || JSON.stringify(before) !== JSON.stringify(actor)) throw new Error('Cambió la identidad de Crow; consultá nuevamente.')
+  const saved = store.snapshot(), projects = saved.projects.filter(project => project.hostId === hostId), hostName = saved.hosts.find(host => host.id === hostId)?.name || hostId
+  const actorId = actor.role === 'legacy' ? `legacy:${hostId}` : actor.id, warnings: string[] = [], terminals: ERPTerminalCandidate[] = []
+  for (const session of sessions) {
+    if (session.state !== 'running' || !(session.ownerId === actorId || (actor.role === 'legacy' && !session.ownerId))) continue
+    const matching = projects.filter(project => project.root === session.root && project.root.startsWith('/') && posix.normalize(project.root) === project.root)
+    if (matching.length > 1) { warnings.push(`${hostName}: varios proyectos comparten la misma raíz; no se adivina la asociación.`); continue }
+    const project = matching[0]
+    if (!project || (actor.role !== 'legacy' && actor.role !== 'installation' && !actor.allowedRoots.some(root => project.root === root || project.root.startsWith(root.replace(/\/$/, '') + '/')))) continue
+    terminals.push({ sessionId: session.id, projectId: project.id, hostId, projectName: project.name, hostName, name: saved.sessionNames[`${hostId}:${session.id}`]?.trim() || session.agent, agent: session.agent, canSubmit: !session.readOnly && session.mode === 'normal' && (session.agent === 'claude' || session.agent === 'codex') && session.hooksActive === true && (session.agentState === 'waiting' || session.agentState === 'completed') })
+  }
+  return { terminals, warnings: [...new Set(warnings)] }
+}
+async function erpTerminalCatalogue(): Promise<ERPTerminalCatalogue> {
+  const generation = accessGeneration, saved = store.snapshot(), hostIds = [...new Set(saved.projects.map(project => project.hostId))]
+  const results = await Promise.all(hostIds.map(async hostId => {
+    const hostName = saved.hosts.find(host => host.id === hostId)?.name || hostId
+    if (connections.get(hostId)?.status() !== 'connected') return { terminals: [], warnings: [`${hostName}: sin conexión.`] }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([readERPHostTerminals(hostId), new Promise<ERPTerminalCatalogue>((_, reject) => { timer = setTimeout(() => reject(new Error('Host timeout')), 2000) })])
+    } catch { return { terminals: [], warnings: [`${hostName}: no disponible o sin permisos; las demás terminales siguen disponibles.`] } }
+    finally { if (timer) clearTimeout(timer) }
+  }))
+  if (generation !== accessGeneration) throw new Error('Cambió la identidad de Crow; consultá nuevamente.')
+  return { terminals: results.flatMap(result => result.terminals), warnings: results.flatMap(result => result.warnings) }
+}
+async function resolveERPTerminal(input: ERPExistingTerminalInput): Promise<ERPTerminalCandidate> {
+  if (!input || typeof input.hostId !== 'string' || typeof input.sessionId !== 'string') throw new Error('Terminal no permitida o no disponible.')
+  const result = await readERPHostTerminals(input.hostId)
+  const terminal = result.terminals.find(item => item.hostId === input.hostId && item.sessionId === input.sessionId)
+  if (!terminal) throw new Error('Terminal no permitida o no disponible.')
+  return terminal
 }
 
 async function erpTerminals(projectId: string, hostId: string, includeClosed = false): Promise<ERPTerminalCandidate[]> {
@@ -362,18 +413,19 @@ function registerIPC(): void {
   handle('crow:access-create-user', (hostId: string, input: CrowAccessUserInput) => connection(hostId).createAccessUser(input))
   handle('crow:access-revoke-user', (hostId: string, id: string) => connection(hostId).revokeAccessUser(id))
   handle('crow:access-assign-session', (hostId: string, sessionId: string, ownerId: string) => connection(hostId).assignSessionOwner(sessionId, ownerId))
-  handle('crow:erp-snapshot', () => erpOperation(() => erpTasks.snapshot()))
-  handle('crow:erp-projects', () => erpOperation(() => [...erpProjects]))
+  handle('crow:erp-snapshot', () => erpTasks.snapshot())
+  handle('crow:erp-projects', async () => { await refreshERPProjects(); return [...erpProjects] })
   handle('crow:erp-save', (input: ERPConnectionInput) => erpOperation(() => erpTasks.saveConnection(input)))
   handle('crow:erp-test', () => erpOperation(() => erpTasks.testConnection()))
-  handle('crow:erp-sync', () => erpOperation(() => erpTasks.sync()))
+  handle('crow:erp-sync', async () => { await refreshERPProjects(); return erpTasks.sync() })
   handle('crow:erp-detail', (taskKey: string) => erpOperation(() => erpTasks.loadDetail(taskKey)))
   handle('crow:erp-link', (erpProject: string, projectId: string) => erpOperation(() => erpTasks.linkProject(erpProject, projectId)))
   handle('crow:erp-classify', (taskKey: string, repositoryContext?: GitLabRepositoryContext[]) => erpOperation(() => erpTasks.classify(taskKey, repositoryContext)))
   handle('crow:erp-assign', (taskKey: string, projectId: string) => erpOperation(() => erpTasks.assign(taskKey, projectId)))
+  handle('crow:erp-terminal-catalogue', () => erpTerminalCatalogue())
   handle('crow:erp-terminals', (projectId: string, hostId: string) => erpOperation(() => erpTasks.terminals(projectId, hostId)))
-  handle('crow:erp-assign-terminal', (key: string, target: ERPTerminalTarget) => erpOperation(() => erpTasks.assignTerminal(key, target)))
-  handle('crow:erp-terminal-view', (key: string, previous?: boolean) => erpOperation(() => erpTasks.terminalForView(key, previous)))
+  handle('crow:erp-assign-terminal', (key: string, target: ERPExistingTerminalInput) => erpMetadataOperation(() => erpTasks.assignTerminal(key, target)))
+  handle('crow:erp-terminal-view', (key: string, previous?: boolean) => erpMetadataOperation(() => erpTasks.terminalForView(key, previous)))
   handle('crow:erp-reconcile', (key: string) => erpOperation(() => erpTasks.reconcile(key)))
   handle('crow:erp-preview', (input: ERPTaskPreviewInput) => erpOperation(() => erpTasks.preview(input)))
   handle('crow:erp-approve', (previewId: string) => erpOperation(() => erpTasks.approve(previewId)))
@@ -700,7 +752,7 @@ app.whenReady().then(() => {
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
   gitLabTokens = new GitLabTokenStore(app.getPath('userData'), safeStorage)
-  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask, terminals: erpTerminals, submit: submitERPTask, submissionStatus: erpSubmissionStatus })
+  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask, terminals: erpTerminals, submit: submitERPTask, submissionStatus: erpSubmissionStatus, resolveTerminal: resolveERPTerminal, authorizationGeneration: () => accessGeneration, changed: () => send('crow:erp-changed', undefined) })
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)
@@ -710,6 +762,8 @@ app.whenReady().then(() => {
   mobile = new MobileGateway({ snapshot: mobileWorkspaceSnapshot, configurationSnapshot: () => store.snapshot(), connection, authSnapshot: mobileAuthSnapshot, quotas: mobileCachedQuotas, notices: mobileCachedNotices, relayClientFactory: options => new MobileRelayClient(options) })
   registerIPC()
   createWindow()
+  // Refresh metadata independently; never hold app/SSH startup or execute a Task.
+  void refreshERPProjects().then(() => erpTasks.startupRefresh()).catch(() => undefined)
   configureUpdater()
   // Explicit owner opt-in. No new listeners or permissions by default; reuse
   // the exact Connection/passphrase path already used by the desktop app.
