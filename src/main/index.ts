@@ -532,10 +532,13 @@ function registerIPC(): void {
     const invite = await mobile.invite({ ...input, projectIds: selected.filter(project => readyHostIds.has(project.hostId)).map(project => project.id) })
     const bundle = { version: 3, enrollments: [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: invite }, ...hostInvites] }
     const bundleText = JSON.stringify(bundle)
-    const qrPayload = bundleText.length > 2000 ? `crow3:${gzipSync(bundleText).toString('base64url')}` : bundleText
-    const qrDataUrl = await QRCode.toDataURL(qrPayload, { width: 512, margin: 2, errorCorrectionLevel: 'L' })
+    const compressed = `crow3:${gzipSync(Buffer.from(bundleText, 'utf8')).toString('base64url')}`
+    const qrPayload = Buffer.byteLength(compressed, 'utf8') < Buffer.byteLength(bundleText, 'utf8') ? compressed : bundleText
+    const qrModuleCount = QRCode.create(qrPayload, { errorCorrectionLevel: 'L' }).modules.size
+    // Fixed module scale and four-module quiet zone keep each native PNG module crisp.
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, { scale: 6, margin: 4, errorCorrectionLevel: 'L' })
     const enrollment = { ...invite, endpoints: invite.endpoints.map(({ proxyAuth: _secret, ...endpoint }) => endpoint) }
-    return { enrollment, qrDataUrl, hostCount: hostInvites.length, skippedHosts }
+    return { enrollment, qrDataUrl, qrModuleCount, hostCount: hostInvites.length, skippedHosts }
   }))
   handle('crow:mobile-revoke', (deviceId: string) => { mobile.revoke(deviceId); return mobile.status() })
   handle('crow:hook-settings', (hostId: string) => connection(hostId).api<{ enabled: boolean }>('GET', '/api/hooks'))

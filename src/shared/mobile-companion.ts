@@ -44,7 +44,7 @@ export interface MobileEnrollmentMetadata { version: 1 | 2; gatewayId: string; i
 /** Credential-bearing QR payload only; never persist, log, or return this value from gateway status. */
 export interface MobileEnrollment extends Omit<MobileEnrollmentMetadata, 'endpoints'> { endpoints: (MobileEndpoint & { proxyAuth?: { origin: string } & MobilePangolinAuth })[] }
 /** Renderer receives only a safe summary and the QR bitmap, never the credential-bearing QR text. */
-export interface MobileInviteResult { enrollment: MobileEnrollmentMetadata; qrDataUrl: string; hostCount?: number; skippedHosts?: { name: string; reason: string }[] }
+export interface MobileInviteResult { enrollment: MobileEnrollmentMetadata; qrDataUrl: string; qrModuleCount: number; hostCount?: number; skippedHosts?: { name: string; reason: string }[] }
 /** null means key-based trust until explicit revocation, never a permanent bearer. */
 export interface MobileDevice { id: string; label: string; pairedAt: string; expiresAt: string | null; projectIds: string[]; unavailableProjects?: MobileProject[]; capabilities: MobileCapabilities }
 /** generation includes host target + current credential/access epoch, never raw credentials. */

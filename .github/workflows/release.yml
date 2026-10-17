@@ -91,6 +91,9 @@ jobs:
         # pinned dependencies as well; the Windows root package does not own them.
         run: npm ci --prefix packages/android-companion --ignore-scripts
 
+      - name: Verify dense mobile QR viewport geometry in isolated Electron
+        run: node tests/mobile-qr-viewport-electron.mjs
+
       - name: Exercise Android chat fluidity in isolated mobile-sized Electron
         run: node tests/chat-fluidity-electron.mjs
 

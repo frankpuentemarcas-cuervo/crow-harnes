@@ -7,9 +7,11 @@ import ts from 'typescript'
 const mobileAuth = await import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(readFileSync(new URL('../src/main/mobile-device-auth.ts', import.meta.url), 'utf8'), { mode: 'transform' })).toString('base64'))
 
 const require = createRequire(import.meta.url)
+const { gunzipSync } = require('node:zlib')
 const plain = value => JSON.parse(JSON.stringify(value))
+const decodeQrPayload = value => JSON.parse(value.startsWith('crow3:') ? gunzipSync(Buffer.from(value.slice(6), 'base64url')).toString('utf8') : value)
 function harness() {
-  const handlers = new Map(), invalidated = [], suspended = [], mobileInvites = [], qrPayloads = [], sender = { send() {} }
+  const handlers = new Map(), invalidated = [], suspended = [], mobileInvites = [], qrPayloads = [], qrOptions = [], sender = { send() {} }
   const host = { id: 'host', name: 'Test host', target: 'user@test', port: 22, remotePort: 7337 }
   const actor = { id: 'member-a', role: 'member', allowedRoots: ['/srv/project'], operateOthers: false }
   const state = { hosts: [host], projects: [{ id: 'project', hostId: 'host', name: 'Project', root: '/srv/project' }], notices: [{ id: 'notice', hostId: 'host', sessionId: 'a'.repeat(32), kind: 'turn-complete', at: '2026-10-10T00:00:00Z', requiresAttention: true, classification: { detail: 'PRIVATE RESPONSE' }, message: 'PRIVATE' }], tabs: [], activeTabs: {}, sessionNames: {}, eventCursors: {} }
@@ -26,14 +28,14 @@ exports.auth = mobileAuthSnapshot; exports.workspace = mobileWorkspaceSnapshot; 
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
     if (id === './mobile-device-auth') return mobileAuth
-    if (id === 'qrcode') return { default: { toDataURL: async value => { qrPayloads.push(value); return 'data:image/png;base64,invite' } } }
+    if (id === 'qrcode') return { default: { create: value => ({ modules: { size: 57 } }), toDataURL: async (value, options) => { qrPayloads.push(value); qrOptions.push(options); return 'data:image/png;base64,invite' } } }
     if (id === 'electron') return { app: { whenReady: () => ({ then() {} }), on() {} }, ipcMain: { handle: (name, handler) => handlers.set(name, handler) } }
     if (id === '../shared/access-visibility') return { withoutHostWorkspace: value => value, projectVisibleSessions: value => value }
     return {}
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.setup(store, connection, mobile, accounts, { webContents: sender, isDestroyed: () => false })
-  return { ...module.exports, actor, host, state, connection, hostCalls, sessionList, assigned, invalidated, suspended, mobileInvites, qrPayloads, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
+  return { ...module.exports, actor, host, state, connection, hostCalls, sessionList, assigned, invalidated, suspended, mobileInvites, qrPayloads, qrOptions, handlers, invoke: (name, ...args) => handlers.get(name)({ sender }, ...args) }
 }
 
 test('Android snapshot binds a current individual actor without exposing credentials', async () => {
@@ -139,6 +141,10 @@ test('desktop-only mobile IPC forwards typed configuration and rejects foreign s
   assert.equal(invite.qrDataUrl, 'data:image/png;base64,invite')
   assert.equal(invite.enrollment.invitationCode, 'one-use')
   assert.equal(invite.hostCount, 1)
+  assert.equal(invite.qrModuleCount, 57)
+  assert.equal(h.qrOptions[0].margin, 4)
+  assert.equal(h.qrOptions[0].scale, 6)
+  assert.equal(h.qrOptions[0].width, undefined)
   assert.deepEqual(h.hostCalls.map(item => item[1]), ['/api/mobile/config', '/api/mobile/invite'])
   await h.invoke('crow:mobile-revoke', 'phone'); assert.deepEqual(h.invalidated, ['device:phone'])
   await assert.rejects(h.handlers.get('crow:mobile-invite')({ sender: {} }, grant), /no autorizada/)
@@ -178,7 +184,7 @@ test('mobile QR omits disconnected and unauthorized hosts without including thei
     const factory = { ...h.connection, status: () => failure === 'disconnected' ? 'disconnected' : 'connected', api: async () => { throw Object.assign(new Error('individual access required'), { status: 403 }) } }
     h.addConnection('factory', factory)
     const result = plain(await h.invoke('crow:mobile-invite', { projectIds: ['project', 'factory-project'], capabilities: {} }))
-    const qr = JSON.parse(h.qrPayloads[0])
+    const qr = decodeQrPayload(h.qrPayloads[0])
     assert.equal(result.hostCount, 1)
     assert.equal(result.skippedHosts[0].name, 'FACTORY')
     assert.equal(qr.enrollments.length, 2)
@@ -190,7 +196,7 @@ test('mobile QR omits disconnected and unauthorized hosts without including thei
 test('credential-bearing Pangolin QR is encoded in the main process and returned only as a bitmap', async () => {
   const h = harness(), input = { projectIds: ['project'], pangolinAuth: { tokenId: 'resource-id', token: 'secret-token' } }
   const result = plain(await h.invoke('crow:mobile-invite', input))
-  const qr = JSON.parse(h.qrPayloads[0])
+  const qr = decodeQrPayload(h.qrPayloads[0])
   assert.equal(qr.version, 3)
   assert.equal(qr.enrollments.length, 2)
   assert.equal(qr.enrollments[0].enrollment.endpoints[0].proxyAuth.token, 'secret-token')

@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import type { Host, MobileStatus, Project } from '../../shared/types'
 import { Modal } from './Modal'
 import { useConfirm } from './ConfirmDialog'
+import { mobileQrModulePixels } from './mobile-qr-layout'
 
 /** One explicit action provisions the Windows gateway and every selected Linux host. */
 export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]; hosts: Host[]; onClose(): void }): React.JSX.Element {
@@ -12,12 +13,19 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [qr, setQR] = useState('')
+  const [qrModuleCount, setQrModuleCount] = useState(0)
+  const [scanMode, setScanMode] = useState(false)
+  const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 })
   const [expiresAt, setExpiresAt] = useState('')
   const [hostCount, setHostCount] = useState(0)
   const [skippedHosts, setSkippedHosts] = useState<Array<{ name: string; reason: string }>>([])
   const [now, setNow] = useState(Date.now())
   const focus = useRef<HTMLDivElement>(null)
+  const scanClose = useRef<HTMLButtonElement>(null)
+  const scanOpen = useRef<HTMLButtonElement>(null)
+  const generateButton = useRef<HTMLButtonElement>(null)
   const confirm = useConfirm()
+  const validQR = !!qr && Date.parse(expiresAt) > now
 
   useEffect(() => {
     let live = true
@@ -26,13 +34,23 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     return () => { live = false; clearInterval(timer) }
   }, [])
   useEffect(() => { if (error) focus.current?.focus() }, [error])
+  useEffect(() => {
+    const resize = (): void => setViewport({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 })
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [])
+  useEffect(() => { if (scanMode && !validQR) setScanMode(false) }, [scanMode, validQR])
+  useEffect(() => {
+    if (scanMode && validQR) scanClose.current?.focus()
+    else if (qr) (validQR ? scanOpen.current : generateButton.current)?.focus()
+  }, [scanMode, validQR, qr])
 
   async function generate(): Promise<void> {
     if (busy) return
-    setBusy(true); setError(''); setQR(''); setSkippedHosts([])
+    setBusy(true); setError(''); setQR(''); setScanMode(false); setSkippedHosts([])
     try {
       const result = await window.crow.mobileInvite({ projectIds: selected, capabilities: { input: true, create: true, close: false, quotas: shareQuotas } })
-      setQR(result.qrDataUrl); setExpiresAt(result.enrollment.expiresAt); setHostCount(result.hostCount || 0); setSkippedHosts(result.skippedHosts || [])
+      setQR(result.qrDataUrl); setQrModuleCount(result.qrModuleCount); setExpiresAt(result.enrollment.expiresAt); setHostCount(result.hostCount || 0); setSkippedHosts(result.skippedHosts || []); setScanMode(true)
       setStatus(await window.crow.mobileStatus())
     } catch (reason) { setError(String(reason)) }
     finally { setBusy(false) }
@@ -44,8 +62,19 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     try { setStatus(await window.crow.mobileRevoke(id)) } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
   }
 
-  const validQR = !!qr && Date.parse(expiresAt) > now
-  return <Modal className="mobile-dialog" titleId="mobile-title" busy={busy} initialFocus="[data-close]" onClose={onClose}>
+  const qrModulePixels = mobileQrModulePixels(qrModuleCount, viewport.width, viewport.height, scanMode, viewport.dpr)
+  const qrDisplaySize = (qrModuleCount + 8) * qrModulePixels
+  return <Modal className={`mobile-dialog${scanMode ? ' mobile-dialog--scan' : ''}`} titleId="mobile-title" busy={busy} initialFocus="[data-close]" onClose={onClose}>
+    {scanMode && validQR ? <>
+      <div className="mobile-qr-scan">
+        <div className="dialog-heading"><h2 id="mobile-title">Escaneá el QR</h2><button ref={scanClose} type="button" className="secondary-button" onClick={() => setScanMode(false)}>Volver a opciones</button><button data-close className="icon-button" aria-label="Cerrar" disabled={busy} onClick={onClose}><X size={18} /></button></div>
+        <img src={qr} width="384" height="384" style={{ width: qrDisplaySize, height: qrDisplaySize }} alt={`QR temporal para Crow Windows y ${hostCount} hosts`} />
+        <strong>{hostCount} hosts Linux · vence {new Date(expiresAt).toLocaleTimeString()}</strong>
+        {qrModulePixels * viewport.dpr < 3 && <small role="status" className="mobile-qr-compact-warning">Este QR denso se muestra al tamaño máximo legible para esta ventana. Maximizá Crow antes de escanear.</small>}
+        <small>Este QR temporal no cambia mientras lo escaneás. No compartas esta imagen.</small>
+        {skippedHosts.length > 0 && <p role="status" className="mobile-security-note">No incluidos en este QR: {skippedHosts.map(host => `${host.name} (${host.reason})`).join(', ')}.</p>}
+      </div>
+    </> : <>
     <div className="dialog-heading"><h2 id="mobile-title">Acceso móvil</h2><button data-close className="icon-button" aria-label="Cerrar" disabled={busy} onClick={onClose}><X size={18} /></button></div>
     <p>Un solo QR vincula Android con Crow Windows y las terminales de tus hosts Linux. No necesitás ingresar dominio, puerto ni credenciales Pangolin.</p>
     <p className="mobile-security-note">El QR incluye solo los hosts disponibles y autorizados al generarlo. Los demás se omiten; podés vincularlos más adelante con otro QR. Después, las terminales vinculadas siguen disponibles aunque cierres Windows.</p>
@@ -55,13 +84,14 @@ export function MobileDialog({ projects, hosts, onClose }: { projects: Project[]
     </fieldset>
     <label className="mobile-quota-consent"><input type="checkbox" checked={shareQuotas} disabled={busy} onChange={event => setShareQuotas(event.target.checked)} /> Mostrar uso de cuentas Claude y Codex en este Android</label>
     <small className="mobile-security-note">Opcional. El dispositivo podrá consultar los porcentajes y horarios de renovación de las cuentas de Crow Windows mientras la PC esté encendida; no recibe las credenciales. Los hosts Linux no proporcionan estas cuotas.</small>
-    <button className="primary-button" disabled={busy || !selected.length} onClick={() => void generate()}>{busy ? 'Preparando hosts…' : validQR ? 'Renovar QR' : 'Generar QR para Android'}</button>
-    {validQR && <div className="mobile-qr-panel"><strong>Escaneá una sola vez en Crow Android</strong><img src={qr} width="384" height="384" alt={`QR temporal para Crow Windows y ${hostCount} hosts`} /><small>{hostCount} hosts Linux · vence {new Date(expiresAt).toLocaleTimeString()}. No compartas esta imagen.</small></div>}
+    <button ref={generateButton} className="primary-button" disabled={busy || !selected.length} onClick={() => void generate()}>{busy ? 'Preparando hosts…' : validQR ? 'Renovar QR' : 'Generar QR para Android'}</button>
+    {validQR && <div className="mobile-qr-panel"><strong>Escaneá una sola vez en Crow Android</strong><button ref={scanOpen} type="button" className="secondary-button" onClick={() => setScanMode(true)}>Ver QR grande</button><small>{hostCount} hosts Linux · vence {new Date(expiresAt).toLocaleTimeString()}. No compartas esta imagen.</small></div>}
     {validQR && skippedHosts.length > 0 && <p role="status" className="mobile-security-note">No incluidos en este QR: {skippedHosts.map(host => `${host.name} (${host.reason})`).join(', ')}.</p>}
     {qr && !validQR && <p role="status">El QR venció. Generá uno nuevo; los vínculos ya creados permanecen.</p>}
     {status.running && <p role="status">Crow Windows {status.relayState === 'connected' ? 'conectado al relay' : 'reconectando al relay'}{status.relayLastDisconnect ? ` · último corte: ${status.relayLastDisconnect.cause === 'heartbeat-timeout' ? 'sin respuesta al latido' : status.relayLastDisconnect.cause === 'protocol' ? 'protocolo rechazado' : 'socket cerrado'} (código ${status.relayLastDisconnect.code})` : ''}. Los hosts Linux mantienen conexiones independientes.</p>}
     {!!status.devices?.length && <section><h3>Dispositivos vinculados a Windows</h3>{status.devices.map(device => <div key={device.id} className="mobile-credentials"><div><strong>{device.label}</strong><small>{device.expiresAt ? `Vence ${new Date(device.expiresAt).toLocaleString()}` : 'Vínculo hasta revocación'}</small></div><button className="danger-button" disabled={busy} onClick={() => void revoke(device.id, device.label)}>Revocar</button></div>)}</section>}
     {error && <div ref={focus} tabIndex={-1} className="inline-error" role="alert">{error}</div>}
     <div className="dialog-actions"><span /><button className="secondary-button" disabled={busy} onClick={onClose}>Cerrar</button></div>
+    </>}
   </Modal>
 }

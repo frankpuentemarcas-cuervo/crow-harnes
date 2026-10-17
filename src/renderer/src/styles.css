@@ -109,10 +109,16 @@ button, select { -webkit-tap-highlight-color: transparent; }
 .hook-toggle input { width: 15px; height: 15px; flex: none; margin-top: 2px; }
 .hook-toggle small { display: block; margin-top: 4px; color: #9da7b3; font-size: 10px; line-height: 1.4; }
 .mobile-dialog { max-height: min(90vh, 720px); overflow-y: auto; }
+.mobile-dialog--scan { width: min(480px, calc(100vw - 32px)); max-height: min(90vh, 720px); overflow: auto; }
 .mobile-qr-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; border: 1px solid #424b59; border-radius: 8px; background: #171b21; text-align: center; }
 .mobile-qr-panel strong { color: #e9eef5; font-size: 12px; }
-.mobile-qr-panel img { width: min(384px, 100%); height: auto; aspect-ratio: 1; border: 8px solid white; border-radius: 7px; }
+.mobile-qr-panel img { max-width: none; height: auto; aspect-ratio: 1; border: 0; border-radius: 0; image-rendering: pixelated; }
 .mobile-qr-panel small { color: #a8b4c2; font-size: 11px; }
+.mobile-qr-scan { position: fixed; z-index: 1; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100vw; height: 100dvh; overflow: hidden; padding: 10px 16px; background: #22262d; text-align: center; }
+.mobile-qr-scan .dialog-heading { width: min(960px, calc(100vw - 32px)); flex: none; }
+.mobile-qr-scan img { display: block; max-width: none; flex: none; height: auto; image-rendering: pixelated; }
+.mobile-qr-scan strong { color: #e9eef5; font-size: 12px; }
+.mobile-qr-scan small { color: #a8b4c2; font-size: 11px; }
 .mobile-qr-done { padding: 14px; border: 1px solid #4b7356; border-radius: 7px; color: #b7dfc0; background: #26412c42; font-size: 12px; }
 .mobile-manual { color: #b8c2ce; font-size: 11px; }
 .mobile-manual summary { cursor: pointer; }
@@ -291,6 +297,7 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .rename-terminal-dialog::backdrop { background: rgb(0 0 0 / .65); }
 .rename-terminal-dialog form { display: flex; flex-direction: column; gap: 14px; }
 .app-dialog { width: min(480px, calc(100vw - 32px)); margin: auto; color: var(--text); max-height: calc(100dvh - 32px); overflow: auto; }
+.app-dialog.mobile-dialog--scan { max-height: calc(100dvh - 32px); overflow: visible !important; }
 .app-dialog::backdrop { background: rgb(0 0 0 / .65); }
 .app-dialog form, .app-dialog fieldset { display: flex; flex-direction: column; gap: 14px; }
 .app-dialog fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
