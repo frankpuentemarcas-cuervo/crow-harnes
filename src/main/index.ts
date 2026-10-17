@@ -21,7 +21,7 @@ import { AlertAuditStore } from './alert-audit-store'
 import { AccountUsageService } from './account-usage-service'
 import { ERPTaskService } from './erp-task-service'
 import { GitLabTokenStore, listGitLabProjectFiles, readGitLabProjectFiles } from './gitlab-repository'
-import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage } from '../shared/erp-task'
+import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget } from '../shared/erp-task'
 import type { CrowAccessUserInput, GitLabRepositoryContext, ProjectInput, SavedState } from '../shared/types'
 import type { MobileActorBinding, MobileEnrollmentInput, MobileNotice, MobileQuota, MobileStartInput } from '../shared/mobile-companion'
 import { projectVisibleSessions, withoutHostWorkspace } from '../shared/access-visibility'
@@ -162,10 +162,42 @@ function erpOperation<T>(action: () => T | Promise<T>): Promise<T> {
 async function dispatchERPTask(job: ERPDispatchJob): Promise<{ sessionId: string }> {
   const authorized = await authorizeERPProject(job.projectId, job.hostId)
   if (authorized.root !== job.root || authorized.actorId !== job.actorId) throw new Error('El destino o identidad cambió; autorizá nuevamente.')
-  const result = await connection(job.hostId).api<{ sessionId?: string; session?: SessionInfo; state?: string }>('POST', '/api/task-dispatch', { jobId: job.jobId, agent: job.agent, root: job.root, prompt: job.initialPrompt })
+  const result = await connection(job.hostId).api<{ sessionId?: string; session?: SessionInfo; state?: string }>('POST', '/api/task-dispatch', { jobId: job.jobId, agent: job.agent, root: job.root, initialPrompt: job.initialPrompt })
   const sessionId = result.sessionId || result.session?.id
   if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Entrega incierta: revisá la terminal antes de continuar.')
   return { sessionId }
+}
+
+async function erpTerminals(projectId: string, hostId: string, includeClosed = false): Promise<ERPTerminalCandidate[]> {
+  const generation = accessGeneration, current = connection(hostId)
+  const authorized = await authorizeERPProject(projectId, hostId)
+  const sessions = await current.api<SessionInfo[]>('GET', '/api/sessions')
+  const actor = await authorizeERPProject(projectId, hostId)
+  if (generation !== accessGeneration || connection(hostId) !== current || actor.actorId !== authorized.actorId || actor.root !== authorized.root) throw new Error('Cambió la identidad de Crow; consultá nuevamente.')
+  const names = store.snapshot().sessionNames
+  return sessions.filter(session => session.root === actor.root && (session.ownerId === actor.actorId || (actor.actorId === `legacy:${hostId}` && !session.ownerId)) && (includeClosed || session.state === 'running')).map(session => ({ sessionId: session.id, projectId, hostId, name: names[`${hostId}:${session.id}`]?.trim() || session.agent, agent: session.agent, canSubmit: !session.readOnly && session.mode === 'normal' && (session.agent === 'claude' || session.agent === 'codex') && session.hooksActive === true && (session.agentState === 'waiting' || session.agentState === 'completed') }))
+}
+async function validateERPTerminal(target: ERPTerminalTarget, expected?: { actorId: string; root: string; agent: string }, includeClosed = false): Promise<void> {
+  const terminal = (await erpTerminals(target.projectId, target.hostId, includeClosed)).find(item => item.sessionId === target.sessionId)
+  if (!terminal || (expected && terminal.agent !== expected.agent)) throw new Error('Terminal no permitida o no disponible.')
+  const actor = await authorizeERPProject(target.projectId, target.hostId)
+  if (expected && (actor.actorId !== expected.actorId || actor.root !== expected.root)) throw new Error('Cambió la identidad de Crow; autorizá nuevamente.')
+}
+async function submitERPTask(job: ERPDispatchJob): Promise<{ sessionId: string; status: string }> {
+  const target = { projectId: job.projectId, hostId: job.hostId, sessionId: job.sessionId! }
+  await validateERPTerminal(target, job)
+  const result = await connection(job.hostId).api<{ requestId: string; sessionId: string; status: string }>('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/chat/submit`, { requestId: job.jobId, text: job.initialPrompt })
+  if (result.requestId !== job.jobId || result.sessionId !== target.sessionId || !['accepted', 'written', 'pending', 'uncertain', 'rejected'].includes(result.status)) throw new Error('Entrega incierta; verificá la terminal.')
+  return { sessionId: target.sessionId, status: result.status }
+}
+async function erpSubmissionStatus(target: ERPDispatchTarget, jobId: string): Promise<{ status: string }> {
+  const generation = accessGeneration, current = connection(target.hostId)
+  await validateERPTerminal(target, target, true)
+  const result = await connection(target.hostId).api<{ requestId: string; sessionId: string; status: string }>('GET', `/api/sessions/${encodeURIComponent(target.sessionId)}/chat/submit?requestId=${encodeURIComponent(jobId)}`)
+  if (result.requestId !== jobId || result.sessionId !== target.sessionId || !['accepted', 'written', 'pending', 'uncertain', 'rejected', 'unknown'].includes(result.status)) throw new Error('No se pudo verificar la entrega.')
+  await validateERPTerminal(target, target, true)
+  if (generation !== accessGeneration || connection(target.hostId) !== current) throw new Error('Cambió la identidad de Crow; consultá nuevamente.')
+  return { status: result.status }
 }
 
 async function visibleState(value: SavedState): Promise<SavedState> {
@@ -339,6 +371,10 @@ function registerIPC(): void {
   handle('crow:erp-link', (erpProject: string, projectId: string) => erpOperation(() => erpTasks.linkProject(erpProject, projectId)))
   handle('crow:erp-classify', (taskKey: string, repositoryContext?: GitLabRepositoryContext[]) => erpOperation(() => erpTasks.classify(taskKey, repositoryContext)))
   handle('crow:erp-assign', (taskKey: string, projectId: string) => erpOperation(() => erpTasks.assign(taskKey, projectId)))
+  handle('crow:erp-terminals', (projectId: string, hostId: string) => erpOperation(() => erpTasks.terminals(projectId, hostId)))
+  handle('crow:erp-assign-terminal', (key: string, target: ERPTerminalTarget) => erpOperation(() => erpTasks.assignTerminal(key, target)))
+  handle('crow:erp-terminal-view', (key: string, previous?: boolean) => erpOperation(() => erpTasks.terminalForView(key, previous)))
+  handle('crow:erp-reconcile', (key: string) => erpOperation(() => erpTasks.reconcile(key)))
   handle('crow:erp-preview', (input: ERPTaskPreviewInput) => erpOperation(() => erpTasks.preview(input)))
   handle('crow:erp-approve', (previewId: string) => erpOperation(() => erpTasks.approve(previewId)))
   handle('crow:erp-move', (taskKey: string, stage: ERPTaskStage) => erpOperation(() => erpTasks.move(taskKey, stage)))
@@ -664,7 +700,7 @@ app.whenReady().then(() => {
   alertSoundStore = new AlertSoundStore(app.getPath('userData'))
   alertAISettings = new AlertAISettingsStore(app.getPath('userData'), safeStorage)
   gitLabTokens = new GitLabTokenStore(app.getPath('userData'), safeStorage)
-  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask })
+  erpTasks = new ERPTaskService(app.getPath('userData'), safeStorage, { projects: () => [...erpProjects], aiConfiguration: () => alertAISettings.configuration(), authorizeProject: authorizeERPProject, dispatch: dispatchERPTask, terminals: erpTerminals, submit: submitERPTask, submissionStatus: erpSubmissionStatus })
   freeLLM = new FreeLLMRuntime(() => alertAISettings.snapshot(), (status) => send('crow:free-llm-status', status))
   alertAudit = new AlertAuditStore(app.getPath('userData'), safeStorage, Date.now, () => { try { return [alertAISettings.configuration().apiKey] } catch { return [] } })
   auditTimer = setInterval(() => alertAudit.prune(), 60_000)

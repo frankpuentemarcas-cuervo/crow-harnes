@@ -12,11 +12,11 @@ function harness() {
   const principal = { id: 'actor-a', label: 'A', role: 'member', operateOthers: false, allowedRoots: ['/srv/allowed'] }
   const project = { id: 'project', name: 'Allowed', hostId: 'host', root: '/srv/allowed' }
   const state = { hosts: [{ id: 'host' }], projects: [project], notices: [], sessionNames: {}, tabs: [], activeTabs: {}, selectedProjectId: '', eventCursors: {} }
-  const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, sessionList: [], assignSessionOwner: async (sessionId, ownerId) => { ownerAssignments.push([sessionId, ownerId]) }, api: async (method, path, body) => { remoteCalls.push([method, path, body]); if (method === 'GET' && path === '/api/sessions') return current.sessionList; dispatches.push(body); return { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
+  const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, sessionList: [], assignSessionOwner: async (sessionId, ownerId) => { ownerAssignments.push([sessionId, ownerId]) }, api: async (method, path, body) => { remoteCalls.push([method, path, body]); if (method === 'GET' && path === '/api/sessions') return current.sessionList; dispatches.push(body); return current.receipt ?? { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
   const store = { project: id => id === project.id ? project : undefined, host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; return state }, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
   const erp = { snapshot: () => ({ connection: {}, tasks: [], links: {} }), approve: async () => ({}) }
   const module = { exports: {} }
-  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.auditRecords = visibleAuditRecords;'
+  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.erpTerminals = erpTerminals; exports.submit = submitERPTask; exports.receipt = erpSubmissionStatus; exports.auditRecords = visibleAuditRecords;'
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
@@ -44,7 +44,7 @@ test('main authorizes current server principal and canonical root, not renderer 
 test('dispatch rechecks approved actor and exact root before contacting the remote endpoint', async () => {
   const h = harness(), job = { jobId: 'job', projectId: 'project', hostId: 'host', actorId: 'actor-a', root: '/srv/allowed', agent: 'codex', initialPrompt: 'Approved text; $(not shell)' }
   await h.dispatch(job)
-  assert.equal(h.dispatches[0].root, '/srv/allowed'); assert.equal(h.dispatches[0].prompt, job.initialPrompt)
+  assert.equal(h.dispatches[0].root, '/srv/allowed'); assert.equal(h.dispatches[0].initialPrompt, job.initialPrompt)
   assert.equal(h.dispatches[0].ownerId, undefined)
   h.principal.id = 'actor-b'
   await assert.rejects(h.dispatch(job), /identidad cambió/)
@@ -137,4 +137,39 @@ test('audit list/detail/export projections hide historical private session recor
   assert.deepEqual(JSON.parse(JSON.stringify(await h.auditRecords(rows))), rows.slice(0, 2))
   h.current.status = () => 'disconnected'
   assert.deepEqual(JSON.parse(JSON.stringify(await h.auditRecords(rows))), [])
+})
+
+
+test('ERP terminal catalogue filters exact actor ownership, canonical project, alive agent and current host', async () => {
+  const h = harness(), own = { id: 'a'.repeat(32), ownerId: 'actor-a', root: '/srv/allowed', state: 'running', mode: 'normal', agent: 'codex' }
+  h.state.sessionNames['host:' + own.id] = 'Custom alias'
+  h.current.sessionList = [own, { ...own, id: 'foreign', ownerId: 'actor-b' }, { ...own, id: 'closed', state: 'exited' }, { ...own, id: 'wrong-root', root: '/srv/allowed/sub' }, { ...own, id: 'read-only', readOnly: true }, { ...own, id: 'shell', agent: 'shell' }]
+  h.principal.role = 'admin'; h.principal.operateOthers = true
+  const terminals = await h.erpTerminals('project', 'host'); assert.deepEqual(Array.from(terminals, item => item.sessionId), [own.id, 'read-only', 'shell']); assert.equal(terminals[0].name, 'Custom alias'); assert.equal(terminals[1].canSubmit, false); assert.equal(terminals[2].canSubmit, false)
+  await assert.rejects(h.erpTerminals('project', 'other'))
+  h.current.status = () => 'disconnected'; await assert.rejects(h.erpTerminals('project', 'host'), /host/)
+})
+test('existing ERP send uses durable UUID submission and read-only status, never raw PTY input', async () => {
+  const h = harness(), id = 'a'.repeat(32), job = { jobId: '11111111-1111-4111-8111-111111111111', projectId: 'project', hostId: 'host', sessionId: id, actorId: 'actor-a', root: '/srv/allowed', agent: 'codex', initialPrompt: 'Exact approved detail' }
+  h.current.sessionList = [{ id, ownerId: 'actor-a', root: job.root, state: 'running', mode: 'normal', agent: 'codex' }]
+  h.current.receipt = { requestId: job.jobId, sessionId: id, status: 'written' }
+  assert.equal((await h.submit(job)).status, 'written')
+  const post = h.remoteCalls.find(call => call[0] === 'POST'); assert.equal(post[1], '/api/sessions/' + id + '/chat/submit'); assert.equal(post[2].requestId, job.jobId); assert.equal(post[2].text, job.initialPrompt)
+  h.current.receipt.status = 'accepted'; assert.equal((await h.receipt(job, job.jobId)).status, 'accepted')
+  assert.equal(h.remoteCalls.filter(call => call[0] === 'POST').length, 1)
+  h.principal.id = 'actor-b'; await assert.rejects(h.submit(job)); await assert.rejects(h.receipt(job, job.jobId)); assert.equal(h.remoteCalls.filter(call => call[0] === 'POST').length, 1)
+  for (const channel of ['crow:erp-terminals', 'crow:erp-assign-terminal', 'crow:erp-terminal-view', 'crow:erp-reconcile']) await assert.rejects(h.handlers.get(channel)({ sender: {} }), /no autorizada/)
+})
+
+test('read-only receipt remains queryable after agent exit and rejects late actor changes', async () => {
+  const h = harness(), id = 'a'.repeat(32), target = { projectId: 'project', hostId: 'host', sessionId: id, actorId: 'actor-a', root: '/srv/allowed', agent: 'codex' }, jobId = '11111111-1111-4111-8111-111111111111'
+  h.current.sessionList = [{ id, ownerId: 'actor-a', root: target.root, state: 'exited', mode: 'normal', agent: 'codex' }]
+  h.current.receipt = { requestId: jobId, sessionId: id, status: 'accepted' }
+  assert.equal((await h.receipt(target, jobId)).status, 'accepted')
+  const original = h.current.api
+  h.current.api = async (...args) => { const value = await original(...args); if (args[1].includes('/chat/submit')) h.principal.id = 'actor-revoked'; return value }
+  await assert.rejects(h.receipt(target, jobId)); assert.equal(h.remoteCalls.filter(call => call[0] === 'POST').length, 0)
+})
+test('modified ERP sources remain valid UTF8 without replacement characters', () => {
+  for (const path of ['src/main/erp-task-service.ts','src/main/index.ts','src/renderer/src/ERPTaskKanban.tsx','src/renderer/src/App.tsx']) assert.ok(!readFileSync(new URL('../' + path, import.meta.url), 'utf8').includes('\ufffd'), path)
 })

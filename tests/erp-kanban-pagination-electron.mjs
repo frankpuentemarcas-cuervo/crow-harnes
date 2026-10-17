@@ -8,7 +8,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const temp = await mkdtemp(join(tmpdir(), 'crow-erp-ui-qa-'))
-const server = await createServer({ configFile:false, root:process.cwd(), plugins:[react()], server:{host:'127.0.0.1',port:0} })
+const server = await createServer({ configFile:false, root:process.cwd(), cacheDir:join(temp,'node_modules','.vite'), plugins:[react()], optimizeDeps:{noDiscovery:true,include:['react','react-dom/client','lucide-react']}, server:{host:'127.0.0.1',port:0} })
 await server.listen()
 const main = join(temp, 'main.cjs')
 await writeFile(main, `
