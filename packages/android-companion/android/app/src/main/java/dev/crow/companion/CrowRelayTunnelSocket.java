@@ -202,7 +202,7 @@ public final class CrowRelayTunnelSocket extends Socket {
             if (closed) throw new SocketException("Socket is closed");
             if (!connected || !ready) throw new SocketException("Socket is not connected");
             if (failure != null) throw failure;
-            if (relayClosed) throw new SocketException("Relay tunnel is closed");
+            if (relayClosed || peerClosed) throw new TransportDiagnostics.RelayPeerClosedException();
         }
     }
 

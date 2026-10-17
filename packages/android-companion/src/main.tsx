@@ -5,11 +5,15 @@ import { App } from '@capacitor/app'
 import { CapacitorBarcodeScanner } from '@capacitor/barcode-scanner'
 import { House, Folder, Bell, Settings, RefreshCw } from 'lucide-react'
 import type { MobileBootstrap, MobileEnrollment, MobileNotice, MobileProject, MobileQuota, MobileSession } from '../../../src/shared/mobile-companion'
+import { pairEnrollmentItems } from './enrollment-progress.mjs'
+import { commitEnrollmentResults } from './enrollment-commit.mjs'
 import { Gateway, api, type GatewayProfile } from './native'
 import { revokedConnection, retryableConnection, sessionProfile, fallbackProfile } from './connection-read.mjs'
 import { parseEnrollment, parseEnrollmentBundle, decodeEnrollmentQR, staleQuota, mayWake, agentLabel, terminalTitle, sessionStateLabel, agentStateLabel, quotaStateLabel, hostStateLabel } from './protocol.mjs'
 import { TerminalView } from './TerminalView'
 import { ChatView } from './ChatView'
+import { ChatTestLauncher } from './ChatDiagnostics'
+import { readQRImage } from './qr-image.mjs'
 import './styles.css'
 
 type Page = 'Inicio' | 'Proyectos' | 'Alertas' | 'Ajustes'
@@ -21,6 +25,8 @@ function MobileApp() {
   const [bootstrap, setBootstrap] = useState<MobileBootstrap | null>(null), [hostId, setHostId] = useState(''), [sessions, setSessions] = useState<MobileSession[]>([]), [terminal, setTerminal] = useState<MobileSession | null>(null), [sessionMode, setSessionMode] = useState<'chat' | 'terminal'>('terminal')
   const [notices, setNotices] = useState<MobileNotice[]>([]), [quotas, setQuotas] = useState<MobileQuota[]>([]), [error, setError] = useState(''), [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'revoked'>('disconnected')
   const [checking, setChecking] = useState(false)
+  const [diagnosticSession, setDiagnosticSession] = useState(false)
+  const [enrollmentName, setEnrollmentName] = useState('Mi Android')
   const [enrolling, setEnrolling] = useState(false), [search, setSearch] = useState(''), [newProject, setNewProject] = useState<MobileProject | null>(null), [closing, setClosing] = useState<MobileSession | null>(null), [unlinking, setUnlinking] = useState<GatewayProfile[] | null>(null), [busy, setBusy] = useState(false)
   const generation = useRef(0), active = useRef(''), back = useRef(() => {}), profileListGeneration = useRef(0), foreground = useRef(true), retryRequested = useRef(false), retryAttempt = useRef(0)
   const profilesNow = useRef(profiles), bootstrapNow = useRef(bootstrap), reads = useRef<AbortController | null>(null), check = useRef<{ id: string; controller: AbortController } | null>(null)
@@ -29,10 +35,12 @@ function MobileApp() {
   const profile = profiles.find(item => item.id === profileId)
   const terminalProfile = terminal ? sessionProfile(profiles, profile, terminal.hostId) : profile
   const native = Capacitor.isNativePlatform()
-  function openSession(session: MobileSession, origin: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null) {
+  function beginEnrollment(label = 'Mi Android') { setEnrollmentName(label); setEnrolling(true) }
+  function openSession(session: MobileSession, origin: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null, diagnostics = false) {
     sessionOrigin.current = origin === document.body ? null : origin
     restoreSessionFocus.current = true
     setSessionMode(session.chatAvailable === true ? 'chat' : 'terminal')
+    setDiagnosticSession(diagnostics)
     setTerminal(session)
   }
   useEffect(() => {
@@ -142,18 +150,18 @@ function MobileApp() {
         <button id="session-terminal-tab" type="button" role="tab" tabIndex={sessionMode === 'terminal' ? 0 : -1} aria-controls="session-terminal-panel" aria-selected={sessionMode === 'terminal'} onClick={() => setSessionMode('terminal')}>Terminal</button>
       </div>
       <div id="session-chat-panel" role="tabpanel" aria-labelledby="session-chat-tab" className="session-mode-panel" hidden={sessionMode !== 'chat' || terminal.chatAvailable !== true}>
-        {terminal.chatAvailable === true && <ChatView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} isActive={sessionMode === 'chat'} onBack={() => setTerminal(null)} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />}
+        {terminal.chatAvailable === true && <ChatView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} isActive={sessionMode === 'chat'} initialDiagnostics={diagnosticSession} onBack={() => setTerminal(null)} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />}
       </div>
       <div id="session-terminal-panel" role="tabpanel" aria-labelledby="session-terminal-tab" className="session-mode-panel" hidden={sessionMode === 'chat' && terminal.chatAvailable === true}>
         <TerminalView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} isActive={sessionMode === 'terminal'} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} />
       </div>
       </> : <div className="session-mode-panel"><TerminalView profile={terminalProfile} hostId={terminal.hostId || hostId} session={terminal} onBack={() => setTerminal(null)} onError={fail} onState={info => setTerminal(previous => previous && previous.id === info.id ? { ...previous, ...info } : previous)} /></div>}
     </> : <main>
-      {enrolling ? <Enrollment onCancel={() => setEnrolling(false)} onError={setError} onPaired={values => { profileListGeneration.current++; setProfiles(previous => [...previous, ...values]); changeProfile(values[0].id); setEnrolling(false); setPage('Inicio') }} /> : <>
+      {enrolling ? <Enrollment initialLabel={enrollmentName} onCancel={() => setEnrolling(false)} onError={setError} onPaired={(values, notice) => commitEnrollmentResults(values, notice, { bumpGeneration: () => { profileListGeneration.current++ }, appendProfiles: (next: GatewayProfile[]) => setProfiles(previous => [...previous, ...next]), activateProfile: changeProfile, setError, closeEnrollment: () => setEnrolling(false), showHome: () => setPage('Inicio') })} /> : <>
         <section className={`connection connection-${status}`} aria-live="polite"><span className={`dot ${status}`} aria-hidden="true" /><div><strong>{profile ? profile.device.label : 'Sin equipos vinculados'}</strong><small>{status === 'connected' ? checking ? 'Verificando conexión · terminales disponibles' : 'Vínculo activo' : status === 'connecting' ? 'Comprobando la conexión · máximo 15 segundos…' : status === 'revoked' ? 'Acceso rechazado o vencido · revisá el vínculo' : retryRequested.current ? 'Sin conexión · reintentando automáticamente' : 'Sin conexión · revisá el aviso y actualizá'}</small></div></section>
         {profile && status === 'disconnected' && <button className="connection-retry" disabled={busy || checking} onClick={() => void refresh()}>{checking ? 'Reconectando…' : 'Reintentar conexión'}</button>}
         {profiles.length > 1 && <section className="card"><label htmlFor="active-gateway">Equipo de trabajo</label><select id="active-gateway" value={profileId} onChange={event => changeProfile(event.target.value)}>{profiles.map(item => <option value={item.id} key={item.id}>{item.device.label} · {item.mobileHostId === 'windows' ? 'Crow Windows' : item.mobileHostId || 'equipo vinculado'}</option>)}</select></section>}
-        {!profile && <section className="card"><h2>Tu workspace, desde Android</h2><p>Escaneá una vez el QR de Crow Windows. Después podés seguir las terminales de tus hosts Linux aunque apagues la PC. Android no guarda llaves SSH.</p><button className="primary" disabled={!native} onClick={() => setEnrolling(true)}>Vincular con QR</button></section>}
+        {!profile && <section className="card"><h2>Tu workspace, desde Android</h2><p>Escaneá una vez el QR de Crow Windows. Después podés seguir las terminales de tus hosts Linux aunque apagues la PC. Android no guarda llaves SSH.</p><button className="primary" disabled={!native} onClick={() => beginEnrollment()}>Vincular con QR</button></section>}
         {profile && bootstrap && <section className="host-picker" aria-label="Servidor actual"><label htmlFor="host">Servidor</label><select id="host" value={hostId} onChange={event => { setHostId(event.target.value); setSessions([]) }}>{bootstrap.hosts.map(host => <option value={host.id} key={host.id}>{host.name} · {hostStateLabel(host.status)}</option>)}</select></section>}
         {profile && page === 'Inicio' && <>
           <section className="card"><div className="section-heading"><div><span className="eyebrow">CONTINUAR TRABAJO</span><h2>Terminales</h2></div>{sessions.length > 0 && <span className="count">{sessions.length}</span>}</div>{sessions.length ? sessions.slice(0, 4).map(session => <SessionRow key={session.id} session={session} projectName={hostProjects.find(project => project.id === session.projectId)?.name} disabled={status !== 'connected'} onOpen={origin => openSession(session, origin)} />) : <p className="empty-state">{status !== 'connected' ? 'Esperando conexión para mostrar las terminales.' : selectedHost?.status !== 'connected' ? 'Este servidor no está disponible ahora.' : hostProjects.some(project => (project.availability || 'available') === 'available') ? 'Todavía no hay terminales en este servidor.' : 'No hay proyectos autorizados disponibles en este servidor.'}</p>}<button className="text-action" onClick={() => setPage('Proyectos')}>Ver todos los proyectos <span aria-hidden="true">→</span></button></section>
@@ -173,7 +181,8 @@ function MobileApp() {
         </>}
         {profile && page === 'Alertas' && <section className="card"><h2>Actividad autorizada</h2><p>Se actualiza al volver a la app o tocar ↻. Sin notificaciones de fondo en esta versión.</p>{notices.length ? notices.map(notice => <button className="notice" disabled={status !== 'connected'} key={notice.id} onClick={event => void openNotice(notice, event.currentTarget)}><span>{notice.kind === 'chat-history-limit' ? 'Historial de Chat limitado' : notice.kind === 'turn-complete' ? 'Turno completado' : 'Proceso finalizado'}{notice.requiresAttention ? ' · requiere atención' : ''}{notice.kind === 'chat-history-limit' && <small>Las respuestas nuevas siguen en la terminal, pero no se guardan en Chat.</small>}<small>{new Date(notice.at).toLocaleString()}</small></span><span aria-hidden="true">→</span></button>) : <p>No hay avisos disponibles.</p>}</section>}
         {page === 'Ajustes' && <>
-          <section className="card"><h2>Equipos vinculados</h2>{profiles.map(item => <div className="profile" key={item.id}><button aria-pressed={item.id === profileId} onClick={() => { if (item.id === profileId) void refresh(); else changeProfile(item.id) }}><strong>{item.device.label}</strong><small>{item.endpoint.kind === 'relay' ? 'Relay E2E · TLS fijado' : 'Conexión local'} · {item.endpoint.url}</small><small>{item.device.expiresAt ? `Vence ${new Date(item.device.expiresAt).toLocaleString()}` : 'Vínculo hasta desvinculación'}</small></button><button className="danger" onClick={() => setUnlinking([item])}>Desvincular</button></div>)}<button disabled={!native} className="primary" onClick={() => setEnrolling(true)}>Vincular otro equipo</button>{profiles.length > 1 && <button className="danger" onClick={() => setUnlinking([...profiles])}>Desvincular todos</button>}</section>
+          <ChatTestLauncher sessions={sessions} connected={status === 'connected'} canInput={!!profile?.device.capabilities.input} canPair={native} onPair={() => beginEnrollment('Pruebas de Crow')} onOpen={(session, origin) => openSession(session, origin, true)} />
+          <section className="card"><h2>Equipos vinculados</h2>{profiles.map(item => <div className="profile" key={item.id}><button aria-pressed={item.id === profileId} onClick={() => { if (item.id === profileId) void refresh(); else changeProfile(item.id) }}><strong>{item.device.label}</strong><small>{item.endpoint.kind === 'relay' ? 'Relay E2E · TLS fijado' : 'Conexión local'} · {item.endpoint.url}</small><small>{item.device.expiresAt ? `Vence ${new Date(item.device.expiresAt).toLocaleString()}` : 'Vínculo hasta desvinculación'}</small></button><button className="danger" onClick={() => setUnlinking([item])}>Desvincular</button></div>)}<button disabled={!native} className="primary" onClick={() => beginEnrollment()}>Vincular otro equipo</button>{profiles.length > 1 && <button className="danger" onClick={() => setUnlinking([...profiles])}>Desvincular todos</button>}</section>
           <section className="card"><h2>Seguridad</h2><p>Cada equipo usa una clave no exportable de Android Keystore. Las credenciales temporales se renuevan con esa clave y nunca llegan a JavaScript. Al desvincular, Crow revoca el acceso remoto si está conectado y elimina la clave local incluso si está apagado.</p><p>Sin notificaciones FCM de fondo en esta versión.</p></section>
         </>}
       </>}
@@ -185,8 +194,8 @@ function MobileApp() {
   </div>
 }
 function SessionRow({ session, projectName, disabled, onOpen }: { session: MobileSession; projectName?: string; disabled: boolean; onOpen(origin: HTMLButtonElement): void }) { return <button className="session" disabled={disabled} onClick={event => onOpen(event.currentTarget)}><span><strong>{terminalTitle(session)}</strong><small>{projectName ? `${projectName} · ` : ''}{agentLabel(session.agent)} · {sessionStateLabel(session.state)} · {agentStateLabel(session.agentState)}{!session.canOperate || session.readOnly ? ' · solo lectura' : ''}</small></span><span aria-hidden="true">→</span></button> }
-function Enrollment({ onCancel, onError, onPaired }: { onCancel(): void; onError(message: string): void; onPaired(profiles: GatewayProfile[]): void }) {
-  const [raw, setRaw] = useState(''), [invitations, setInvitations] = useState<Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }>>([]), [label, setLabel] = useState('Mi Android'), [confirmed, setConfirmed] = useState(false), [busy, setBusy] = useState(false)
+function Enrollment({ onCancel, onError, onPaired, initialLabel }: { onCancel(): void; onError(message: string): void; onPaired(profiles: GatewayProfile[], notice?: string): void; initialLabel: string }) {
+  const [raw, setRaw] = useState(''), [invitations, setInvitations] = useState<Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }>>([]), [label, setLabel] = useState(initialLabel), [confirmed, setConfirmed] = useState(false), [busy, setBusy] = useState(false)
   const mounted = useRef(true)
   useEffect(() => () => { mounted.current = false }, [])
   async function review(value: string) { try { const parsed = value.startsWith('crow3:') ? null : JSON.parse(value); const items = value.startsWith('crow3:') ? await decodeEnrollmentQR(value) as Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }> : parsed?.version === 3 ? parseEnrollmentBundle(value) as Array<{ hostId: string; hostName: string; enrollment: MobileEnrollment }> : [{ hostId: 'windows', hostName: 'Crow Windows', enrollment: parseEnrollment(value) as MobileEnrollment }]; if (!mounted.current) return; setInvitations(items); setRaw(''); setConfirmed(false) } catch (error) { if (mounted.current) onError(message(error)) } }
@@ -198,27 +207,38 @@ function Enrollment({ onCancel, onError, onPaired }: { onCancel(): void; onError
   }
   async function pair() {
     if (!invitations.length) return; setBusy(true)
-    const paired: GatewayProfile[] = []
     try {
-      for (const item of invitations) {
+      const outcome = await pairEnrollmentItems(invitations, async (item: typeof invitations[number]) => {
         const endpointIndex = Math.max(0, item.enrollment.endpoints.findIndex(endpoint => endpoint.kind === 'relay'))
         const result = await Gateway.pair({ enrollment: item.enrollment, endpointIndex, deviceName: `${label.trim()} · ${item.hostName}`.slice(0, 80), destinationConfirmed: confirmed, mobileHostId: item.hostId })
-        paired.push(result.profile)
-      }
+        return result.profile
+      })
+      const { paired } = outcome
       if (!mounted.current) { for (const item of paired) await Gateway.deleteProfile({ profileId: item.id }); return }
-      setInvitations([]); onPaired(paired)
+      if (outcome.failure) {
+        const pendingNames = outcome.pending.map(item => item.hostName).join(', ')
+        const failures = outcome.failures.map(({ item, error }) => `${item.hostName}: ${message(error)}`).join(' · ')
+        const notice = `${failures} ${paired.length ? `${paired.length} equipo(s) sí quedaron vinculados. Pendientes: ${pendingNames}; usá Vincular pendientes para reintentar.` : 'No se vinculó ningún equipo.'}`
+        if (paired.length) onPaired(paired, notice)
+        else onError(notice)
+        setInvitations(outcome.pending)
+      } else { setInvitations([]); onPaired(paired) }
     } catch (error) {
-      if (mounted.current) onError(`${message(error)} ${paired.length ? `${paired.length} equipo(s) sí quedaron vinculados; podés verlos en Ajustes.` : 'No se vinculó ningún equipo.'}`)
-      if (paired.length) onPaired(paired)
-      setInvitations([])
+      if (mounted.current) onError(`${message(error)} No se vinculó ningún equipo.`)
     } finally { if (mounted.current) setBusy(false) }
   }
+  async function importImage(file: File) {
+    setBusy(true)
+    try { await review(await readQRImage(file)) }
+    catch (reason) { if (mounted.current) onError(message(reason)) }
+    finally { if (mounted.current) setBusy(false) }
+  }
   return <section className="card"><button onClick={onCancel} disabled={busy}>← Volver</button><h2>{invitations.length ? 'Confirmá el vínculo' : 'Vincular Crow'}</h2>
-    {!invitations.length ? <><p>En Crow Windows, abrí Acceso móvil y generá un QR para todos tus hosts.</p><button className="primary" disabled={busy} onClick={() => void scan()}>Escanear QR con cámara</button><label htmlFor="invite">Invitación JSON</label><textarea id="invite" rows={5} value={raw} onChange={event => setRaw(event.target.value)} autoComplete="off" spellCheck={false} placeholder="Pegá la invitación completa" /><button disabled={!raw || busy} onClick={() => void review(raw)}>Revisar invitación</button><label htmlFor="import">O importar archivo de invitación</label><input id="import" type="file" accept=".json,application/json" onChange={event => { const file = event.target.files?.[0]; if (file && file.size <= 32768) void file.text().then(value => review(value)); else onError('El archivo de invitación debe ser JSON de hasta 32 KiB.') }} /></> : <>
+    {!invitations.length ? <><p>En Crow Windows, abrí Acceso móvil y generá un QR para todos tus hosts.</p><button className="primary" disabled={busy} onClick={() => void scan()}>Escanear QR con cámara</button><label htmlFor="import-qr">Importar imagen del QR (sin cámara)</label><input id="import-qr" type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void importImage(file) }} /><small>{busy ? 'Procesando invitación…' : 'PNG, JPEG o WebP, hasta 5 MiB. Se lee en el dispositivo, sin subir la imagen. No compartas el QR públicamente.'}</small><label htmlFor="invite">Invitación JSON</label><textarea id="invite" rows={5} value={raw} disabled={busy} onChange={event => setRaw(event.target.value)} autoComplete="off" spellCheck={false} placeholder="Pegá la invitación completa" /><button disabled={!raw || busy} onClick={() => void review(raw)}>Revisar invitación</button><label htmlFor="import">O importar archivo de invitación</label><input id="import" type="file" accept=".json,application/json" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file && file.size <= 32768) void file.text().then(value => review(value)).catch(() => onError('No se pudo leer el archivo de invitación.')); else onError('El archivo de invitación debe ser JSON de hasta 32 KiB.') }} /></> : <>
       <p>Se vincularán {invitations.length} equipos con este único QR. El relay solo transporta bytes cifrados; cada equipo valida tu identidad y permisos.</p>
       {invitations.map(item => <div className="profile" key={item.hostId}><strong>{item.hostName}</strong><code className="fingerprint">{item.enrollment.endpoints.find(endpoint => endpoint.kind === 'relay')?.certSHA256 || item.enrollment.endpoints[0]?.certSHA256 || 'HTTPS de confianza'}</code></div>)}
       <label className="check"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{invitations.some(item => item.enrollment.endpoints.some(endpoint => endpoint.proxyAuthRequired)) ? 'El dominio coincide exactamente con Windows' : 'Reconozco los equipos y confirmo este QR generado en mi Crow'}</label>
-      <label htmlFor="device-label">Nombre de este dispositivo</label><input id="device-label" maxLength={50} value={label} onChange={event => setLabel(event.target.value)} /><button className="primary" disabled={busy || !label.trim() || !confirmed} onClick={() => void pair()}>{busy ? 'Vinculando equipos…' : 'Vincular todos'}</button><button disabled={busy} onClick={() => setInvitations([])}>Usar otra invitación</button>
+      <label htmlFor="device-label">Nombre de este dispositivo</label><input id="device-label" maxLength={50} value={label} onChange={event => setLabel(event.target.value)} /><button className="primary" disabled={busy || !label.trim() || !confirmed} onClick={() => void pair()}>{busy ? 'Vinculando equipos…' : 'Vincular pendientes'}</button><button disabled={busy} onClick={() => setInvitations([])}>Usar otra invitación</button>
     </>}
   </section>
 }

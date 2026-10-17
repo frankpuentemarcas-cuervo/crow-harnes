@@ -51,13 +51,17 @@ public class CrowGatewayPlugin extends Plugin {
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final int MAX_JSON_BYTES = 2 * 1024 * 1024;
     private static final class Stream {
-        final String id, profileId; final long generation, epoch; final boolean inputGranted; volatile WebSocket socket; volatile String serverId; volatile boolean writable;
-        Stream(String id, String profileId, long generation, long epoch, boolean inputGranted, boolean writable) { this.id = id; this.profileId = profileId; this.generation = generation; this.epoch = epoch; this.inputGranted = inputGranted; this.writable = inputGranted && writable; }
+        final String id, profileId, hostId, sessionId; final long generation, epoch; final boolean inputGranted; volatile WebSocket socket; volatile String serverId; volatile boolean writable;
+        Stream(String id, String profileId, String hostId, String sessionId, long generation, long epoch, boolean inputGranted, boolean writable) { this.id = id; this.profileId = profileId; this.hostId = hostId; this.sessionId = sessionId; this.generation = generation; this.epoch = epoch; this.inputGranted = inputGranted; this.writable = inputGranted && writable; }
     }
     interface Work { void run() throws Exception; }
     @Override public void load() { store = new CredentialStore(getContext()); }
     private void execute(PluginCall call, Work work) { execute(worker, call, work); }
-    private void execute(ExecutorService executor, PluginCall call, Work work) { try { executor.execute(() -> { try { work.run(); } catch (Exception error) { call.reject(safeError(error)); } }); } catch (java.util.concurrent.RejectedExecutionException cancelled) { call.reject("Conexión cancelada; volvé a vincular."); } }
+    private void execute(ExecutorService executor, PluginCall call, Work work) { try { executor.execute(() -> { try { work.run(); } catch (Exception error) { if (error instanceof TransportException) { TransportDiagnostics.Failure failure = ((TransportException) error).failure; call.reject(failure.message(), "CROW_TRANSPORT_" + failure.code.toUpperCase(java.util.Locale.ROOT), new JSObject().put("stage", failure.stage).put("errorCode", failure.code).put("retryable", failure.retryable)); } else call.reject(safeError(error)); } }); } catch (java.util.concurrent.RejectedExecutionException cancelled) { call.reject("Conexión cancelada; volvé a vincular."); } }
+    private static final class TransportException extends java.io.IOException {
+        final TransportDiagnostics.Failure failure;
+        TransportException(String stage, Throwable cause) { super("Crow transport failure", cause); failure = TransportDiagnostics.classify(stage, cause); }
+    }
     private String safeError(Exception error) {
         if (error instanceof javax.net.ssl.SSLException || error instanceof java.security.cert.CertificateException) return "TLS: verificá la huella, el nombre del endpoint y la vigencia del certificado.";
         if (error instanceof java.io.IOException) return "Sin conexión con Crow. Si enviaste una acción, verificá su estado antes de volver a intentarla.";
@@ -93,9 +97,9 @@ public class CrowGatewayPlugin extends Plugin {
         if (current != null && current.value.equals(usedCredential)) accessCredentials.remove(id, current);
     }
     /** Each explicit mutation gets a new ID; the call's shared JSON and credentials are never persisted here. */
-    private JSONObject mutationBody(JSONObject record, JSONObject body) throws Exception {
+    private JSONObject mutationBody(JSONObject record, JSONObject body, String path) throws Exception {
         JSONObject copy = body == null ? new JSONObject() : new JSONObject(body.toString());
-        if (record.optInt("authVersion", 1) == 2) copy.put("requestId", UUID.randomUUID().toString());
+        if (record.optInt("authVersion", 1) == 2) copy.put("requestId", TransportDiagnostics.mutationRequestId(path, copy.optString("requestId", null)));
         return copy;
     }
     private String accessCredential(String id, JSONObject record, long g, long e) throws Exception {
@@ -165,6 +169,9 @@ public class CrowGatewayPlugin extends Plugin {
             if (source.getBuffer().size() > MAX_JSON_BYTES) throw new IllegalStateException("Respuesta de Crow demasiado grande.");
             String raw = source.readUtf8();
             return new org.json.JSONTokener(raw).nextValue();
+        } catch (java.io.IOException error) {
+            String stage = path.equals("/api/v2/device-renew") || path.equals("/api/v2/device-challenge") ? "renew" : method.equals("POST") ? "send" : "request";
+            throw new TransportException(stage, error);
         } finally { if (profileId == null) GatewayTransportPool.release(base); if (pending != null) pending.detach(networkCall); }
     }
     private void forget(String id) {
@@ -184,6 +191,17 @@ public class CrowGatewayPlugin extends Plugin {
         if (status != null) event.put("status", status); if (data != null) event.put("data", data);
         notifyListeners("stream", event);
     }
+    private void signalTransportFailure(Stream stream, TransportDiagnostics.Failure failure) {
+        stream.writable = false;
+        if (current(stream)) {
+            JSObject event = new JSObject(); event.put("profileId", stream.profileId); event.put("connectionId", stream.id);
+            event.put("status", "disconnected"); event.put("errorCode", "CROW_TRANSPORT_" + failure.code.toUpperCase(java.util.Locale.ROOT));
+            event.put("stage", failure.stage); event.put("retryable", failure.retryable);
+            notifyListeners("stream", event);
+        }
+        stop(stream);
+    }
+    private void signalTransportFailure(Stream stream, TransportException error) { signalTransportFailure(stream, error.failure); }
     @PluginMethod public void pair(PluginCall call) {
         final long e = epoch.get();
         execute(call, () -> {
@@ -269,9 +287,18 @@ public class CrowGatewayPlugin extends Plugin {
             assertCurrent(id, g, e); JSONObject record = record(id); JSONObject profile = record.getJSONObject("profile");
             String path = call.getString("path", ""), method = call.getString("method", "GET"); EndpointPolicy.path(path, method);
             JSONObject caps = profile.getJSONObject("device").getJSONObject("capabilities");
-            if ((path.equals("/api/v1/quotas") && !caps.optBoolean("quotas")) || (method.equals("POST") && path.equals("/api/v1/sessions") && !caps.optBoolean("create")) || (path.equals("/api/v1/close") && !caps.optBoolean("close"))) throw new IllegalStateException("El dispositivo no tiene permiso para esta acción.");
-            JSONObject body = method.equals("POST") ? mutationBody(record, call.getObject("body")) : null;
-            Object result = http(profile.getJSONObject("endpoint"), path, method, body, accessCredential(id, record, g, e), id, record.optJSONObject("proxyAuth"));
+            if ((path.equals("/api/v1/quotas") && !caps.optBoolean("quotas")) || (method.equals("POST") && path.equals("/api/v1/sessions") && !caps.optBoolean("create")) || (path.equals("/api/v1/close") && !caps.optBoolean("close")) || (method.equals("POST") && path.equals("/api/v2/chat-submit") && !caps.optBoolean("input"))) throw new IllegalStateException("El dispositivo no tiene permiso para esta acción.");
+            JSONObject body = method.equals("POST") ? mutationBody(record, call.getObject("body"), path) : null;
+            String credential = accessCredential(id, record, g, e);
+            Object result;
+            try { result = http(profile.getJSONObject("endpoint"), path, method, body, credential, id, record.optJSONObject("proxyAuth")); }
+            catch (TransportException failure) {
+                if (method.equals("POST") && path.equals("/api/v2/chat-submit") && body != null) {
+                    String hostId = body.optString("hostId", ""), sessionId = body.optString("sessionId", "");
+                    for (Stream stream : streams.values()) if (stream.profileId.equals(id) && stream.hostId.equals(hostId) && stream.sessionId.equals(sessionId)) signalTransportFailure(stream, failure);
+                }
+                throw failure;
+            }
             assertCurrent(id, g, e); publicResponse(result); call.resolve(new JSObject().put("data", result));
             } finally { activeRead.remove(); if (pending != null) pendingReads.remove(readId, pending); }
         });
@@ -301,7 +328,7 @@ public class CrowGatewayPlugin extends Plugin {
             if (session == null) throw new IllegalStateException("La sesión ya no está autorizada.");
             assertCurrent(id, g, e);
             if (streamGenerations.get(connectionId).get() != connectionGeneration) throw new IllegalStateException("Conexión cancelada antes de abrirse.");
-            Stream stream = new Stream(connectionId, id, g, e, profile.getJSONObject("device").getJSONObject("capabilities").optBoolean("input"), session.optBoolean("canOperate") && !session.optBoolean("readOnly")); streams.put(connectionId, stream);
+            Stream stream = new Stream(connectionId, id, host, sessionId, g, e, profile.getJSONObject("device").getJSONObject("capabilities").optBoolean("input"), session.optBoolean("canOperate") && !session.optBoolean("readOnly")); streams.put(connectionId, stream);
             String origin = EndpointPolicy.origin(endpoint);
             HttpUrl url = HttpUrl.get(origin + "/api/v1/stream").newBuilder().addQueryParameter("hostId", host).addQueryParameter("sessionId", sessionId).addQueryParameter("from", String.valueOf(from)).addQueryParameter("mode", mode).build();
             Request.Builder requestBuilder = new Request.Builder().url(url).header("Origin", origin).header("Authorization", "Bearer " + credential);
@@ -314,8 +341,8 @@ public class CrowGatewayPlugin extends Plugin {
                     if (!current(stream)) return;
                     try { JSONObject frame = new JSONObject(text); publicResponse(frame); if (frame.optString("type").equals("ready")) stream.serverId = frame.getString("streamId"); if (frame.optString("type").equals("state") && frame.optJSONObject("info") != null) stream.writable = stream.inputGranted && frame.getJSONObject("info").optBoolean("canOperate") && !frame.getJSONObject("info").optBoolean("readOnly"); emit(stream, null, text); } catch (Exception invalid) { emit(stream, "disconnected", null); stop(stream); }
                 }
-                @Override public void onClosed(WebSocket socket, int code, String reason) { emit(stream, "disconnected", null); stop(stream); }
-                @Override public void onFailure(WebSocket socket, Throwable error, Response response) { if (response != null && (response.code() == 401 || (record.optJSONObject("proxyAuth") != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API"))))) invalidateAccess(id, credential); emit(stream, "disconnected", null); stop(stream); }
+                @Override public void onClosed(WebSocket socket, int code, String reason) { signalTransportFailure(stream, TransportDiagnostics.classify("stream", new TransportDiagnostics.RelayPeerClosedException())); }
+                @Override public void onFailure(WebSocket socket, Throwable error, Response response) { if (response != null && (response.code() == 401 || (record.optJSONObject("proxyAuth") != null && PangolinAuth.rejected(response.code(), response.header("X-Crow-Mobile-API"))))) invalidateAccess(id, credential); signalTransportFailure(stream, TransportDiagnostics.classify("stream", error)); }
             });
             call.resolve();
         });
@@ -328,10 +355,12 @@ public class CrowGatewayPlugin extends Plugin {
             if (type.equals("input")) { String data = call.getString("data", ""); if (data.isEmpty() || data.length() > 4096 || !data.matches("[A-Za-z0-9+/]*={0,2}")) throw new IllegalArgumentException("Input inválido."); if (android.util.Base64.decode(data, android.util.Base64.NO_WRAP).length > 2048) throw new IllegalArgumentException("El envío supera 2048 bytes UTF-8. Acortá el texto: no se divide ni se envía automáticamente."); body.put("data", data); }
             else if (type.equals("resize")) { int cols = call.getInt("cols", 0), rows = call.getInt("rows", 0); if (cols < 2 || cols > 500 || rows < 2 || rows > 500) throw new IllegalArgumentException("Tamaño inválido."); body.put("cols", cols).put("rows", rows); }
             else throw new IllegalArgumentException("Acción de terminal inválida.");
-            // A failed HTTP mutation does not prove the independent WSS stream is dead.
-            // Surface the outcome (especially transport-ambiguous writes) without
-            // tearing down the reader or ever replaying the command.
-            http(record.getJSONObject("profile").getJSONObject("endpoint"), "/api/v1/" + type, "POST", mutationBody(record, body), accessCredential(stream.profileId, record, stream.generation, stream.epoch), stream.profileId, record.optJSONObject("proxyAuth"));
+            // On ambiguous IO, invalidate only this session's writable stream; never replay.
+            String path = "/api/v1/" + type;
+            String credential = accessCredential(stream.profileId, record, stream.generation, stream.epoch);
+            try {
+                http(record.getJSONObject("profile").getJSONObject("endpoint"), path, "POST", mutationBody(record, body, path), credential, stream.profileId, record.optJSONObject("proxyAuth"));
+            } catch (TransportException failure) { signalTransportFailure(stream, failure); throw failure; }
             assertCurrent(stream.profileId, stream.generation, stream.epoch); if (!current(stream)) throw new IllegalStateException("La conexión cambió durante la acción. Verificá el resultado antes de repetirla."); call.resolve();
         });
     }

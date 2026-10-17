@@ -11,6 +11,7 @@ import org.json.JSONObject;
 /** Pure endpoint/pin policy; never installs a process-wide trust manager. */
 final class EndpointPolicy {
     private static final String CHAT_HISTORY_PATH = "/api/v1/chat\\?hostId=[A-Za-z0-9._~-]{1,200}&sessionId=[a-f0-9]{32}&limit=(?:[1-9]|[1-9][0-9]|100)(?:&(?:after|before)=[0-9]{1,20})?";
+    private static final String CHAT_SUBMIT_STATUS_PATH = "/api/v2/chat-submit\\?hostId=[A-Za-z0-9._~-]{1,200}&sessionId=[a-f0-9]{32}&requestId=(?i:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})";
 
     static String origin(JSONObject endpoint) throws Exception {
         java.util.Iterator<String> fields = endpoint.keys();
@@ -56,8 +57,8 @@ final class EndpointPolicy {
     }
     static void path(String path, String method) {
         if (path == null || path.contains("%") || path.contains("..") || path.contains("#") || path.contains("\\") || path.length() > 2048) throw new IllegalArgumentException("Invalid API path");
-        if ("GET".equals(method) && (path.equals("/api/v1/bootstrap") || path.equals("/api/v1/notices") || path.equals("/api/v1/quotas") || path.matches("/api/v1/sessions(?:\\?(?:hostId|projectId)=[A-Za-z0-9._~-]+(?:&(?:hostId|projectId)=[A-Za-z0-9._~-]+)?)?") || path.matches(CHAT_HISTORY_PATH))) return;
-        if ("POST".equals(method) && (path.equals("/api/v1/sessions") || path.equals("/api/v1/wake") || path.equals("/api/v1/close"))) return;
+        if ("GET".equals(method) && (path.equals("/api/v1/bootstrap") || path.equals("/api/v1/notices") || path.equals("/api/v1/quotas") || path.matches("/api/v1/sessions(?:\\?(?:hostId|projectId)=[A-Za-z0-9._~-]+(?:&(?:hostId|projectId)=[A-Za-z0-9._~-]+)?)?") || path.matches(CHAT_HISTORY_PATH) || path.matches(CHAT_SUBMIT_STATUS_PATH))) return;
+        if ("POST".equals(method) && (path.equals("/api/v1/sessions") || path.equals("/api/v1/wake") || path.equals("/api/v1/close") || path.equals("/api/v2/chat-submit"))) return;
         throw new IllegalArgumentException("API path not allowed");
     }
 }

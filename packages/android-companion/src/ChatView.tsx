@@ -4,15 +4,19 @@ import { Clipboard } from '@capacitor/clipboard'
 import { ArrowDown, Copy, RefreshCw, Send } from 'lucide-react'
 import type { MobileChatMessage, MobileChatPage, MobileSession } from '../../../src/shared/mobile-companion'
 import { Gateway, api, type GatewayProfile } from './native'
-import { encodeInput, inputByteLength, MAX_INPUT_BYTES } from './protocol.mjs'
-import { boundChatWindow, chatInputAllowed, chatReplyProgress, confirmedChatEcho, definiteChatSendFailure, mergeChatMessages, singleLineChatInput, splitChatMarkdown } from './chat-model.mjs'
+import { inputByteLength, MAX_INPUT_BYTES } from './protocol.mjs'
+import { boundChatWindow, chatInputAllowed, chatReplyProgress, confirmedChatEcho, mergeChatMessages, singleLineChatInput, splitChatMarkdown } from './chat-model.mjs'
 import { createChatSync } from './chat-sync.mjs'
+import { ChatProbePanel } from './ChatDiagnostics'
+import { createChatProbe, advanceChatProbe, CHAT_PROBE_TIMEOUT_MS } from './chat-probe.mjs'
+import { chatSubmitBody, chatSubmitStatusPath, normalizeChatSubmitResult, chatSubmitErrorMessage, chatTransportErrorMessage, isUnsupportedChatSubmitError, chatSubmissionStorageKey, readStoredChatRequestId } from './chat-submit.mjs'
 
 const CHAT_PAGE_SIZE = 100
 const CHAT_WINDOW_SIZE = 200
 const CHAT_POLL_MS = 10000 // Recovery only; live state frames trigger immediate reads.
 type ChatStreamState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
-type OutgoingMessage = { content: string; afterSeq: number; status: 'sending' | 'delivered' | 'processing' | 'unknown' | 'failed' | 'answered' }
+type OutgoingMessage = { content: string; afterSeq: number; status: 'sending' | 'delivered' | 'unknown' | 'failed' | 'answered' }
+type ChatSubmission = { requestId: string; text: string }
 
 function agentName(agent: string) { return agent === 'claude' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent }
 
@@ -48,7 +52,7 @@ function MessageContent({ content, onCopy }: { content: string; onCopy(value: st
   })}</div>
 }
 
-export function ChatView({ profile, hostId, session, onBack, onState, isActive = true }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onState(info: MobileSession): void; isActive?: boolean }) {
+export function ChatView({ profile, hostId, session, onBack, onState, isActive = true, initialDiagnostics = false }: { profile: GatewayProfile; hostId: string; session: MobileSession; onBack(): void; onState(info: MobileSession): void; isActive?: boolean; initialDiagnostics?: boolean }) {
   const list = useRef<HTMLDivElement>(null), cursor = useRef(0), before = useRef(0)
   const active = useRef(true), followLatest = useRef(true), pendingOlderAnchor = useRef<{ id: string; offset: number } | null>(null)
   const historySync = useRef<ReturnType<typeof createChatSync> | null>(null)
@@ -61,13 +65,87 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
   const [draft, setDraft] = useState(''), [sending, setSending] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
   const [historyError, setHistoryError] = useState('')
   const [unread, setUnread] = useState(0), [copyMessage, setCopyMessage] = useState(''), [awaitingAgent, setAwaitingAgent] = useState(false)
+  const [submissionAccepted, setSubmissionAccepted] = useState(false)
+  const [probe, setProbe] = useState<ReturnType<typeof createChatProbe> | null>(null)
+  const probeNow = useRef(probe)
+  const updateProbe = useCallback((event: { type: string; messages?: MobileChatMessage[] }) => {
+    if (!probeNow.current) return
+    probeNow.current = advanceChatProbe(probeNow.current, event, performance.now())
+    setProbe(probeNow.current)
+  }, [])
   const [outgoing, setOutgoing] = useState<OutgoingMessage | null>(null)
+  const submission = useRef<ChatSubmission | null>(null)
+  const submissionLock = useRef(false)
+  const lastUncertainText = useRef('')
+  const submissionKey = chatSubmissionStorageKey(profile.id, hostId, session.id)
   const [recoveryAvailable, setRecoveryAvailable] = useState(false), [manualSendOverride, setManualSendOverride] = useState(false), [announcement, setAnnouncement] = useState('')
-  const sendLock = useRef(false), sawAgentBusy = useRef(false)
+  const sendLock = useRef(false)
   const replyPending = useRef<{ content: string; afterSeq: number; userSeq?: number } | null>(null)
   const canOperate = session.canOperate && !session.readOnly && profile.device.capabilities.input && session.state === 'running'
   const agentReady = session.agentState !== 'working'
-  const canSend = historyReady && chatInputAllowed(session, profile.device.capabilities, streamState === 'connected', awaitingAgent, manualSendOverride)
+  const canSend = historyReady && !submission.current && probe?.outcome !== 'running' && chatInputAllowed(session, profile.device.capabilities, streamState === 'connected', awaitingAgent, manualSendOverride)
+
+  function clearSubmission() {
+    submission.current = null
+    try { sessionStorage.removeItem(submissionKey) } catch { /* session storage can be disabled */ }
+  }
+
+  async function reconcileSubmission() {
+    if (submissionLock.current || sending || sendLock.current) return
+    const requestId = submission.current?.requestId || readStoredChatRequestId(sessionStorage, submissionKey)
+    if (!requestId) return
+    submissionLock.current = true
+    submission.current ||= { requestId, text: '' }
+    try {
+      const expected = { hostId, sessionId: session.id, requestId }
+      const value = await api<unknown>(profile.id, chatSubmitStatusPath(expected))
+      const result = normalizeChatSubmitResult(value, expected)
+      if (submission.current?.requestId !== requestId) return
+      if (result.status === 'rejected') {
+        clearSubmission(); replyPending.current = null; setAwaitingAgent(false); setSubmissionAccepted(false)
+        setOutgoing(previous => previous ? { ...previous, status: 'failed' } : null)
+        setError('Crow rechazó el envío antes de escribirlo. Revisá el estado y corregí el mensaje antes de intentar de nuevo.')
+      } else if (result.status === 'accepted') {
+        clearSubmission(); setSubmissionAccepted(true); setError('')
+        if (submission.current?.text) setDraft(value => value === submission.current?.text ? '' : value)
+        setOutgoing(previous => previous ? { ...previous, status: 'delivered' } : previous)
+        void fetchPage('newer')
+      } else {
+        setAwaitingAgent(true)
+        setOutgoing(previous => previous ? { ...previous, status: result.status === 'written' ? 'delivered' : 'unknown' } : { content: '', afterSeq: cursor.current, status: 'unknown' })
+        setNotice(result.status === 'written' ? 'Texto escrito en Chat; esperando confirmación durable.' : 'El envío sigue pendiente o incierto. Se consulta el estado sin volver a enviar el texto.')
+      }
+    } catch (reason) {
+      if (submission.current?.requestId !== requestId) return
+      setAwaitingAgent(true)
+      setOutgoing(previous => previous ? { ...previous, status: 'unknown' } : { content: '', afterSeq: cursor.current, status: 'unknown' })
+      setError(chatSubmitErrorMessage(reason))
+    } finally { submissionLock.current = false }
+  }
+
+  useEffect(() => {
+    submission.current = null
+    replyPending.current = null
+    setAwaitingAgent(false)
+    setOutgoing(null)
+    const requestId = readStoredChatRequestId(sessionStorage, submissionKey)
+    if (requestId) {
+      submission.current = { requestId, text: '' }
+      setAwaitingAgent(true)
+      setOutgoing({ content: '', afterSeq: cursor.current, status: 'unknown' })
+    }
+  }, [submissionKey])
+
+  useEffect(() => {
+    if (isActive && streamState === 'connected' && submission.current && !sending) void reconcileSubmission()
+  }, [isActive, streamState])
+
+  useEffect(() => {
+    if (!probe || probe.outcome !== 'running') return
+    if (!isActive) { updateProbe({ type: 'cancelled' }); return }
+    const timer = setTimeout(() => updateProbe({ type: 'timeout' }), Math.max(0, probe.startedAt + CHAT_PROBE_TIMEOUT_MS - performance.now()))
+    return () => clearTimeout(timer)
+  }, [probe?.id, probe?.outcome, isActive, updateProbe])
 
   useEffect(() => {
     if (!awaitingAgent && (agentReady || !canOperate)) { setRecoveryAvailable(false); return }
@@ -75,20 +153,15 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
     return () => clearTimeout(timer)
   }, [agentReady, awaitingAgent, canOperate])
 
-  useEffect(() => {
-    if (!awaitingAgent) return
-    if (!agentReady) { sawAgentBusy.current = true; setOutgoing(previous => previous && previous.status !== 'unknown' ? { ...previous, status: 'processing' } : previous) }
-    else if (sawAgentBusy.current) { sawAgentBusy.current = false; setManualSendOverride(false); setAwaitingAgent(false) }
-  }, [agentReady, awaitingAgent])
-
   useEffect(() => { if (agentReady && manualSendOverride) setManualSendOverride(false) }, [agentReady, manualSendOverride])
 
   const acceptPage = useCallback((page: MobileChatPage, mode: 'initial' | 'older' | 'newer') => {
+    updateProbe({ type: 'history', messages: page.messages })
     if (replyPending.current) {
       const progress = chatReplyProgress(replyPending.current, page.messages)
       replyPending.current = progress.answered ? null : progress
-      if (progress.userSeq) setError('') // A durable user hook resolves an uncertain send.
-      if (progress.answered) { sawAgentBusy.current = false; setManualSendOverride(false); setAwaitingAgent(false); setOutgoing(previous => previous ? { ...previous, status: 'answered' } : null); setNotice('Respuesta recibida.') }
+      if (progress.userSeq) { setSubmissionAccepted(true); setError(''); clearSubmission() } // Only the matching durable user hook proves acceptance.
+      if (progress.answered) { setManualSendOverride(false); setAwaitingAgent(false); setOutgoing(previous => previous ? { ...previous, status: 'answered' } : null); setNotice('Respuesta recibida.') }
     }
     setOutgoing(previous => confirmedChatEcho(previous, page.messages) ? null : previous)
     if (mode === 'older') {
@@ -130,7 +203,7 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
       if (!before.current || mode === 'initial') before.current = page.nextBefore || page.messages[0].seq
       if (mode === 'newer' && page.messages[0].seq > 1) setHasOlder(true)
     }
-  }, [isActive, session.agent])
+  }, [isActive, session.agent, updateProbe])
   const acceptPageRef = useRef(acceptPage)
   acceptPageRef.current = acceptPage
 
@@ -190,7 +263,7 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
         handles.push(await Gateway.addListener('stream', event => {
           if (disposed || event.profileId !== profile.id || event.connectionId !== connection.current) return
           if (event.status === 'revoked') { active.current = false; clearTimeout(retryTimer.current); close(); setStreamState('disconnected'); setError('Vínculo revocado o vencido. Volvé a vincular desde Windows.'); return }
-          if (event.status === 'disconnected') { setStreamState('reconnecting'); schedule(); return }
+          if (event.status === 'disconnected') { const detail = chatTransportErrorMessage(event); if (detail) setError(detail); setStreamState('reconnecting'); schedule(); return }
           if (!event.data) return
           try {
             const frame = JSON.parse(event.data)
@@ -247,44 +320,67 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
     return () => observer.disconnect()
   }, [isActive])
 
-  async function send() {
-    if (!draft.trim() || sending || sendLock.current || !canSend) return
-    if (inputByteLength(draft) > MAX_INPUT_BYTES) { setError(`El mensaje supera ${MAX_INPUT_BYTES} bytes UTF-8. Acortalo; no se divide ni se reenvía automáticamente.`); return }
-    const id = connection.current, text = draft, singleLineText = singleLineChatInput(draft)
+  async function send(value = draft, probeId?: string) {
+    if (!value.trim() || sending || sendLock.current || !canSend || submission.current) return
+    if (session.agent !== 'claude' && session.agent !== 'codex') { setError('El host o esta sesión no admite envíos seguros desde Chat. Actualizá Crow y la app móvil; no se usó la terminal.'); return }
+    if (inputByteLength(value) > MAX_INPUT_BYTES) { setError(`El mensaje supera ${MAX_INPUT_BYTES} bytes UTF-8. Acortalo; no se divide ni se reenvía automáticamente.`); return }
+    const id = connection.current, text = value, singleLineText = singleLineChatInput(value)
+    if (lastUncertainText.current && lastUncertainText.current === singleLineText) { setError('Este mensaje anterior todavía podría haberse recibido. Cambiá el borrador después de verificar Chat; no lo vuelvas a enviar.'); return }
     if (!id) return
     if (!singleLineText) return
     sendLock.current = true
-    setSending(true); setError(''); setNotice(''); sawAgentBusy.current = false
+    setSending(true); setError(''); setNotice(''); setSubmissionAccepted(false)
     followLatest.current = true
     if (list.current) list.current.scrollTop = list.current.scrollHeight
     setUnread(0); setAwaitingAgent(true)
     setOutgoing({ content: singleLineText, afterSeq: cursor.current, status: 'sending' })
     replyPending.current = { content: singleLineText, afterSeq: cursor.current }
+    const requestId = crypto.randomUUID()
+    lastUncertainText.current = ''
+    submission.current = { requestId, text }
+    try { sessionStorage.setItem(submissionKey, requestId) } catch { /* no prompt is persisted; current view still retains the operation ID */ }
     try {
-      await Gateway.send({ connectionId: id, type: 'input', data: encodeInput(singleLineText + '\r') })
-      if (connection.current !== id) throw new Error('La conexión cambió durante el envío. Verificá si el mensaje llegó antes de repetirlo.')
-      setDraft(value => value === text ? '' : value)
-      setOutgoing(previous => previous?.status === 'sending' ? { ...previous, status: 'delivered' } : previous)
+      const expected = { hostId, sessionId: session.id, requestId }
+      const body = chatSubmitBody({ ...expected, text: singleLineText })
+      const value = await api<unknown>(profile.id, '/api/v2/chat-submit', 'POST', body)
+      const result = normalizeChatSubmitResult(value, expected)
+      if (result.status === 'rejected') throw Object.assign(new Error('Crow rechazó el envío antes de escribirlo.'), { rejected: true })
+      if ((result.status === 'written' || result.status === 'accepted') && probeId && probeNow.current?.id === probeId) updateProbe({ type: 'written' })
+      if (result.status === 'written' || result.status === 'accepted') setDraft(previous => previous === text ? '' : previous)
+      setOutgoing(previous => previous?.status === 'sending' ? { ...previous, status: result.status === 'written' || result.status === 'accepted' ? 'delivered' : 'unknown' } : previous)
       setManualSendOverride(false)
-      setNotice(!replyPending.current ? 'Respuesta recibida.' : /\r|\n/.test(text) ? 'Recibido como una sola instrucción; los saltos de línea se convirtieron en espacios.' : 'Recibido por la terminal.')
+      if (result.status === 'accepted') { clearSubmission(); setSubmissionAccepted(true); setNotice('Crow confirmó la recepción del mensaje.') }
+      else setNotice(result.status === 'written' ? 'Texto escrito en Chat; aceptación durable pendiente.' : 'Solicitud pendiente o incierta. Se consulta el estado sin volver a enviar el texto.')
       void fetchPage('initial')
     } catch (reason) {
+      const unsupported = isUnsupportedChatSubmitError(reason)
+      if (probeId && probeNow.current?.id === probeId) updateProbe({ type: (reason as { rejected?: boolean })?.rejected || unsupported ? 'rejected' : 'send-error' })
       if (!replyPending.current || replyPending.current.userSeq) {
         // The HTTP acknowledgement can be lost after the agent's user hook
         // already proved receipt. Never ask the user to repeat that prompt.
+        clearSubmission(); setSubmissionAccepted(true)
         setDraft(value => value === text ? '' : value)
         setError(''); setNotice('El historial confirmó la recepción. No se repite el envío.')
       } else {
-        const definite = definiteChatSendFailure(reason)
+        const definite = (reason as { rejected?: boolean })?.rejected === true || unsupported
         if (definite) { setAwaitingAgent(false); replyPending.current = null }
+        if (definite) clearSubmission()
         setOutgoing(previous => previous ? { ...previous, status: definite ? 'failed' : 'unknown' } : null)
-        setError(`${reason instanceof Error ? reason.message : String(reason)} Verificá la conversación antes de volver a intentar.`)
+        setError(chatSubmitErrorMessage(reason))
+        if (!definite) void fetchPage('newer')
       }
     } finally { sendLock.current = false; setSending(false) }
   }
 
-  async function copyCode(value: string) {
-    try { await Clipboard.write({ string: value }); setCopyMessage('Código copiado.'); setTimeout(() => setCopyMessage(''), 1800) }
+  function startProbe() {
+    if (!canSend || sending || sendLock.current || draft.trim() || !connection.current) return
+    const next = createChatProbe(crypto.randomUUID(), cursor.current, performance.now())
+    probeNow.current = next; setProbe(next)
+    void send(next.prompt, next.id) // Exactly the same path as an ordinary chat send.
+  }
+
+  async function copyCode(value: string, confirmation = 'Código copiado.') {
+    try { await Clipboard.write({ string: value }); setCopyMessage(confirmation); setTimeout(() => setCopyMessage(''), 1800) }
     catch { setCopyMessage('No se pudo copiar el código.'); setTimeout(() => setCopyMessage(''), 2500) }
   }
 
@@ -304,17 +400,19 @@ export function ChatView({ profile, hostId, session, onBack, onState, isActive =
         {item.truncated && <p className="chat-truncated" role="note">Mensaje recortado por el límite del historial.</p>}
         <MessageContent content={item.content} onCopy={value => void copyCode(value)} />
       </article>)}
-      {outgoing && <article className={`chat-message user outgoing-${outgoing.status}`}><div className="chat-message-meta"><strong>Vos</strong><span role="status">{outgoing.status === 'sending' ? 'Enviando…' : outgoing.status === 'unknown' ? 'Envío sin confirmar' : outgoing.status === 'failed' ? 'No enviado' : outgoing.status === 'processing' ? 'Agente trabajando' : outgoing.status === 'answered' ? 'Respuesta recibida' : 'Recibido por la terminal'}</span></div><p>{outgoing.content}</p></article>}
+      {outgoing && <article className={`chat-message user outgoing-${outgoing.status}`}><div className="chat-message-meta"><strong>Vos</strong><span role="status">{outgoing.status === 'sending' ? 'Enviando…' : outgoing.status === 'unknown' ? 'Envío sin confirmar' : outgoing.status === 'failed' ? 'No enviado' : outgoing.status === 'answered' ? 'Respuesta recibida' : 'Aceptación pendiente'}</span></div><p>{outgoing.content}</p></article>}
     </div>
     {(unread > 0 || (messages.length > 0 && cursor.current > messages[messages.length - 1].seq)) && <button className="chat-latest" disabled={loading} onClick={() => void fetchLatest()}><ArrowDown size={16} aria-hidden="true" /> {unread > 0 ? `${unread} mensaje${unread === 1 ? '' : 's'} nuevo${unread === 1 ? '' : 's'}` : 'Ir al final'}</button>}
     {(error || historyError) && <div className="chat-inline-error" role="alert"><span>{error || historyError}</span><button type="button" aria-label="Descartar aviso del chat" onClick={() => { setError(''); setHistoryError('') }}>Cerrar</button></div>}
+    {awaitingAgent && submission.current && <button type="button" className="chat-submit-check" onClick={() => void reconcileSubmission()}>Verificar estado del envío (sin reenviar)</button>}
     {(copyMessage || (notice && !awaitingAgent)) && <p className="chat-inline-notice" role="status">{copyMessage || notice}</p>}
     {!canOperate && <p className="chat-compose-help">Esta terminal está en modo de solo lectura. Podés consultar el historial cuando esté disponible.</p>}
-     {canOperate && awaitingAgent && <p className="chat-compose-help chat-activity" role="status">{!agentReady ? `${agentName(session.agent)} está trabajando…` : sending ? 'Enviando a la terminal…' : outgoing?.status === 'unknown' ? 'Resultado del envío sin confirmar. No se vuelve a enviar automáticamente.' : 'Recibido por la terminal; esperando actividad del agente…'}</p>}
-     {canOperate && recoveryAvailable && <div className="chat-recovery"><p>¿El estado no avanza? Revisá Terminal para confirmar que el agente terminó y que tu mensaje llegó.</p><button type="button" onClick={() => { setAwaitingAgent(false); setManualSendOverride(true); setRecoveryAvailable(false); setNotice('Habilitaste el envío manual tras revisar Terminal. No repitas la instrucción anterior.') }}>Ya revisé Terminal; habilitar envío</button></div>}
+     {canOperate && awaitingAgent && <p className="chat-compose-help chat-activity" role="status">{submissionAccepted ? !agentReady ? `${agentName(session.agent)} aceptó el mensaje y está trabajando…` : 'Mensaje aceptado; esperando la respuesta…' : sending ? 'Enviando a la terminal…' : outgoing?.status === 'unknown' ? 'Resultado del envío sin confirmar. No se vuelve a enviar automáticamente.' : 'Esperando confirmación del agente. Revisá Terminal si el texto quedó en el borrador; no lo reenvíes sin comprobarlo.'}</p>}
+     {canOperate && recoveryAvailable && <div className="chat-recovery"><p>¿El estado no avanza? Revisá Chat y Terminal antes de continuar. Una operación incierta no se vuelve a enviar automáticamente.</p><button type="button" onClick={() => { if (submission.current) { lastUncertainText.current = submission.current.text; clearSubmission(); replyPending.current = null } setAwaitingAgent(false); setManualSendOverride(true); setRecoveryAvailable(false); setNotice('Habilitaste un envío nuevo después de revisar el estado. No repitas el mensaje anterior.') }}>{submission.current ? 'Ya revisé; habilitar otro mensaje' : 'Ya revisé Terminal; habilitar envío'}</button></div>}
      {canOperate && !agentReady && !awaitingAgent && !manualSendOverride && <p className="chat-compose-help" role="status">{agentName(session.agent)} está trabajando. Podés preparar tu próximo mensaje.</p>}
      {canOperate && (!session.agentState || session.agentState === 'unknown') && !awaitingAgent && <p className="chat-compose-help">Estado del agente sin confirmar. El envío va a la misma terminal; no se ejecuta en otra sesión.</p>}
      {canOperate && manualSendOverride && !agentReady && <p className="chat-compose-help" role="status">Envío manual habilitado por vos. Confirmá que el agente terminó en Terminal antes de enviar; esto no reenvía el mensaje anterior.</p>}
+    <ChatProbePanel probe={probe} initialOpen={initialDiagnostics} canRun={canSend && !sending && !draft.trim()} onRun={startProbe} onStop={() => updateProbe({ type: 'cancelled' })} onCopy={value => void copyCode(value, 'Informe copiado sin credenciales.')} />
     <form className="chat-compose" onSubmit={event => { event.preventDefault(); void send() }}>
        <label className="sr-only" htmlFor="chat-draft">Escribí un mensaje para {agentName(session.agent)}</label>
        <textarea id="chat-draft" rows={2} value={draft} disabled={!canOperate} placeholder={awaitingAgent || !agentReady ? 'Prepará tu próximo mensaje…' : `Escribí a ${agentName(session.agent)}…`} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void send() } }} />
