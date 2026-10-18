@@ -586,27 +586,19 @@ func (a *App) startSessionOwned(agent, mode, root string, principal *AccessPrinc
 	return a.startSessionPrompt(agent, mode, root, principal, "")
 }
 func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrincipal, initialPrompt string) (SessionInfo, error) {
+	a.conversationStartMu.Lock()
+	defer a.conversationStartMu.Unlock()
+	return a.startSessionPromptIntent(agent, mode, root, principal, initialPrompt, nil, "")
+}
+func (a *App) startSessionPromptIntent(agent, mode, root string, principal *AccessPrincipal, initialPrompt string, intent *claudeLaunch, reservedID string) (SessionInfo, error) {
 	// Serialize admission with revocation: a revoked in-flight request cannot spawn.
 	a.access.mu.Lock()
 	defer a.access.mu.Unlock()
-	if a.access.data.Enabled {
-		valid := false
-		if principal != nil {
-			if principal.Role == "installation" {
-				_, valid = installationIDFromOwner(principal.ID)
-			} else {
-				for _, u := range a.access.data.Users {
-					if u.ID == principal.ID && !u.Revoked {
-						valid = true
-						break
-					}
-				}
-			}
-		}
-		if !valid || !a.permittedRoot(principal, root) {
-			return SessionInfo{}, errors.New("access revoked or project not permitted")
-		}
+	current, accessErr := a.currentClaudePrincipal(principal)
+	if accessErr != nil || !a.permittedRoot(current, root) {
+		return SessionInfo{}, errors.New("access revoked or project not permitted")
 	}
+	principal = current
 
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -636,15 +628,15 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	if initialPrompt != "" {
-		args = initialPromptArgs(args, initialPrompt)
-	}
 	if _, err := exec.LookPath(bin); err != nil {
 		return SessionInfo{}, fmt.Errorf("%s is not on the server PATH: %w", bin, err)
 	}
-	id, err := randomID()
-	if err != nil {
-		return SessionInfo{}, err
+	id := reservedID
+	if id == "" {
+		id, err = randomID()
+	}
+	if err != nil || !safeID(id) {
+		return SessionInfo{}, errors.New("session identity unavailable")
 	}
 	ownerID := ""
 	hookToken := ""
@@ -657,6 +649,19 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 		if err = os.WriteFile(filepath.Join(a.dir, "hook-"+id), []byte(hookToken), 0600); err != nil {
 			return SessionInfo{}, err
 		}
+	}
+	var launch *claudeLaunch
+	if agent == "claude" {
+		launch, err = a.prepareClaudeLaunch(root, mode, id, ownerID, intent)
+		if err != nil {
+			_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
+			return SessionInfo{}, err
+		}
+		flag := "--session-id"
+		if launch.Resume {
+			flag = "--resume"
+		}
+		args = append(args, flag, launch.NativeID)
 	}
 	shellAgentPath := ""
 	if agent == "shell" && hook != "" {
@@ -675,6 +680,9 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 		_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
 		return SessionInfo{}, err
 	}
+	if initialPrompt != "" {
+		args = initialPromptArgs(args, initialPrompt)
+	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
 	cmd.Env = os.Environ()
@@ -688,17 +696,11 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 	} {
 		cmd.Env = setEnvironmentVariable(cmd.Env, variable[0], variable[1])
 	}
+	if launch != nil {
+		cmd.Env = setEnvironmentVariable(cmd.Env, "CLAUDE_CONFIG_DIR", launch.ConfigDir)
+	}
 	if shellAgentPath != "" {
 		cmd.Env = setEnvironmentVariable(cmd.Env, "PATH", shellAgentPath+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
-	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 32, Cols: 120})
-	if err != nil {
-		if shellAgentPath != "" {
-			_ = os.RemoveAll(shellAgentPath)
-		}
-		_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
-		_ = logFile.Close()
-		return SessionInfo{}, err
 	}
 	now := time.Now().UTC()
 	initialAgentState := "waiting"
@@ -709,13 +711,40 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 		initialAgentState = "unknown"
 	}
 	hooksActive := hook != "" && (agent == "claude" || agent == "codex" || (agent == "shell" && shellAgentPath != ""))
-	s := &session{hookHash: tokenHash(hookToken), info: SessionInfo{OwnerID: ownerID, ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hooksActive, StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), pty: terminal, log: logFile, cmd: cmd, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
+	s := &session{hookHash: tokenHash(hookToken), info: SessionInfo{OwnerID: ownerID, ID: id, Agent: agent, Mode: mode, Root: root, State: "running", AgentState: initialAgentState, HooksActive: hooksActive, StartedAt: now, UpdatedAt: now}, rootAgentState: initialAgentState, activeSubagents: make(map[string]struct{}), log: logFile, done: make(chan struct{}), lastActivity: now, subs: make(map[chan Frame]struct{})}
 	a.mu.Lock()
 	if hookToken == "" {
 		s.hookHash = ""
 	}
+	if launch != nil {
+		s.info.ClaudeConversationID = launch.ConversationID
+	}
 	a.sessions[id] = s
 	a.mu.Unlock()
+	// Publish hook capability and expected identity BEFORE Claude can invoke SessionStart.
+	start := a.startPTY
+	if start == nil {
+		start = pty.StartWithSize
+	}
+	terminal, err := start(cmd, &pty.Winsize{Rows: 32, Cols: 120})
+	if err != nil {
+		a.mu.Lock()
+		delete(a.sessions, id)
+		a.mu.Unlock()
+		if shellAgentPath != "" {
+			_ = os.RemoveAll(shellAgentPath)
+		}
+		_ = os.Remove(filepath.Join(a.dir, "hook-"+id))
+		_ = logFile.Close()
+		if launch != nil {
+			a.failClaudeLaunch(launch.ConversationID, "Claude no pudo iniciarse. Revisá su instalación en este host.")
+		}
+		return SessionInfo{}, err
+	}
+	s.mu.Lock()
+	s.pty = terminal
+	s.cmd = cmd
+	s.mu.Unlock()
 	_ = a.saveSessions()
 	readDone := make(chan struct{})
 	go func() {
@@ -770,6 +799,8 @@ func (a *App) startSessionPrompt(agent, mode, root string, principal *AccessPrin
 }
 
 func (a *App) deleteSession(id string) error {
+	a.conversationStartMu.Lock()
+	defer a.conversationStartMu.Unlock()
 	a.deleteMu.Lock()
 	defer a.deleteMu.Unlock()
 	if !safeID(id) {

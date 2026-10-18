@@ -14,6 +14,7 @@ import { AccountUsageDock } from './AccountUsageDock'
 import { useAccountUsage } from './useAccountUsage'
 import { WorkspaceMenu } from './WorkspaceMenu'
 import { ERPTaskKanban } from './ERPTaskKanban'
+import { ClaudeConversationHistory } from './ClaudeConversationHistory'
 import type { NoticeSoundOutcome } from '../../shared/alert-diagnostics'
 import { freeLLMStartupReady, type FreeLLMRuntimeStatus } from '../../shared/free-llm-startup'
 import { hasWorkingAgent, sessionNameKey, sortSessionsByStart } from '../../shared/session-list'
@@ -414,7 +415,7 @@ export function App(): React.JSX.Element {
     operationKeys.current.add(key)
     setError('')
     try {
-      if (!await confirm({ message: `¿Eliminar definitivamente la terminal ${sessionDisplayName(hostId, session.id, session.agent)} (${session.id.slice(0, 8)})? Se terminarán sus procesos remotos y se borrará el historial de terminal. Esta acción no se puede deshacer.`, accept: 'Eliminar terminal', danger: true })) return
+      if (!await confirm({ message: `¿Eliminar definitivamente la terminal ${sessionDisplayName(hostId, session.id, session.agent)} (${session.id.slice(0, 8)})? Se terminarán sus procesos remotos y se borrará el historial de terminal.${session.claudeConversationId ? ' Se conserva el registro de conversación en Crow; podrás reanudarla mientras su historial nativo de Claude siga disponible.' : ''} Esta acción no se puede deshacer.`, accept: 'Eliminar terminal', danger: true })) return
       await window.crow.saveWorkspace(tabs, activeTabs, selectedProjectId)
       const saved = await window.crow.deleteSession(hostId, session.id)
       sessionVersions.current.begin(hostId)
@@ -635,6 +636,11 @@ export function App(): React.JSX.Element {
             <button className="secondary-button" disabled={status !== 'connected'} onClick={() => openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'browser', url: 'http://localhost:3000' })}><Globe2 size={15} /> Navegador</button>
           </div>
         </div>
+        <ClaudeConversationHistory key={`${selectedHost.id}:${selectedProject.id}`} hostId={selectedHost.id} projectId={selectedProject.id} status={status} revision={(sessionsByProject[selectedProject.id] || []).map(session => `${session.id}:${session.state}`).join('|')} onTerminal={(session, name) => {
+          setState(current => ({ ...current, sessionNames: { ...current.sessionNames, [sessionNameKey(selectedHost.id, session.id)]: name } }))
+          setSessions(current => ({ ...current, [selectedHost.id]: [...(current[selectedHost.id] || []).filter(value => value.id !== session.id), session] }))
+          openTab({ id: crypto.randomUUID(), projectId: selectedProject.id, kind: 'terminal', sessionId: session.id }, selectedProjectRef.current === selectedProject.id)
+        }} />
         <div className="content-row">
           <main className="main-pane">
             <div className="tab-bar" role="tablist" aria-label="Pestañas del proyecto">

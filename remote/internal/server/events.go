@@ -305,18 +305,21 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		SessionID        string `json:"sessionId"`
-		Kind             string `json:"kind"`
-		Message          string `json:"message"`
-		ChatMessage      string `json:"chatMessage"`
-		UserPrompt       string `json:"userPrompt"`
-		SourceID         string `json:"sourceId"`
-		ProviderThreadID string `json:"providerThreadId"`
-		AgentID          string `json:"agentId"`
-		Agent            string `json:"agent"`
-		MessageTruncated bool   `json:"messageTruncated"`
-		ChatTruncated    bool   `json:"chatTruncated"`
-		PromptTruncated  bool   `json:"promptTruncated"`
+		SessionID            string `json:"sessionId"`
+		Kind                 string `json:"kind"`
+		Message              string `json:"message"`
+		ChatMessage          string `json:"chatMessage"`
+		UserPrompt           string `json:"userPrompt"`
+		SourceID             string `json:"sourceId"`
+		ProviderThreadID     string `json:"providerThreadId"`
+		ClaudeSessionID      string `json:"claudeSessionId"`
+		ClaudeTranscriptPath string `json:"claudeTranscriptPath"`
+		ClaudeCwd            string `json:"claudeCwd"`
+		AgentID              string `json:"agentId"`
+		Agent                string `json:"agent"`
+		MessageTruncated     bool   `json:"messageTruncated"`
+		ChatTruncated        bool   `json:"chatTruncated"`
+		PromptTruncated      bool   `json:"promptTruncated"`
 	}
 	if !requestJSON(w, r, &body) {
 		return
@@ -348,6 +351,14 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if deleting || !active {
 		http.Error(w, "session is being deleted", http.StatusConflict)
 		return
+	}
+	if body.Agent == "claude" && s.snapshot().ClaudeConversationID != "" {
+		if err := a.confirmClaudeIdentity(body.SessionID, body.ClaudeSessionID, body.ClaudeTranscriptPath, body.ClaudeCwd); err != nil && !errors.Is(err, errClaudeIdentityPending) {
+			http.Error(w, "Claude conversation identity mismatch", http.StatusConflict)
+			return
+		}
+		// Exact expected hooks remain useful for chat/state before the native file
+		// is first flushed. Deferred proof never advertises the catalogue as ready.
 	}
 	if body.Kind == "agent-start" || body.Kind == "agent-stop" {
 		s.mu.Lock()
@@ -491,6 +502,11 @@ func RunHookNotify(args []string) error {
 	}
 
 	var message, userPrompt, agentID, sourceID, providerThreadID string
+	var native struct {
+		ID   string `json:"session_id"`
+		Path string `json:"transcript_path"`
+		Cwd  string `json:"cwd"`
+	}
 	var messageTruncated bool
 	if kind == "user-prompt" || kind == "turn-complete" || kind == "session-start" || kind == "subagent-start" || kind == "subagent-stop" {
 		var payload []byte
@@ -508,6 +524,9 @@ func RunHookNotify(args []string) error {
 				return err
 			}
 			payload = read
+		}
+		if os.Getenv("CROW_AGENT") == "claude" {
+			_ = json.Unmarshal(payload, &native)
 		}
 		if kind == "turn-complete" || kind == "session-start" {
 			message = hookAssistantMessage(payload)
@@ -555,7 +574,7 @@ func RunHookNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "chatMessage": chatMessage, "userPrompt": userPrompt, "sourceId": sourceID, "providerThreadId": providerThreadID, "agentId": agentID, "agent": os.Getenv("CROW_AGENT"), "messageTruncated": messageTruncated, "chatTruncated": chatTruncated, "promptTruncated": promptTruncated})
+	body, err := json.Marshal(map[string]any{"sessionId": os.Getenv("CROW_SESSION_ID"), "kind": kind, "message": message, "chatMessage": chatMessage, "userPrompt": userPrompt, "sourceId": sourceID, "providerThreadId": providerThreadID, "claudeSessionId": native.ID, "claudeTranscriptPath": native.Path, "claudeCwd": native.Cwd, "agentId": agentID, "agent": os.Getenv("CROW_AGENT"), "messageTruncated": messageTruncated, "chatTruncated": chatTruncated, "promptTruncated": promptTruncated})
 	if err != nil {
 		return err
 	}

@@ -10,43 +10,51 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/crow-harness/remote/internal/bridge"
 
 	"github.com/gorilla/websocket"
 )
 
 type App struct {
-	access        accessState
-	accessAuditMu sync.Mutex
-	dispatchMu    sync.Mutex
-	deleteMu      sync.Mutex
-	mu            sync.RWMutex
-	saveMu        sync.Mutex
-	fileMu        sync.Mutex
-	metricsMu     sync.Mutex
-	chatMu        sync.Mutex
-	chatSubmitMu  sync.Mutex
-	chatSubmits   map[string]chatSubmitRecord
-	lastCPU       cpuSample
-	dir           string
-	port          string
-	token         string
-	hookPath      string
-	binaryPath    string
-	hooksEnabled  bool
-	sessions      map[string]*session
-	events        []Event
-	eventMessages map[string]eventMessage
-	browsers      map[string]*browser
-	bridge        *bridge.Store
-	mobile        *mobileHostState
-	chat          *chatStore
+	conversationMu      sync.Mutex
+	conversationStartMu sync.Mutex // Admission, terminal deletion and forgetting share this order.
+	conversations       map[string]*claudeConversation
+	conversationLoaded  bool
+	conversationErr     error
+	startPTY            func(*exec.Cmd, *pty.Winsize) (*os.File, error) // Tests replace the process boundary, never the Claude CLI.
+	access              accessState
+	accessAuditMu       sync.Mutex
+	dispatchMu          sync.Mutex
+	deleteMu            sync.Mutex
+	mu                  sync.RWMutex
+	saveMu              sync.Mutex
+	fileMu              sync.Mutex
+	metricsMu           sync.Mutex
+	chatMu              sync.Mutex
+	chatSubmitMu        sync.Mutex
+	chatSubmits         map[string]chatSubmitRecord
+	lastCPU             cpuSample
+	dir                 string
+	port                string
+	token               string
+	hookPath            string
+	binaryPath          string
+	hooksEnabled        bool
+	sessions            map[string]*session
+	events              []Event
+	eventMessages       map[string]eventMessage
+	browsers            map[string]*browser
+	bridge              *bridge.Store
+	mobile              *mobileHostState
+	chat                *chatStore
 }
 
 func randomID() (string, error) {
@@ -107,6 +115,7 @@ func Run() error {
 	if err := a.loadSessions(); err != nil {
 		return err
 	}
+	a.initializeClaudeConversations()
 	if err := a.loadEvents(); err != nil {
 		return err
 	}
@@ -132,6 +141,7 @@ func Run() error {
 	mux.HandleFunc("POST /api/access/sessions/{id}/owner", a.handleAccessOwner)
 	mux.HandleFunc("GET /api/host/metrics", a.handleMetrics)
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
+	a.registerClaudeConversationRoutes(mux)
 	mux.HandleFunc("POST /api/sessions", a.handleSessions)
 	mux.HandleFunc("POST /api/task-dispatch", a.handleTaskDispatch)
 	mux.HandleFunc("DELETE /api/sessions/{id}", a.handleDeleteSession)

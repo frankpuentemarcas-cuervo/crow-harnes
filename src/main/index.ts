@@ -20,6 +20,7 @@ import { FreeLLMRuntime } from './free-llm-runtime'
 import { AlertAuditStore } from './alert-audit-store'
 import { AccountUsageService } from './account-usage-service'
 import { ERPTaskService } from './erp-task-service'
+import { ClaudeConversationService } from './claude-conversations'
 import { GitLabTokenStore, listGitLabProjectFiles, readGitLabProjectFiles } from './gitlab-repository'
 import type { ERPConnectionInput, ERPDispatchJob, ERPProjectCandidate, ERPTaskPreviewInput, ERPTaskStage, ERPTerminalTarget, ERPTerminalCandidate, ERPDispatchTarget, ERPExistingTerminalInput, ERPTerminalCatalogue } from '../shared/erp-task'
 import type { CrowAccessUserInput, GitLabRepositoryContext, ProjectInput, SavedState } from '../shared/types'
@@ -45,6 +46,7 @@ let freeLLM: FreeLLMRuntime
 let alertAudit: AlertAuditStore
 let accountUsage: AccountUsageService
 let erpTasks: ERPTaskService
+let claudeConversations: ClaudeConversationService
 let gitLabTokens: GitLabTokenStore
 let erpProjects: ERPProjectCandidate[] = []
 let erpQueue: Promise<unknown> = Promise.resolve()
@@ -56,7 +58,16 @@ let vault: PassphraseVault
 let mobile: MobileGateway
 let bridge: BridgeGateway | undefined
 const connections = new Map<string, Connection>()
+const terminalMetadataOperations = new Map<string, Promise<unknown>>()
 let updateState: UpdateState = { status: 'idle' }
+
+function terminalMetadataOperation<T>(hostId: string, sessionId: string, action: () => Promise<T>): Promise<T> {
+  const key = JSON.stringify([hostId, sessionId])
+  const operation = (terminalMetadataOperations.get(key) || Promise.resolve()).catch(() => undefined).then(action)
+  terminalMetadataOperations.set(key, operation)
+  void operation.finally(() => { if (terminalMetadataOperations.get(key) === operation) terminalMetadataOperations.delete(key) }).catch(() => undefined)
+  return operation
+}
 
 function send(channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) window.webContents.send(channel, payload)
@@ -541,7 +552,7 @@ function registerIPC(): void {
   handle('crow:submit-passphrase', (hostId: string, passphrase: string) => connection(hostId).submitPassphrase(passphrase))
   handle('crow:status', (hostId: string) => connection(hostId).status())
   handle('crow:notice-read', (id: string) => store.markNoticeRead(id))
-  handle('crow:rename-session', async (hostId: string, sessionId: string, name: string) => {
+  handle('crow:rename-session', (hostId: string, sessionId: string, name: string) => terminalMetadataOperation(hostId, sessionId, async () => {
     const sessions = await connection(hostId).api<SessionInfo[]>('GET', '/api/sessions')
     const session = sessions.find(item => item.id === sessionId)
     if (!session || (session.readOnly && session.ownerId)) throw new Error('Terminal no permitida para renombrar.')
@@ -549,6 +560,11 @@ function registerIPC(): void {
       const identity = await connection(hostId).accessIdentity()
       if ((identity.role !== 'admin' && identity.role !== 'installation') || !identity.id) throw new Error('Terminal no permitida para renombrar.')
       await connection(hostId).assignSessionOwner(sessionId, identity.id)
+    }
+    const project = store.snapshot().projects.find(item => item.hostId === hostId && item.root === session.root)
+    if (session.claudeConversationId) {
+      if (!project) throw new Error('La conversación no pertenece a un proyecto configurado.')
+      await claudeConversations.preserveTerminalName(hostId, project.id, session, name)
     }
     const renamed = store.renameSession(hostId, sessionId, name)
     // Keep the host-anchored Android view in sync without delaying the local rename.
@@ -560,8 +576,11 @@ function registerIPC(): void {
       void connection(hostId).api('POST', '/api/mobile/config', { hostId, hostName: host.name, projects, sessionNames }).catch(() => { /* Best effort; the Windows alias stays saved. */ })
     }
     return renamed
-  })
+  }))
   handle('crow:sessions', (hostId: string) => connection(hostId).api<SessionInfo[]>('GET', '/api/sessions'))
+  handle('crow:claude-conversations', (hostId: string, projectId: string) => claudeConversations.list(hostId, projectId))
+  handle('crow:resume-claude-conversation', (hostId: string, projectId: string, id: string, requestId: string) => claudeConversations.resume(hostId, projectId, id, requestId))
+  handle('crow:forget-claude-conversation', (hostId: string, projectId: string, id: string) => claudeConversations.forget(hostId, projectId, id))
   handle('crow:cache-warning', async (hostId: string, sessionId: string) => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
     const host = store.host(hostId)
@@ -636,7 +655,7 @@ function registerIPC(): void {
     if (!project || project.hostId !== hostId) throw new Error('Proyecto desconocido.')
     return connection(hostId).api<SessionInfo>('POST', '/api/sessions', { agent, mode, root: project.root })
   })
-  handle('crow:delete-session', async (hostId: string, sessionId: string) => {
+  handle('crow:delete-session', (hostId: string, sessionId: string) => terminalMetadataOperation(hostId, sessionId, async () => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
     const remote = connection(hostId)
     const sessions = await remote.api<SessionInfo[]>('GET', '/api/sessions')
@@ -651,10 +670,16 @@ function registerIPC(): void {
       if (identity.role !== 'admin' || !identity.id) throw new Error('Solo un administrador puede reclamar y eliminar una terminal anterior sin propietario.')
       await remote.assignSessionOwner(sessionId, identity.id)
     }
+    if (session.claudeConversationId) {
+      const project = store.snapshot().projects.find(item => item.hostId === hostId && item.root === session.root)
+      // Keep the durable conversation name before removeSession drops its PTY alias.
+      // Removing a project must not make its own orphan terminal undeletable.
+      if (project) await claudeConversations.preserveTerminalName(hostId, project.id, session)
+    }
     await remote.api('DELETE', `/api/sessions/${sessionId}`)
     terminalCheckpoints.remove(hostId, sessionId)
     return store.removeSession(hostId, sessionId)
-  })
+  }))
   handle('crow:wake-session', (hostId: string, sessionId: string) => {
     if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Sesión inválida.')
     return connection(hostId).api<SessionInfo>('POST', `/api/sessions/${sessionId}/wake`)
@@ -746,6 +771,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   store = new Store(app.getPath('userData'))
+  claudeConversations = new ClaudeConversationService({ project: id => store.project(id), connection, generation: () => accessGeneration, authorize: authorizeERPProject, name: (hostId, sessionId) => store.sessionName(hostId, sessionId), rename: (hostId, sessionId, name) => store.renameSession(hostId, sessionId, name) })
   connectionDiagnostics = new ConnectionDiagnosticsStore(app.getPath('userData'))
   terminalCheckpoints = new TerminalCheckpointStore(app.getPath('userData'), safeStorage)
   accountUsage = new AccountUsageService(app.getPath('userData'), createAccountUsageAdapters())

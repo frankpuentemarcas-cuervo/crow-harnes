@@ -389,6 +389,9 @@ func (a *App) accessAuth(next http.Handler) http.Handler {
 func (a *App) authorizeRoute(w http.ResponseWriter, r *http.Request) bool {
 	p := requestPrincipal(r)
 	path := r.URL.Path
+	if path == "/api/claude-conversations" || strings.HasPrefix(path, "/api/claude-conversations/") {
+		return a.authorizeClaudeRoute(w, r)
+	}
 	if strings.HasPrefix(path, "/api/access") {
 		if path != "/api/access/me" && p.Role != "admin" {
 			http.Error(w, "administrator required", 403)

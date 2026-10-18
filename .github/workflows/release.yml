@@ -86,6 +86,9 @@ jobs:
       - name: Test ERP terminal assignment and detail delivery in isolated Electron
         run: node tests/erp-terminal-assignment-electron.mjs
 
+      - name: Test exact Claude conversation resume in isolated Electron
+        run: node tests/claude-resume-electron.mjs
+
       - name: Test terminal names after reconnect in isolated Electron
         run: node tests/session-names-startup-electron.mjs
 

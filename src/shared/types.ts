@@ -74,6 +74,8 @@ export type TerminalCheckpointLoadResult = { status: 'restored'; checkpoint: Ter
 export type TerminalCheckpointSaveResult = 'saved' | 'oversized' | 'unavailable' | 'invalid'
 
 export interface SessionInfo {
+  /** Crow catalogue record, never Claude's native session UUID. */
+  claudeConversationId?: string
   ownerId?: string
   readOnly?: boolean
   id: string
@@ -90,6 +92,24 @@ export interface SessionInfo {
   updatedAt: string
   seq: number
   exitCode?: number
+}
+
+export interface ClaudeConversation {
+  id: string
+  root: string
+  name: string
+  mode: 'normal' | 'bypass'
+  createdAt: string
+  updatedAt: string
+  status: 'active' | 'available' | 'pending' | 'unavailable'
+  sessionId?: string
+  reason?: string
+}
+
+export interface ClaudeConversationResume {
+  conversation: ClaudeConversation
+  session?: SessionInfo
+  state: 'existing' | 'pending' | 'ready'
 }
 
 /** Main-conversation statistics reported by Claude; never prompt content. */
@@ -293,6 +313,9 @@ export interface CrowAPI extends AccountUsageAPI {
   markNoticeRead(id: string): Promise<SavedState>
   renameSession(hostId: string, sessionId: string, name: string): Promise<SavedState>
   sessions(hostId: string): Promise<SessionInfo[]>
+  claudeConversations(hostId: string, projectId: string): Promise<ClaudeConversation[]>
+  resumeClaudeConversation(hostId: string, projectId: string, id: string, requestId: string): Promise<ClaudeConversationResume>
+  forgetClaudeConversation(hostId: string, projectId: string, id: string): Promise<void>
   startSession(hostId: string, projectId: string, agent: Agent, mode: Mode): Promise<SessionInfo>
   deleteSession(hostId: string, sessionId: string): Promise<SavedState>
   wakeSession(hostId: string, sessionId: string): Promise<SessionInfo>

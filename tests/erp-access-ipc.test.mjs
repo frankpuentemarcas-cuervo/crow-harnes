@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { projectVisibleSessions, withoutHostWorkspace } from '../src/shared/access-visibility.ts'
+import { ClaudeConversationService } from '../src/main/claude-conversations.ts'
 
 const require = createRequire(import.meta.url)
 function harness() {
@@ -13,11 +14,11 @@ function harness() {
   const project = { id: 'project', name: 'Allowed', hostId: 'host', root: '/srv/allowed' }
   const state = { hosts: [{ id: 'host' }], projects: [project], notices: [], sessionNames: {}, tabs: [], activeTabs: {}, selectedProjectId: '', eventCursors: {} }
   const current = { status: () => 'connected', accessStatus: async () => ({ enabled: true }), accessIdentity: async () => principal, sessionList: [], assignSessionOwner: async (sessionId, ownerId) => { ownerAssignments.push([sessionId, ownerId]) }, api: async (method, path, body) => { remoteCalls.push([method, path, body]); if (method === 'GET' && path === '/api/sessions') return current.sessionList; dispatches.push(body); return current.receipt ?? { sessionId: 'a'.repeat(32) } }, setAccessCredential: async () => undefined }
-  const store = { project: id => state.projects.find(item => item.id === id), host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; return state }, saveWorkspace: () => state, renameSession: () => { state.renamed = true; return state } }
+  const store = { project: id => state.projects.find(item => item.id === id), host: id => id === 'host' ? state.hosts[0] : undefined, snapshot: () => structuredClone(state), removeSession: (hostId, sessionId) => { state.removedSession = [hostId, sessionId]; delete state.sessionNames[`${hostId}:${sessionId}`]; return state }, saveWorkspace: () => state, sessionName: (hostId, sessionId) => state.sessionNames[`${hostId}:${sessionId}`], renameSession: (hostId, sessionId, name) => { state.renamed = true; state.sessionNames[`${hostId}:${sessionId}`] = name; return state } }
   const erp = { snapshot: () => ({ connection: {}, tasks: [], links: {} }), approve: async () => ({}) }
   const module = { exports: {} }
   const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8') + '\nexports.testSetup = (s, c, e, w) => { store=s; connections.set("host",c); erpTasks=e; window=w; terminalCheckpoints={remove(){}}; attention={reset(){}}; registerIPC() }; exports.authorize = authorizeERPProject; exports.dispatch = dispatchERPTask; exports.erpTerminals = erpTerminals; exports.catalogue = erpTerminalCatalogue; exports.addConnection = (host,current) => connections.set(host,current); exports.resolveTerminal = resolveERPTerminal; exports.submit = submitERPTask; exports.receipt = erpSubmissionStatus; exports.auditRecords = visibleAuditRecords;'
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const compiled = ts.transpileModule(source + '\nexports.setConversationService = value => claudeConversations = value;', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const localRequire = id => {
     if (id.startsWith('node:')) return require(id)
     if (id === 'electron') return { app: { whenReady: () => ({ then() {} }), on() {} }, ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } }
@@ -26,6 +27,7 @@ function harness() {
   }
   vm.runInNewContext(compiled, { require: localRequire, exports: module.exports, module, process: { env: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval })
   module.exports.testSetup(store, current, erp, { webContents: sender, isDestroyed: () => false })
+  module.exports.setConversationService(new ClaudeConversationService({ project: store.project, connection: () => current, generation: () => 0, authorize: module.exports.authorize, name: store.sessionName, rename: store.renameSession }))
   return { ...module.exports, principal, project, state, current, erp, handlers, dispatches, remoteCalls, ownerAssignments, invoke: (channel, ...args) => handlers.get(channel)({ sender }, ...args) }
 }
 
@@ -39,6 +41,42 @@ test('main authorizes current server principal and canonical root, not renderer 
   await assert.rejects(h.authorize('project', 'host'), /no permite/)
   h.project.root = '/srv/allowed'; h.principal.revoked = true
   await assert.rejects(h.authorize('project', 'host'), /no válida/)
+})
+
+test('Claude history IPC is sender guarded and resumes the exact logical record with durable alias', async () => {
+  const h = harness(), id = 'c'.repeat(32), sessionId = 'a'.repeat(32), requestId = '11111111-1111-4111-8111-111111111111'
+  const row = { id, root: h.project.root, name: 'QA conversación', mode: 'normal', status: 'available', createdAt: '2026-10-17T00:00:00Z', updatedAt: '2026-10-17T00:00:00Z' }
+  const session = { id: sessionId, claudeConversationId: id, root: h.project.root, ownerId: h.principal.id, agent: 'claude', mode: 'normal', state: 'running' }
+  h.current.api = async (method, path, body) => { h.remoteCalls.push([method, path, body]); if (path === '/api/sessions') return []; if (path === '/api/claude-conversations') return [row]; return { conversation: { ...row, status: 'pending', sessionId }, session, state: 'pending' } }
+  for (const channel of ['crow:claude-conversations', 'crow:resume-claude-conversation', 'crow:forget-claude-conversation']) await assert.rejects(h.handlers.get(channel)({ sender: {} }, 'host', 'project', id, requestId), /no autorizada/)
+  assert.equal((await h.invoke('crow:claude-conversations', 'host', 'project'))[0].id, id)
+  await h.invoke('crow:resume-claude-conversation', 'host', 'project', id, requestId)
+  assert.equal(h.state.sessionNames[`host:${sessionId}`], row.name)
+  assert.deepEqual(h.remoteCalls.find(call => call[0] === 'POST'), ['POST', `/api/claude-conversations/${id}/resume`, { requestId }])
+})
+
+test('rename finishes durable conversation metadata before a concurrent terminal deletion', async () => {
+  const h = harness(), id = 'c'.repeat(32), sessionId = 'a'.repeat(32)
+  let row = { id, root: h.project.root, name: 'Original', mode: 'normal', status: 'available', sessionId, createdAt: '2026-10-17T00:00:00Z', updatedAt: '2026-10-17T00:00:00Z' }, release, entered, deleted = false
+  const started = new Promise(resolve => { entered = resolve })
+  h.state.sessionNames[`host:${sessionId}`] = 'Original'
+  const session = { id: sessionId, claudeConversationId: id, root: h.project.root, ownerId: h.principal.id, agent: 'claude', mode: 'normal', state: 'interrupted' }
+  h.current.api = async (method, path, body) => { if (path === '/api/sessions') return [session]; if (path === '/api/claude-conversations') return [row]; if (path.endsWith('/name')) { entered(); await new Promise(resolve => { release = resolve }); row = { ...row, name: body.name }; return row } if (method === 'DELETE') { deleted = true; return {} } }
+  const rename = h.invoke('crow:rename-session', 'host', sessionId, 'Nombre nuevo'); await started
+  const deletion = h.invoke('crow:delete-session', 'host', sessionId); await new Promise(resolve => setImmediate(resolve)); assert.equal(deleted, false)
+  release(); await rename; await deletion; assert.equal(row.name, 'Nombre nuevo'); assert.equal(deleted, true); assert.equal(h.state.sessionNames[`host:${sessionId}`], undefined)
+})
+
+test('own replaced or removed-project terminal can be deleted without overwriting current conversation name', async () => {
+  for (const removeProject of [false, true]) {
+    const h = harness(), id = 'c'.repeat(32), oldId = 'a'.repeat(32), currentId = 'b'.repeat(32), root = h.project.root
+    const row = { id, root, name: 'Current name', mode: 'normal', status: 'active', sessionId: currentId, createdAt: '2026-10-17T00:00:00Z', updatedAt: '2026-10-17T00:00:00Z' }, session = { id: oldId, claudeConversationId: id, root, ownerId: h.principal.id, agent: 'claude', mode: 'normal', state: 'interrupted' }
+    h.state.sessionNames[`host:${oldId}`] = 'Older alias'
+    if (removeProject) h.state.projects = []
+    h.current.api = async (method, path, body) => { h.remoteCalls.push([method, path, body]); return path === '/api/sessions' ? [session] : path === '/api/claude-conversations' ? [row] : {} }
+    await h.invoke('crow:delete-session', 'host', oldId)
+    assert.deepEqual(h.state.removedSession, ['host', oldId]); assert.equal(h.remoteCalls.some(c => c[1].endsWith('/name')), false); assert.equal(row.name, 'Current name')
+  }
 })
 
 test('dispatch rechecks approved actor and exact root before contacting the remote endpoint', async () => {

@@ -375,3 +375,18 @@ select { height: 29px; border-radius: 5px; border: 1px solid #3c424c; background
 .mobile-project-actions button { min-height: 32px; padding: 5px 9px; font-size: 11px; }
 .mobile-dialog .mobile-quota-consent { display: flex; flex-direction: row; align-items: center; gap: 10px; margin-top: 12px; color: #e9eef5; font-size: 12px; }
 .mobile-quota-consent input { width: 18px; height: 18px; flex: 0 0 auto; accent-color: var(--accent); }
+/* Conversation history is metadata, not another terminal viewport. */
+.claude-history { flex: 0 0 auto; min-width: 0; border-bottom: 1px solid var(--border, #323942); font-size: 12px; }
+.claude-history-heading { display: flex; align-items: center; gap: 12px; padding: 4px 12px; min-height: 32px; }
+.claude-history-toggle { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: inherit; border: 0; cursor: pointer; padding: 6px 2px; font: inherit; }
+.claude-history-pending { color: #d6ba80; min-width: 0; overflow-wrap: anywhere; }
+.claude-history-heading > .icon-button { margin-left: auto; flex-shrink: 0; }
+.claude-history-list { padding: 0 16px 10px; max-height: min(32vh, 260px); overflow-y: auto; }
+.claude-history-help { color: #a8b0ba; margin: 6px 0 10px; max-width: 100ch; }
+.claude-history-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #2c323b; }
+.claude-history-description { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.claude-history-description > span { color: #a8b0ba; font-size: 11px; }
+.claude-history-row > button { flex-shrink: 0; }
+.claude-history-error { color: #f2a9a9; overflow-wrap: anywhere; }
+.claude-history button:focus-visible { outline: 2px solid #a6d2bd; outline-offset: 2px; }
+@media (max-width: 760px) { .claude-history-heading { flex-wrap: wrap; gap: 4px 10px; } .claude-history-row { flex-wrap: wrap; } .claude-history-description { flex-basis: 100%; } }
