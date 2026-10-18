@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -48,8 +50,14 @@ func TestIdempotentCreationReplaysAndRejectsDifferentPayload(t *testing.T) {
 	if _, err := a.createSessionIdempotent(key, "shell", "normal", root, p); err == nil {
 		t.Fatal("shell agent accepted")
 	}
-	if _, err := a.createSessionIdempotent(key, "claude", "bypass", root, p); err == nil {
-		t.Fatal("bypass mode accepted")
+	// A key already bound to normal mode must treat bypass as a different
+	// payload: conflict, never a second terminal.
+	if _, err := a.createSessionIdempotent(key, "claude", "bypass", root, p); !errors.Is(err, errCreateConflict) {
+		t.Fatalf("mode change on a bound key not rejected: %v", err)
+	}
+	// An unknown mode is rejected before any side effect.
+	if _, err := a.createSessionIdempotent(strings.Repeat("7", 32), "claude", "sandbox", root, p); err == nil {
+		t.Fatal("invalid mode accepted")
 	}
 	if _, err := a.createSessionIdempotent("not-a-valid-key", "claude", "normal", root, p); err == nil {
 		t.Fatal("misformed key accepted")
@@ -264,5 +272,117 @@ func TestIdempotentCreationKeepsUncertainTombstoneWhenPersistFails(t *testing.T)
 	}
 	if *calls != 0 {
 		t.Fatalf("retry spawned a duplicate: %d", *calls)
+	}
+}
+
+func TestIdempotentCreationSupportsBypassMode(t *testing.T) {
+	a, _, p, _ := claudeFixture(t)
+	var err error
+	a.sessionCreates, err = openSessionCreateStore(a.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spawnedArgs string
+	calls := installFakeClaude(t, a, func(cmd *exec.Cmd) { spawnedArgs = strings.Join(cmd.Args, " ") })
+	key, root := strings.Repeat("3", 32), p.AllowedRoots[0]
+	first, err := a.createSessionIdempotent(key, "claude", "bypass", root, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Mode != "bypass" {
+		t.Fatalf("created terminal not in bypass mode: %q", first.Mode)
+	}
+	if !strings.Contains(spawnedArgs, "dangerously") {
+		t.Fatalf("bypass spawn missing explicit flag: %s", spawnedArgs)
+	}
+	if *calls != 1 {
+		t.Fatalf("expected one spawn, got %d", *calls)
+	}
+	// A retry with the same key and payload replays the same bypass terminal.
+	second, err := a.createSessionIdempotent(key, "claude", "bypass", root, p)
+	if err != nil || second.ID != first.ID || *calls != 1 {
+		t.Fatalf("bypass replay duplicated: %v %s vs %s (%d)", err, second.ID, first.ID, *calls)
+	}
+	// The bypass mode must survive a registry reload so a restart cannot
+	// silently downgrade the destination to normal. The store only accepts
+	// POSIX-absolute roots (crowd runs on Linux), so skip the reload on
+	// Windows where a real canonical root is drive-lettered.
+	if runtime.GOOS != "windows" {
+		reopened, err := openSessionCreateStore(a.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record := reopened.records[recordOwnerKey(principalOwnerKey(p), key)]; record.Mode != "bypass" || record.State != "created" {
+			t.Fatalf("bypass mode not persisted: %+v", record)
+		}
+	}
+	stopSyntheticClaude(t, a, first.ID)
+}
+
+func TestBypassCreationOverHTTPIsModeBound(t *testing.T) {
+	a, _, p, _ := claudeFixture(t)
+	var err error
+	a.sessionCreates, err = openSessionCreateStore(a.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := installFakeClaude(t, a, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sessions", a.handleSessions)
+	h := a.auth(mux)
+	key := strings.Repeat("8", 32)
+	body, _ := json.Marshal(map[string]string{"agent": "claude", "mode": "bypass", "root": p.AllowedRoots[0], "requestKey": key})
+	w := accessRequest(h, "alice-token", "POST", "/api/sessions", string(body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("bypass create: %d %s", w.Code, w.Body)
+	}
+	var first SessionInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Mode != "bypass" {
+		t.Fatalf("HTTP create not bypass: %q", first.Mode)
+	}
+	// The same key bound to normal mode is a payload conflict over HTTP too.
+	normal, _ := json.Marshal(map[string]string{"agent": "claude", "mode": "normal", "root": p.AllowedRoots[0], "requestKey": key})
+	if w := accessRequest(h, "alice-token", "POST", "/api/sessions", string(normal)); w.Code != http.StatusConflict {
+		t.Fatalf("mode change over HTTP not rejected: %d %s", w.Code, w.Body)
+	}
+	if *calls != 1 {
+		t.Fatalf("bypass HTTP path spawned %d terminals", *calls)
+	}
+	stopSyntheticClaude(t, a, first.ID)
+}
+
+func TestHealthAdvertisesCreationCapabilities(t *testing.T) {
+	// A legacy runtime without the idempotent store advertises zero for both
+	// creation capabilities, so a client never POSTs creation (normal or
+	// bypass) to an older crowd that would ignore the request key.
+	legacy := &App{}
+	w := httptest.NewRecorder()
+	legacy.health(w, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	var legacyBody map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &legacyBody); err != nil {
+		t.Fatal(err)
+	}
+	if legacyBody["bridgeCreateVersion"] != float64(0) || legacyBody["bridgeCreateBypassVersion"] != float64(0) {
+		t.Fatalf("legacy runtime advertised creation: %v", legacyBody)
+	}
+	// A capable runtime advertises bypass alongside normal creation so the
+	// bridge can distinguish "can create" from "can create bypass".
+	a, _, _, _ := claudeFixture(t)
+	var err error
+	a.sessionCreates, err = openSessionCreateStore(a.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	a.health(w, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	var capableBody map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &capableBody); err != nil {
+		t.Fatal(err)
+	}
+	if capableBody["bridgeCreateVersion"] != float64(1) || capableBody["bridgeCreateBypassVersion"] != float64(1) {
+		t.Fatalf("capable runtime did not advertise bypass: %v", capableBody)
 	}
 }

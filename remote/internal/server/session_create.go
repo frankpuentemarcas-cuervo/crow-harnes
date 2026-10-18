@@ -69,7 +69,7 @@ func openSessionCreateStore(dir string) (*sessionCreateStore, error) {
 		}
 		for id, record := range s.records {
 			if id != recordOwnerKey(record.Owner, record.Key) || !createKeyPattern.MatchString(record.Key) || !createKeyPattern.MatchString(record.SessionID) ||
-				(record.Agent != "claude" && record.Agent != "codex") || record.Mode != "normal" || !strings.HasPrefix(record.Root, "/") || strings.ContainsAny(record.Root, "\x00\r\n") ||
+				(record.Agent != "claude" && record.Agent != "codex") || (record.Mode != "normal" && record.Mode != "bypass") || !strings.HasPrefix(record.Root, "/") || strings.ContainsAny(record.Root, "\x00\r\n") ||
 				record.Owner == "" || record.CreatedAt.IsZero() || record.UpdatedAt.IsZero() {
 				return nil, errors.New("invalid creation record")
 			}
@@ -147,11 +147,14 @@ func (a *App) startSessionReserved(agent, mode, root string, principal *AccessPr
 	return a.startSessionPromptIntent(agent, mode, root, principal, "", nil, reservedID)
 }
 
-// createSessionIdempotent creates a normal Claude/Codex terminal keyed by
-// (principal, request key). The key is tied to the requested agent/root so a
-// different payload conflicts, and the ambient principal/permitted-root checks
-// inside startSessionPromptIntent are never bypassed. The root must already be
-// canonical and the registry has a fixed fail-closed capacity.
+// createSessionIdempotent creates a Claude/Codex terminal in normal or bypass
+// permission mode keyed by (principal, request key). The key is tied to the
+// requested agent/mode/root so a different payload conflicts, and the ambient
+// principal/permitted-root checks inside startSessionPromptIntent are never
+// bypassed. The root must already be canonical and the registry has a fixed
+// fail-closed capacity. Bypass is signalled by the caller only after proving the
+// runtime bypass capability; it still rejects any non-Claude/Codex agent, so a
+// shell can never be created here.
 func (a *App) createSessionIdempotent(key, agent, mode, root string, principal *AccessPrincipal) (SessionInfo, error) {
 	store := a.sessionCreates
 	if store == nil {
@@ -163,7 +166,9 @@ func (a *App) createSessionIdempotent(key, agent, mode, root string, principal *
 	if agent != "claude" && agent != "codex" {
 		return SessionInfo{}, errors.New("unsupported agent")
 	}
-	if mode != "normal" {
+	// Only normal or bypass are valid; bypass never applies to a shell, and the
+	// agent allow-list above already excludes shell/agy from idempotent creation.
+	if mode != "normal" && mode != "bypass" {
 		return SessionInfo{}, errors.New("invalid permission mode")
 	}
 	owner := principalOwnerKey(principal)

@@ -20,13 +20,18 @@ import (
 
 type structuredInput struct{ paste, submit []byte }
 type chatSubmitRecord struct {
-	OperationID   string    `json:"operationId"`
-	RequestID     string    `json:"requestId"`
-	SessionID     string    `json:"sessionId"`
-	Fingerprint   string    `json:"fingerprint"`
-	Status        string    `json:"status"`
+	OperationID string `json:"operationId"`
+	RequestID   string `json:"requestId"`
+	SessionID   string `json:"sessionId"`
+	Fingerprint string `json:"fingerprint"`
+	Status      string `json:"status"`
+	// HookConfirmed marks that a durable user hook was observed for this exact
+	// submission. UserSeq is that hook's authoritative chat-history sequence,
+	// which ties one assistant turn to this requestId even when the same prompt
+	// text is submitted again by another surface.
 	HookConfirmed bool      `json:"hookConfirmed,omitempty"`
 	BaselineSeq   uint64    `json:"baselineSeq"`
+	UserSeq       uint64    `json:"userSeq,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
@@ -62,7 +67,8 @@ func (a *App) loadChatSubmits() error {
 		return errors.New("invalid chat submit operation ledger")
 	}
 	for key, row := range rows {
-		if key != row.RequestID || !chatRequestID.MatchString(key) || row.OperationID == "" || row.SessionID == "" || (row.Status != "pending" && row.Status != "uncertain" && row.Status != "written" && row.Status != "accepted" && row.Status != "rejected") {
+		if key != row.RequestID || !chatRequestID.MatchString(key) || row.OperationID == "" || row.SessionID == "" || (row.Status != "pending" && row.Status != "uncertain" && row.Status != "written" && row.Status != "accepted" && row.Status != "rejected") ||
+			(row.UserSeq != 0 && row.UserSeq <= row.BaselineSeq) || (row.UserSeq != 0 && !row.HookConfirmed) {
 			return errors.New("invalid chat submit operation ledger")
 		}
 		if row.Status == "pending" {
@@ -129,6 +135,12 @@ type chatSubmitDTO struct {
 	RequestID   string `json:"requestId"`
 	SessionID   string `json:"sessionId"`
 	Status      string `json:"status"`
+	// BaselineSeq and UserSeq are the authoritative transcript boundaries: the
+	// newest message when the submission was reserved, and the exact user-hook
+	// sequence bound to this requestId. A client correlates an assistant turn
+	// only after UserSeq, never by guessing from the prompt text.
+	BaselineSeq uint64 `json:"baselineSeq"`
+	UserSeq     uint64 `json:"userSeq"`
 }
 
 type mobileChatSubmitContextKey struct{}
@@ -147,8 +159,13 @@ func (a *App) chatSubmitCallerCurrent(r *http.Request, id string, s *session) bo
 }
 
 func submitDTO(row chatSubmitRecord) chatSubmitDTO {
-	return chatSubmitDTO{row.OperationID, row.RequestID, row.SessionID, row.Status}
+	return chatSubmitDTO{OperationID: row.OperationID, RequestID: row.RequestID, SessionID: row.SessionID, Status: row.Status, BaselineSeq: row.BaselineSeq, UserSeq: row.UserSeq}
 }
+
+// markChatSubmitHook binds one durable user hook sequence to exactly one
+// submission. Even when the same prompt text is submitted again, only the oldest
+// matching unreconciled request above its own baseline is confirmed, so two
+// requestIds can never share a hook sequence or an assistant turn.
 func (a *App) markChatSubmitHook(sessionID, text string, sequence uint64) {
 	hash := sha256.Sum256([]byte(text))
 	fingerprint := hex.EncodeToString(hash[:])
@@ -157,14 +174,25 @@ func (a *App) markChatSubmitHook(sessionID, text string, sequence uint64) {
 	if a.chatSubmits == nil {
 		a.chatSubmits = make(map[string]chatSubmitRecord)
 	}
+	chosen := ""
+	var chosenAt time.Time
 	for id, row := range a.chatSubmits {
-		if row.SessionID == sessionID && row.Fingerprint == fingerprint && (row.Status == "pending" || row.Status == "uncertain" || row.Status == "written") && sequence > row.BaselineSeq && !row.HookConfirmed {
-			row.HookConfirmed = true
-			row.Status = "accepted"
-			a.chatSubmits[id] = row
-			_ = a.saveChatSubmitsLocked()
+		if row.SessionID != sessionID || row.Fingerprint != fingerprint || (row.Status != "pending" && row.Status != "uncertain" && row.Status != "written") || sequence <= row.BaselineSeq || row.HookConfirmed {
+			continue
+		}
+		if chosen == "" || row.CreatedAt.Before(chosenAt) || (row.CreatedAt.Equal(chosenAt) && id < chosen) {
+			chosen, chosenAt = id, row.CreatedAt
 		}
 	}
+	if chosen == "" {
+		return
+	}
+	row := a.chatSubmits[chosen]
+	row.HookConfirmed = true
+	row.Status = "accepted"
+	row.UserSeq = sequence
+	a.chatSubmits[chosen] = row
+	_ = a.saveChatSubmitsLocked()
 }
 
 func (a *App) handleChatSubmit(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +260,7 @@ func (a *App) handleChatSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The session lock serializes both writes against terminal input/deletion.
-	if r.Context().Err() != nil || !a.chatSubmitCallerCurrent(r, id, s) || s.deleting || s.pty == nil || s.info.State != "running" || s.info.Mode != "normal" || (s.info.Agent != "claude" && s.info.Agent != "codex") || !s.info.HooksActive || (s.info.AgentState != "waiting" && s.info.AgentState != "completed") || s.userDraft || len(s.activeSubagents) != 0 || !s.bracketedPaste {
+	if r.Context().Err() != nil || !a.chatSubmitCallerCurrent(r, id, s) || s.deleting || s.pty == nil || s.info.State != "running" || (s.info.Mode != "normal" && s.info.Mode != "bypass") || (s.info.Agent != "claude" && s.info.Agent != "codex") || !s.info.HooksActive || (s.info.AgentState != "waiting" && s.info.AgentState != "completed") || s.userDraft || len(s.activeSubagents) != 0 || !s.bracketedPaste {
 		s.mu.Unlock()
 		op.Status = "rejected"
 		a.chatSubmits[body.RequestID] = op

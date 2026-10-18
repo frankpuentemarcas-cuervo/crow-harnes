@@ -5,9 +5,13 @@ import { z } from 'zod'
 
 export const id = z.string().uuid()
 export const sessionId = z.string().regex(/^[0-9a-f]{32}$/)
+// Chat request ids are also the remote structured-chat ledger key, whose regex
+// requires a lowercase UUID v4. Enforcing it here rejects at the MCP boundary
+// instead of after a network round trip the remote would refuse anyway.
+export const chatRequestId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 const grant = z.object({
   hostId: id, projectId: id, sessionId,
-  operations: z.array(z.enum(['discover', 'register', 'hello', 'result'])).min(1).max(4),
+  operations: z.array(z.enum(['discover', 'register', 'hello', 'result', 'rename', 'chat'])).min(1).max(6),
   priority: z.number().int().min(0).max(100).default(50)
 }).strict()
 // Deprecated compatibility field. Creation no longer needs a per-project
@@ -28,6 +32,10 @@ export const policySchema = z.object({
     tokenSha256: z.string().regex(/^[0-9a-f]{64}$/),
     grants: z.array(grant).max(100).default([]),
     projectGrants: z.array(projectGrant).max(100).default([]),
+    // Owner-controlled opt-in for creating bypass-permission terminals. Default
+    // false: existing clients keep normal-only creation and every bypass call
+    // still requires an explicit per-call confirmation.
+    allowBypass: z.boolean().default(false),
     preferences: z.object({ replyLanguage: z.enum(['es', 'en']).default('es'), pollingSeconds: z.number().int().min(5).max(60).default(10) }).strict().default({})
   }).strict()).min(1).max(20)
 }).strict().superRefine((value, ctx) => {

@@ -795,7 +795,14 @@ app.whenReady().then(() => {
   // the exact Connection/passphrase path already used by the desktop app.
   if (process.env.CROW_MCP_CONFIG) {
     try {
-      bridge = new BridgeGateway(readBridgePolicy(process.env.CROW_MCP_CONFIG), () => new BridgeService(new BridgeRegistry(app.getPath('userData')), { snapshot: scopedWorkspaceSnapshot, sessionName: () => undefined }, connection))
+      bridge = new BridgeGateway(readBridgePolicy(process.env.CROW_MCP_CONFIG), () => new BridgeService(new BridgeRegistry(app.getPath('userData')), {
+        snapshot: scopedWorkspaceSnapshot,
+        // Read the persisted alias from the same store the desktop UI writes, so
+        // context and creation/rename results reflect the owner's Crow name.
+        sessionName: (hostId: string, sessionId: string) => store.sessionName(hostId, sessionId),
+        // Rename updates only Crow's persisted alias; it never touches a PTY.
+        renameSession: (hostId: string, sessionId: string, name: string) => { store.renameSession(hostId, sessionId, name) }
+      }, connection))
       void bridge.start().catch(() => { console.error('Crow MCP no pudo iniciarse. Revisá el puerto/configuración local.'); bridge = undefined })
     } catch { console.error('Crow MCP deshabilitado: configuración local inválida.') }
   }

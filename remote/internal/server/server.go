@@ -224,11 +224,16 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 	// bridgeCreateVersion advertises durable idempotent session creation. Older
 	// crowd builds ignore the requestKey field and would spawn a duplicate after
 	// a lost response, so clients must require this capability before POSTing.
+	// bridgeCreateBypassVersion is a separate capability: bypass creation needs
+	// it in addition to bridgeCreateVersion, so an older crowd instance receives
+	// zero POSTs for bypass while normal creation keeps working with version 1.
 	createVersion := 0
+	createBypassVersion := 0
 	if a.sessionCreates != nil {
 		createVersion = 1
+		createBypassVersion = 1
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1, "bridgeHelloVersion": bridgeVersion, "bridgeCreateVersion": createVersion})
+	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1, "bridgeHelloVersion": bridgeVersion, "bridgeCreateVersion": createVersion, "bridgeCreateBypassVersion": createBypassVersion})
 }
 
 func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
