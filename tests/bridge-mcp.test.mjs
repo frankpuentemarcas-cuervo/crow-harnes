@@ -25,39 +25,63 @@ async function freePort() {
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'crow-bridge-'))
   const workspace = new Store(dir)
-  const hosts = [0, 1].map((index) => workspace.saveHost({ name: `Test ${index}`, target: `test@fake-${index}`, identity: 'private-key-marker', port: 22, remotePort: 47321 }).hosts[index])
+  const hosts = [0, 1, 2].map((index) => workspace.saveHost({ name: `Test ${index}`, target: `test@fake-${index}`, identity: 'private-key-marker', port: 22, remotePort: 47321 }).hosts[index])
   const projects = hosts.map((host, index) => workspace.saveProject({ hostId: host.id, name: `Probe ${index}`, root: `/empty-test-${index}` }).projects[index])
-  const tokens = [0, 1].map(() => randomBytes(32).toString('base64url'))
-  const sessions = hosts.map((_, index) => ({ id: String(index + 1).repeat(32), root: projects[index].root, agent: 'claude', mode: 'normal', hooksActive: true, state: 'running', agentState: 'waiting', seq: 0 }))
-  const clients = hosts.map((host, index) => ({ id: `client-${index}`, tokenSha256: createHash('sha256').update(tokens[index]).digest('hex'), grants: [{ hostId: host.id, projectId: projects[index].id, sessionId: sessions[index].id, operations: ['discover', 'register', 'hello', 'result'] }] }))
+  const tokens = [0, 1, 2].map(() => randomBytes(32).toString('base64url'))
+  const sessions = [0, 1].map((index) => ({ id: String(index + 1).repeat(32), root: projects[index].root, agent: 'claude', mode: 'normal', hooksActive: true, state: 'running', agentState: 'waiting', seq: 0 }))
+  const hash = (token) => createHash('sha256').update(token).digest('hex')
+  const clients = [
+    { id: 'client-0', tokenSha256: hash(tokens[0]), grants: [{ hostId: hosts[0].id, projectId: projects[0].id, sessionId: sessions[0].id, operations: ['discover', 'register', 'hello', 'result'] }] },
+    { id: 'client-1', tokenSha256: hash(tokens[1]), grants: [{ hostId: hosts[1].id, projectId: projects[1].id, sessionId: sessions[1].id, operations: ['discover', 'register', 'hello', 'result'] }] },
+    // Authenticated create-only client: no terminal grants and no project grant.
+    { id: 'client-create', tokenSha256: hash(tokens[2]), grants: [] }
+  ]
   // Synthetic runtime boundary: never opens SSH, a shell, files or a real agent.
-  const remotes = sessions.map((session) => ({
-    availability: 'connected', sends: 0, tasks: new Map(), mismatch: false,
-    status() { return this.availability },
-    async api(method, path, body) {
-      if (this.availability !== 'connected') throw new Error('secret-network-error-marker')
-      if (path === '/api/access/me') return this.identity || { role: 'legacy' }
-      if (path === '/api/health') return { bridgeHelloVersion: 1 }
-      if (path === '/api/sessions') return [structuredClone(session)]
-      if (path === '/api/bridge/hello') {
-        assert.equal(method, 'POST')
-        assert.equal(body.message, 'Hola')
-        assert.equal(body.sessionId, session.id)
-        assert.equal(body.root, session.root)
-        if (!this.tasks.has(body.taskId)) {
-          this.sends++
-          const now = new Date().toISOString()
-          this.tasks.set(body.taskId, { id: body.taskId, sessionId: session.id, root: session.root, state: 'pending', createdAt: now, updatedAt: now })
+  const remotes = hosts.map((_, index) => {
+    const sessionList = index < sessions.length ? [sessions[index]] : []
+    return {
+      availability: 'connected', sends: 0, creates: 0, tasks: new Map(), creations: new Map(), mismatch: false,
+      legacyHealth: false,
+      status() { return this.availability },
+      async api(method, path, body) {
+        if (this.availability !== 'connected') throw new Error('secret-network-error-marker')
+        if (path === '/api/access/me') return this.identity || { role: 'legacy' }
+        if (path === '/api/health') return { bridgeHelloVersion: 1, bridgeCreateVersion: this.legacyHealth ? 0 : 1 }
+        if (path === '/api/sessions' && method === 'GET') return sessionList.map((item) => structuredClone(item))
+        if (path === '/api/sessions' && method === 'POST') {
+          assert.equal(body.mode, 'normal')
+          assert.equal(typeof body.root, 'string')
+          const key = body.requestKey
+          if (!this.creations.has(key)) {
+            this.creates++
+            const created = { id: createHash('sha256').update(key).digest('hex').slice(0, 32), root: body.root, agent: body.agent, mode: body.mode, hooksActive: true, state: 'running', agentState: 'waiting', seq: 0 }
+            this.creations.set(key, created)
+            sessionList.push(created)
+          }
+          const record = this.creations.get(key)
+          if (record.root !== body.root || record.agent !== body.agent || record.mode !== body.mode) throw new Error('secret-conflict-marker')
+          return structuredClone(record)
         }
-        return structuredClone(this.tasks.get(body.taskId))
+        if (path === '/api/bridge/hello') {
+          assert.equal(method, 'POST')
+          assert.equal(body.message, 'Hola')
+          assert.equal(body.sessionId, sessionList[0].id)
+          assert.equal(body.root, sessionList[0].root)
+          if (!this.tasks.has(body.taskId)) {
+            this.sends++
+            const now = new Date().toISOString()
+            this.tasks.set(body.taskId, { id: body.taskId, sessionId: sessionList[0].id, root: sessionList[0].root, state: 'pending', createdAt: now, updatedAt: now })
+          }
+          return structuredClone(this.tasks.get(body.taskId))
+        }
+        const task = this.tasks.get(path.split('/').at(-1))
+        if (!task) throw new Error('not found')
+        const value = structuredClone(task)
+        if (this.mismatch) value.sessionId = 'f'.repeat(32)
+        return value
       }
-      const task = this.tasks.get(path.split('/').at(-1))
-      if (!task) throw new Error('not found')
-      const value = structuredClone(task)
-      if (this.mismatch) value.sessionId = 'f'.repeat(32)
-      return value
     }
-  }))
+  })
   const connection = (hostId) => {
     const index = hosts.findIndex((host) => host.id === hostId)
     assert.notEqual(index, -1)
@@ -99,9 +123,11 @@ test('MCP HTTP: discover → register → Hola → correlate → disconnect/rest
     other = await connect(url, f.tokens[1], 'another-compatible-client')
     assert.equal(client.getServerVersion().name, 'crow-harness')
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ['crow_context', 'crow_get_result', 'crow_register_orchestrator', 'crow_send_hello'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ['crow_context', 'crow_create_terminal', 'crow_get_result', 'crow_register_orchestrator', 'crow_send_hello'])
     const context = await call(client, 'crow_context')
-    assert.deepEqual(context.hosts.map((host) => host.id), [f.hosts[0].id])
+    // Creation is catalog-wide, so every catalog host is listed for every client;
+    // terminal/orchestrator/request isolation stays grant-scoped below.
+    assert.deepEqual(context.hosts.map((host) => host.id), [f.hosts[0].id, f.hosts[1].id, f.hosts[2].id])
     assert.equal(context.capabilities.arbitraryTasks, false)
     assert.ok(context.hosts[0].observedAt)
     assert.equal(context.hosts[0].bridgeHello, 'available')
@@ -143,7 +169,13 @@ test('MCP HTTP: discover → register → Hola → correlate → disconnect/rest
     f.remotes[0].availability = 'disconnected'
     assert.ok((await client.callTool({ name: 'crow_get_result', arguments: { requestId } })).isError)
     const offline = await call(client, 'crow_context')
-    assert.equal(offline.hosts[0].projects.length, 0)
+    // Offline hosts still list every catalog project; canCreate communicates that
+    // creation is unavailable right now instead of hiding the project.
+    assert.equal(offline.hosts[0].projects.length, 1)
+    assert.equal(offline.hosts[0].projects[0].id, f.projects[0].id)
+    assert.equal(offline.hosts[0].projects[0].canCreate, false)
+    assert.equal(offline.hosts[0].availability, 'disconnected')
+    assert.equal(offline.hosts[0].bridgeCreate, false)
     assert.equal(offline.requests.length, 0)
     const persisted = readFileSync(join(f.dir, 'bridge.json'), 'utf8')
     for (const marker of [...f.tokens, 'private-key-marker', 'secret-network-error-marker']) assert.ok(!persisted.includes(marker))
@@ -269,5 +301,201 @@ test('MCP refuses writable operations for admin read-only foreign terminals', as
     f.sessions[0].readOnly = true
     await assert.rejects(f.service().register(f.clients[0], f.hosts[0].id, f.projects[0].id, f.sessions[0].id), /Terminal no permitida/)
     assert.equal(f.remotes[0].sends, 0)
+  } finally { f.cleanup() }
+})
+
+test('MCP crow_create_terminal creates an empty normal terminal, rejects bad input and stays discoverable', async () => {
+  const f = fixture()
+  const policy = { version: 1, port: await freePort(), clients: f.clients }
+  const gateway = new BridgeGateway(policy, f.service())
+  let client
+  try {
+    const url = await gateway.start()
+    client = await connect(url, f.tokens[2], 'creator-client')
+    const tools = await client.listTools()
+    assert.ok(tools.tools.some((tool) => tool.name === 'crow_create_terminal'))
+    const schema = tools.tools.find((tool) => tool.name === 'crow_create_terminal').inputSchema
+    assert.deepEqual([...schema.required].sort(), ['agent', 'hostId', 'projectId', 'requestKey'])
+    // Strict schema: arbitrary paths, unsupported agents and non-UUID keys are rejected.
+    for (const args of [
+      { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: randomUUID(), root: '/etc' },
+      { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass' },
+      { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'shell', requestKey: randomUUID() },
+      { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'agy', requestKey: randomUUID() },
+      { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: 'not-a-uuid' }
+    ]) assert.ok((await client.callTool({ name: 'crow_create_terminal', arguments: args })).isError)
+    assert.equal(f.remotes[2].creates, 0)
+    // Every catalog project is visible for creation before any terminal exists,
+    // even though this authenticated client has no grants and no project grant.
+    const before = await call(client, 'crow_context')
+    const beforeHost = before.hosts.find((host) => host.id === f.hosts[2].id)
+    const beforeProject = beforeHost.projects.find((project) => project.id === f.projects[2].id)
+    assert.equal(beforeProject.canCreate, true)
+    assert.deepEqual(beforeProject.terminals, [])
+    const requestKey = randomUUID()
+    const created = await call(client, 'crow_create_terminal', { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'codex', requestKey })
+    assert.equal(created.requestKey, requestKey)
+    assert.equal(created.agent, 'codex')
+    assert.equal(created.mode, 'normal')
+    assert.equal(created.state, 'running')
+    assert.equal(f.remotes[2].creates, 1)
+    const retried = await call(client, 'crow_create_terminal', { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'codex', requestKey })
+    assert.equal(retried.sessionId, created.sessionId)
+    assert.equal(f.remotes[2].creates, 1)
+    const context = await call(client, 'crow_context')
+    const project = context.hosts.find((host) => host.id === f.hosts[2].id).projects.find((item) => item.id === f.projects[2].id)
+    assert.equal(project.canCreate, true)
+    assert.equal(project.terminals.length, 1)
+    assert.equal(project.terminals[0].sessionId, created.sessionId)
+    assert.equal(project.terminals[0].created, true)
+    // Until the owner renames it, a created session keeps the explicit fallback.
+    assert.equal(project.terminals[0].name, 'Terminal nueva')
+    assert.ok(!JSON.stringify(context).includes('private-key-marker'))
+  } finally { await client?.close(); await gateway.stop(); f.cleanup() }
+})
+
+test('any authenticated client lists and creates in a catalog project without project grants, rejecting bad destinations before POST', async () => {
+  const f = fixture()
+  try {
+    // Old policy files parse unchanged; creation no longer needs projectGrants,
+    // which stays readable but ignored for authorization.
+    const legacy = policySchema.parse({ version: 1, port: 47500, clients: [f.clients[0]] })
+    assert.deepEqual(legacy.clients[0].projectGrants, [])
+    assert.ok(!JSON.stringify(legacy.clients[0].grants).includes('createTerminal'))
+    // A client with no grants at all is a valid create-only client.
+    const bare = policySchema.parse({ version: 1, port: 47500, clients: [{ id: 'bare', tokenSha256: f.clients[0].tokenSha256, grants: [] }] })
+    assert.deepEqual(bare.clients[0].grants, [])
+    assert.deepEqual(bare.clients[0].projectGrants, [])
+    const service = f.service()
+    // No project grant: a client granted only on host 0 still lists and creates
+    // in host 2, a catalog host/project it was never granted.
+    const listed = await service.context(f.clients[0])
+    const host = listed.hosts.find((item) => item.id === f.hosts[2].id)
+    assert.equal(host.projects.find((project) => project.id === f.projects[2].id).canCreate, true)
+    const created = await service.createTerminal(f.clients[0], f.hosts[2].id, f.projects[2].id, 'claude', randomUUID())
+    assert.ok(created.sessionId)
+    assert.equal(f.remotes[2].creates, 1)
+    // Unknown host, unknown project, mismatched host/project and unsupported
+    // agent are all rejected before any session POST.
+    await assert.rejects(service.createTerminal(f.clients[2], randomUUID(), f.projects[2].id, 'claude', randomUUID()), /no autorizado/)
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, randomUUID(), 'claude', randomUUID()), /no autorizado/)
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[0].id, f.projects[2].id, 'claude', randomUUID()), /no autorizado/)
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[0].id, 'claude', randomUUID()), /no autorizado/)
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'shell', randomUUID()), /Claude o Codex/)
+    assert.equal(f.remotes[2].creates, 1)
+    assert.equal(f.remotes[0].creates, 0)
+  } finally { f.cleanup() }
+})
+
+test('legacy runtime without bridgeCreate support lists projects with canCreate false and gets zero POSTs', async () => {
+  const f = fixture()
+  try {
+    const remote = f.remotes[2], service = f.service(), client = f.clients[2]
+    remote.legacyHealth = true
+    // A second catalog project on the same host proves the whole catalog is
+    // listed, not only a single project.
+    const extra = f.workspace.saveProject({ hostId: f.hosts[2].id, name: 'Probe extra', root: '/empty-test-extra' }).projects.at(-1)
+    // Context reports the runtime capability as false and never as creatable for
+    // that host, while the catalog projects stay listed and other catalog hosts
+    // stay creatable.
+    const context = await service.context(client)
+    const host = context.hosts.find((item) => item.id === f.hosts[2].id)
+    assert.equal(host.bridgeCreate, false)
+    // The legacy runtime still lists its known catalog projects; the runtime
+    // readiness is communicated by canCreate/bridgeCreate, not by hiding them.
+    assert.deepEqual(host.projects.map((project) => project.id).sort(), [f.projects[2].id, extra.id].sort())
+    for (const project of host.projects) assert.equal(project.canCreate, false)
+    assert.equal(remote.creates, 0)
+    // An attempted create fails with a clear error and zero session POSTs.
+    await assert.rejects(service.createTerminal(client, f.hosts[2].id, f.projects[2].id, 'claude', randomUUID()), /no soporta/)
+    assert.equal(remote.creates, 0)
+    // No prepared intent leaks into the registry after the failed attempt.
+    assert.equal(new BridgeRegistry(f.dir).snapshot().creations.length, 0)
+    // With support back, context reports every project as creatable again.
+    remote.legacyHealth = false
+    const healthy = await service.context(client)
+    const healthyHost = healthy.hosts.find((item) => item.id === f.hosts[2].id)
+    assert.equal(healthyHost.bridgeCreate, true)
+    for (const project of healthyHost.projects) assert.equal(project.canCreate, true)
+  } finally { f.cleanup() }
+})
+
+test('creation rejects offline hosts, changed identities and changed project roots', async () => {
+  const f = fixture()
+  try {
+    const service = f.service(), remote = f.remotes[2]
+    remote.availability = 'disconnected'
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', randomUUID()), /identidad actual/)
+    assert.equal(remote.creates, 0)
+    remote.availability = 'connected'
+    remote.identity = { role: 'member', id: 'actor-a' }
+    const key = randomUUID()
+    assert.ok((await service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', key)).sessionId)
+    // Another Crow identity must not reuse the prepared creation.
+    remote.identity = { role: 'member', id: 'actor-b' }
+    await assert.rejects(f.service().createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', key), /identidad Crow/)
+    // Changing the saved project root invalidates the retry instead of creating elsewhere.
+    remote.identity = { role: 'member', id: 'actor-a' }
+    f.workspace.saveProject({ ...f.projects[2], root: '/changed-test-2' })
+    await assert.rejects(f.service().createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', key), /Conflicto de idempotencia/)
+    assert.equal(remote.creates, 1)
+  } finally { f.cleanup() }
+})
+
+test('a runtime returning a different agent than the requested one is rejected', async () => {
+  const f = fixture()
+  try {
+    const remote = f.remotes[2], original = remote.api.bind(remote)
+    remote.api = async (...args) => {
+      const value = await original(...args)
+      // A runtime that spawned a different agent reports it both in the
+      // creation response and in the session list: neither may contradict
+      // the agent anchored in the durable record.
+      if (args[0] === 'POST') return { ...value, agent: 'claude' } // Different from requested codex
+      if (args[0] === 'GET' && args[1] === '/api/sessions') return value.map((item) => ({ ...item, agent: 'claude' }))
+      return value
+    }
+    const key = randomUUID()
+    await assert.rejects(f.service().createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'codex', key), /no se pudo verificar/)
+    assert.equal(f.remotes[2].creates, 1)
+    // A retry with the same key cannot bypass verification by replay.
+    await assert.rejects(f.service().createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'codex', key), /no se pudo verificar/)
+    assert.equal(f.remotes[2].creates, 1)
+  } finally { f.cleanup() }
+})
+
+test('creation idempotency survives lost responses, restart and concurrent retries', async () => {
+  const f = fixture()
+  try {
+    let service = f.service()
+    const remote = f.remotes[2], original = remote.api.bind(remote)
+    remote.api = async (...args) => {
+      const response = await original(...args)
+      if (args[0] === 'POST') throw new Error('secret-network-error-marker')
+      return response
+    }
+    const key = randomUUID()
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', key))
+    assert.equal(remote.creates, 1)
+    // A restarted Crow MCP retries the durable key instead of spawning a second terminal.
+    service = f.service()
+    remote.api = original
+    const recovered = await service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', key)
+    assert.equal(remote.creates, 1)
+    assert.ok(recovered.sessionId)
+    // Same key with a different payload conflicts, it never creates a new terminal.
+    await assert.rejects(service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'codex', key), /Conflicto de idempotencia/)
+    // Concurrent duplicate retries share one terminal and one server key.
+    // Each parallel caller re-proves bridgeCreateVersion via /api/health, but
+    // the session POST itself stays deduplicated to one.
+    const concurrent = randomUUID()
+    const [a, b] = await Promise.all([
+      service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', concurrent),
+      service.createTerminal(f.clients[2], f.hosts[2].id, f.projects[2].id, 'claude', concurrent)
+    ])
+    assert.equal(a.sessionId, b.sessionId)
+    assert.equal(remote.creates, 2)
+    const persisted = readFileSync(join(f.dir, 'bridge.json'), 'utf8')
+    for (const marker of [...f.tokens, 'private-key-marker', 'secret-network-error-marker']) assert.ok(!persisted.includes(marker))
   } finally { f.cleanup() }
 })

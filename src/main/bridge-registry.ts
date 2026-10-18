@@ -21,12 +21,24 @@ const request = z.object({
   createdAt: z.string().datetime(), observedAt: z.string().datetime().optional(),
   remoteUpdatedAt: z.string().datetime().optional(), result: z.literal('Hola').optional()
 }).strict().refine((item) => (item.state === 'completed') === (item.result === 'Hola'), 'Invalid stored result')
+// Durable idempotency record for created terminals. `serverKey` is the stable
+// key sent to crowd so a retry after a lost response returns the same session.
+const creation = z.object({
+  requestKey: id, clientId: z.string(), serverKey: sessionId,
+  hostId: id, hostRevision: z.string().regex(/^[0-9a-f]{64}$/), projectId: id,
+  root: z.string().startsWith('/'), agent: z.enum(['claude', 'codex']),
+  actorId: z.string().max(200).optional(), sessionId: sessionId.optional(),
+  state: z.enum(['prepared', 'created']), createdAt: z.string().datetime(),
+  observedAt: z.string().datetime().optional()
+}).strict().refine((item) => (item.state === 'created') === (item.sessionId !== undefined), 'Invalid creation state')
 const registry = z.object({
-  version: z.literal(1), instanceId: id, orchestrators: z.array(binding).max(100), requests: z.array(request).max(1000)
+  version: z.literal(1), instanceId: id, orchestrators: z.array(binding).max(100), requests: z.array(request).max(1000),
+  creations: z.array(creation).max(500).default([])
 }).strict().superRefine((value, ctx) => {
   const bindings = new Set(value.orchestrators.map((item) => item.id))
   if (bindings.size !== value.orchestrators.length || new Set(value.orchestrators.map((item) => item.hostId)).size !== value.orchestrators.length ||
-      new Set(value.requests.map((item) => JSON.stringify([item.clientId, item.requestId]))).size !== value.requests.length || new Set(value.requests.map((item) => item.taskId)).size !== value.requests.length) {
+      new Set(value.requests.map((item) => JSON.stringify([item.clientId, item.requestId]))).size !== value.requests.length || new Set(value.requests.map((item) => item.taskId)).size !== value.requests.length ||
+      new Set(value.creations.map((item) => JSON.stringify([item.clientId, item.requestKey]))).size !== value.creations.length || new Set(value.creations.map((item) => item.serverKey)).size !== value.creations.length) {
     ctx.addIssue({ code: 'custom', message: 'Duplicate bridge identity' })
   }
   for (const item of value.requests) {
@@ -38,6 +50,7 @@ const registry = z.object({
 })
 export type Orchestrator = z.infer<typeof binding>
 export type BridgeRequest = z.infer<typeof request>
+export type Creation = z.infer<typeof creation>
 
 export class BridgeRegistry {
   private readonly path: string
@@ -48,7 +61,7 @@ export class BridgeRegistry {
     this.path = join(directory, 'bridge.json')
     this.state = existsSync(this.path)
       ? registry.parse(JSON.parse(readFileSync(this.path, 'utf8')))
-      : { version: 1, instanceId: randomUUID(), orchestrators: [], requests: [] }
+      : { version: 1, instanceId: randomUUID(), orchestrators: [], requests: [], creations: [] }
     // Fail closed on corrupt storage: resetting would lose deduplication.
     if (!existsSync(this.path)) this.write(this.state)
   }
@@ -76,6 +89,21 @@ export class BridgeRegistry {
     // Concurrent polls cannot roll back a durable final result or a newer snapshot.
     if (old.state === 'completed' || old.state === 'interrupted' || (old.remoteUpdatedAt && value.remoteUpdatedAt && old.remoteUpdatedAt > value.remoteUpdatedAt)) return
     this.write({ ...this.state, requests: this.state.requests.map((item) => item === old ? request.parse(value) : item) })
+  }
+
+  findCreation(clientId: string, requestKey: string): Creation | undefined {
+    const item = this.state.creations.find((item) => item.clientId === clientId && item.requestKey === requestKey)
+    return item ? structuredClone(item) : undefined
+  }
+
+  prepareCreation(value: Creation): void {
+    this.write({ ...this.state, creations: [...this.state.creations, creation.parse(value)] })
+  }
+
+  updateCreation(value: Creation): void {
+    const old = this.state.creations.find((item) => item.clientId === value.clientId && item.requestKey === value.requestKey)
+    if (!old) throw new Error('Creación desconocida.')
+    this.write({ ...this.state, creations: this.state.creations.map((item) => item === old ? creation.parse(value) : item) })
   }
 
   private write(next: z.infer<typeof registry>): void {

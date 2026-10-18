@@ -53,6 +53,7 @@ type App struct {
 	eventMessages       map[string]eventMessage
 	browsers            map[string]*browser
 	bridge              *bridge.Store
+	sessionCreates      *sessionCreateStore
 	mobile              *mobileHostState
 	chat                *chatStore
 }
@@ -128,6 +129,13 @@ func Run() error {
 		// terminal/file/browser service. Never reset deduplication silently.
 		log.Print("crowd bridge unavailable: mailbox requires owner review")
 		a.bridge = nil
+	}
+	a.sessionCreates, err = openSessionCreateStore(dir)
+	if err != nil {
+		// Corrupt creation registry disables only idempotent MCP creation; the
+		// tool fails closed instead of risking a duplicate terminal.
+		log.Print("crowd idempotent creation unavailable: registry requires owner review")
+		a.sessionCreates = nil
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
@@ -213,7 +221,14 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 	if a.bridge != nil {
 		bridgeVersion = 1
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1, "bridgeHelloVersion": bridgeVersion})
+	// bridgeCreateVersion advertises durable idempotent session creation. Older
+	// crowd builds ignore the requestKey field and would spawn a duplicate after
+	// a lost response, so clients must require this capability before POSTing.
+	createVersion := 0
+	if a.sessionCreates != nil {
+		createVersion = 1
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "platform": "linux", "version": 1, "bridgeHelloVersion": bridgeVersion, "bridgeCreateVersion": createVersion})
 }
 
 func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -222,11 +237,28 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Agent string `json:"agent"`
-		Mode  string `json:"mode"`
-		Root  string `json:"root"`
+		Agent      string `json:"agent"`
+		Mode       string `json:"mode"`
+		Root       string `json:"root"`
+		RequestKey string `json:"requestKey"`
 	}
 	if !requestJSON(w, r, &body) {
+		return
+	}
+	if body.RequestKey != "" {
+		info, err := a.createSessionIdempotent(body.RequestKey, body.Agent, body.Mode, body.Root, requestPrincipal(r))
+		if err != nil {
+			status := http.StatusBadRequest
+			switch {
+			case errors.Is(err, errCreateConflict), errors.Is(err, errCreateUncertain):
+				status = http.StatusConflict
+			case errors.Is(err, errCreateUnavailable), errors.Is(err, errCreateCapacity):
+				status = http.StatusServiceUnavailable
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		jsonResponse(w, http.StatusCreated, info)
 		return
 	}
 	info, err := a.startSessionOwned(body.Agent, body.Mode, body.Root, requestPrincipal(r))

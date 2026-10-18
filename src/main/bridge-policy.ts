@@ -10,12 +10,24 @@ const grant = z.object({
   operations: z.array(z.enum(['discover', 'register', 'hello', 'result'])).min(1).max(4),
   priority: z.number().int().min(0).max(100).default(50)
 }).strict()
+// Deprecated compatibility field. Creation no longer needs a per-project
+// authorization: any bearer-authenticated client configured by the owner may
+// create in any project already present in Crow's catalog. `projectGrants` is
+// still parsed so older owner policy files keep loading, but it is IGNORED for
+// creation and must never be required; the grants above stay independent and
+// only govern discover/register/hello/result on existing terminals.
+const projectGrant = z.object({
+  hostId: id, projectId: id,
+  operations: z.array(z.literal('createTerminal')).length(1),
+  priority: z.number().int().min(0).max(100).default(50)
+}).strict()
 export const policySchema = z.object({
   version: z.literal(1), port: z.number().int().min(1024).max(65535),
   clients: z.array(z.object({
     id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
     tokenSha256: z.string().regex(/^[0-9a-f]{64}$/),
-    grants: z.array(grant).min(1).max(100),
+    grants: z.array(grant).max(100).default([]),
+    projectGrants: z.array(projectGrant).max(100).default([]),
     preferences: z.object({ replyLanguage: z.enum(['es', 'en']).default('es'), pollingSeconds: z.number().int().min(5).max(60).default(10) }).strict().default({})
   }).strict()).min(1).max(20)
 }).strict().superRefine((value, ctx) => {
