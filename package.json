@@ -1,6 +1,6 @@
 {
   "name": "crow-harness",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "private": true,
   "description": "A focused Windows workspace for persistent remote coding agents",
   "repository": {
