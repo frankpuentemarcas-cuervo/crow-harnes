@@ -19,8 +19,11 @@ const server = await createServer({
   root: process.cwd(),
   resolve: { dedupe: ['react', 'react-dom'] },
   plugins: [react()],
-  // Use a unique strict port so Electron cannot reconnect to a stale Vite server/cache.
-  server: { host: '127.0.0.1', port: 42000 + (process.pid % 10000), strictPort: true, watch: { ignored: ['**/android/**', '**/dist/**'] } },
+  // Use Vite's normal localhost dev port (5173) with strictPort disabled, instead
+  // of deriving a fixed pid-based port that can land in Windows' excluded high-port
+  // ranges and fail with EACCES on hosted runners. On a collision Vite increments to
+  // the next free port. Electron dials the actual bound port from httpServer.address().
+  server: { host: '127.0.0.1', port: 5173, strictPort: false, watch: { ignored: ['**/android/**', '**/dist/**'] } },
 })
 
 await server.listen()
