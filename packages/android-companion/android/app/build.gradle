@@ -9,7 +9,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode = Integer.parseInt((project.findProperty('crowVersionCode') ?: '27').toString())
-        versionName = (project.findProperty('crowVersionName') ?: '0.1.68').toString()
+        versionName = (project.findProperty('crowVersionName') ?: '0.1.69').toString()
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
