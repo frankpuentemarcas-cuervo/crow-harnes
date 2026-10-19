@@ -31,11 +31,15 @@ function fixture() {
   const sessions = [0, 1].map((index) => ({ id: String(index + 1).repeat(32), root: projects[index].root, agent: 'claude', mode: 'normal', hooksActive: true, state: 'running', agentState: 'waiting', seq: 0 }))
   const hash = (token) => createHash('sha256').update(token).digest('hex')
   const clients = [
+    // These grant clients OMIT `allowBypass`, so once parsed against the policy
+    // schema they model the new default: bypass creation enabled for every
+    // catalog host whose runtime proves the capability.
     { id: 'client-0', tokenSha256: hash(tokens[0]), grants: [{ hostId: hosts[0].id, projectId: projects[0].id, sessionId: sessions[0].id, operations: ['discover', 'register', 'hello', 'result', 'rename', 'chat'] }] },
     { id: 'client-1', tokenSha256: hash(tokens[1]), grants: [{ hostId: hosts[1].id, projectId: projects[1].id, sessionId: sessions[1].id, operations: ['discover', 'register', 'hello', 'result'] }] },
     // Authenticated create-only client: no terminal grants and no project grant.
-    { id: 'client-create', tokenSha256: hash(tokens[2]), grants: [] },
-    // Owner opted this client into bypass creation.
+    // It explicitly OPTS OUT of bypass creation, so normal stays its only mode.
+    { id: 'client-create', tokenSha256: hash(tokens[2]), grants: [], allowBypass: false },
+    // Owner explicitly opted this client into bypass creation.
     { id: 'client-bypass', tokenSha256: hash(tokens[3]), grants: [], allowBypass: true }
   ]
   // Synthetic runtime boundary: never opens SSH, a shell, files or a real agent.
@@ -938,24 +942,46 @@ test('rename and chat fail closed when the Crow identity changes during the oper
   } finally { f.cleanup() }
 })
 
-test('crow_create_terminal bypass requires confirmBypass, owner policy, capability and idempotent mode', async () => {
+test('crow_create_terminal bypass needs confirmBypass, an enabled client flag (default on), runtime capability and idempotent mode', async () => {
   const f = fixture()
   const policy = { version: 1, port: await freePort(), clients: f.clients }
   const gateway = new BridgeGateway(policy, f.service())
-  let client, bypass
+  let client, bypass, defaultAllowed
   try {
     const url = await gateway.start()
     client = await connect(url, f.tokens[2], 'create-normal-client')
     bypass = await connect(url, f.tokens[3], 'create-bypass-client')
-    // Bypass needs both the explicit per-call confirmation and the owner policy.
+    // This client OMITS `allowBypass`, so the policy default enables bypass for it.
+    defaultAllowed = await connect(url, f.tokens[0], 'create-default-client')
+    // Explicit opt-out: bypass is refused even with the per-call confirmation.
     assert.ok((await client.callTool({ name: 'crow_create_terminal', arguments: { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass', confirmBypass: true } })).isError)
+    // Every bypass call still needs the explicit per-call confirmation, including
+    // for a client enabled by the policy default.
+    assert.ok((await defaultAllowed.callTool({ name: 'crow_create_terminal', arguments: { hostId: f.hosts[0].id, projectId: f.projects[0].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass' } })).isError)
     assert.ok((await bypass.callTool({ name: 'crow_create_terminal', arguments: { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass' } })).isError)
     assert.equal(f.remotes[2].creates, 0)
-    // A runtime without the separate bypass capability receives zero bypass POSTs.
+    assert.equal(f.remotes[0].creates, 0)
+    // A runtime without the separate bypass capability receives zero bypass POSTs,
+    // even for a default-enabled client that confirms.
     f.remotes[2].bypassCapability = false
     assert.ok((await bypass.callTool({ name: 'crow_create_terminal', arguments: { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass', confirmBypass: true } })).isError)
+    f.remotes[0].bypassCapability = false
+    assert.ok((await defaultAllowed.callTool({ name: 'crow_create_terminal', arguments: { hostId: f.hosts[0].id, projectId: f.projects[0].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass', confirmBypass: true } })).isError)
     assert.equal(f.remotes[2].creates, 0)
+    assert.equal(f.remotes[0].creates, 0)
     f.remotes[2].bypassCapability = true
+    f.remotes[0].bypassCapability = true
+    // The policy default (omitted `allowBypass`) permits bypass once the runtime
+    // proves the capability and the caller confirms, and the context flags expose
+    // that default-enabled state for the capable host/project.
+    const defaultCreated = await call(defaultAllowed, 'crow_create_terminal', { hostId: f.hosts[0].id, projectId: f.projects[0].id, agent: 'claude', requestKey: randomUUID(), mode: 'bypass', confirmBypass: true })
+    assert.equal(defaultCreated.mode, 'bypass')
+    assert.equal(f.remotes[0].creates, 1)
+    const defaultContext = await call(defaultAllowed, 'crow_context')
+    assert.equal(defaultContext.capabilities.createBypass, true)
+    const defaultHost = defaultContext.hosts.find((item) => item.id === f.hosts[0].id)
+    assert.equal(defaultHost.bridgeCreateBypass, true)
+    assert.equal(defaultHost.projects.find((item) => item.id === f.projects[0].id).canCreateBypass, true)
     const requestKey = randomUUID()
     const created = await call(bypass, 'crow_create_terminal', { hostId: f.hosts[2].id, projectId: f.projects[2].id, agent: 'claude', requestKey, mode: 'bypass', confirmBypass: true })
     assert.equal(created.mode, 'bypass')
@@ -979,9 +1005,12 @@ test('crow_create_terminal bypass requires confirmBypass, owner policy, capabili
     const normalContext = await call(client, 'crow_context')
     assert.equal(normalContext.capabilities.createBypass, false)
     assert.equal(normalContext.hosts.find((item) => item.id === f.hosts[2].id).bridgeCreateBypass, false)
-    // Legacy default: an old policy file parses with allowBypass false.
+    // A policy file that omits `allowBypass` now defaults TRUE: the flag is per
+    // client and enables bypass creation in every capable host. An explicit false
+    // survives parsing as the owner opt-out.
+    assert.equal(policySchema.parse({ version: 1, port: 47600, clients: [f.clients[0]] }).clients[0].allowBypass, true)
     assert.equal(policySchema.parse({ version: 1, port: 47600, clients: [f.clients[2]] }).clients[0].allowBypass, false)
-  } finally { await client?.close(); await bypass?.close(); await gateway.stop(); f.cleanup() }
+  } finally { await client?.close(); await bypass?.close(); await defaultAllowed?.close(); await gateway.stop(); f.cleanup() }
 })
 
 test('legacy runtime without creation support keeps normal at version 1 and refuses bypass with zero POSTs', async () => {

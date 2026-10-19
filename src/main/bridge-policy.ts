@@ -32,10 +32,12 @@ export const policySchema = z.object({
     tokenSha256: z.string().regex(/^[0-9a-f]{64}$/),
     grants: z.array(grant).max(100).default([]),
     projectGrants: z.array(projectGrant).max(100).default([]),
-    // Owner-controlled opt-in for creating bypass-permission terminals. Default
-    // false: existing clients keep normal-only creation and every bypass call
-    // still requires an explicit per-call confirmation.
-    allowBypass: z.boolean().default(false),
+    // Per-client enablement for creating bypass-permission terminals. Default
+    // true: an omitted value enables bypass creation in EVERY catalog host whose
+    // runtime proves the bypass capability, because this flag is per client and
+    // not per host. Every bypass call still requires an explicit per-call
+    // confirmation. Set `allowBypass: false` explicitly to opt this client out.
+    allowBypass: z.boolean().default(true),
     preferences: z.object({ replyLanguage: z.enum(['es', 'en']).default('es'), pollingSeconds: z.number().int().min(5).max(60).default(10) }).strict().default({})
   }).strict()).min(1).max(20)
 }).strict().superRefine((value, ctx) => {
